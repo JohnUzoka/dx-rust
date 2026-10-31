@@ -1,0 +1,17 @@
+# The Switch build's crate patches beyond bevy-horizon's Bevy 0.19 set; switch/build.sh passes both to cargo.
+# Paths are relative to this repository (cargo resolves a config file's paths from the parent of its folder),
+# with bevy-horizon checked out next to it.
+#
+# A patch replaces only the crates.io version it's semver-compatible with, and only once Cargo.lock locks the
+# patch's own version; switch/build.sh stops if the lock has moved away from one of these.
+
+[patch.crates-io]
+# imsim-audio and haptics.rs play through cpal 0.15, not the cpal 0.17 of Bevy 0.19's set: bevy-horizon's
+# cpal 0.15.3 with its Horizon host on libnx's audio renderer (made for its Bevy 0.18 set).
+cpal015 = { path = "../bevy-horizon/patches/bevy-0.18/cpal", package = "cpal" }
+# gilrs-core 0.6.8 (gilrs 0.11) with a Horizon backend: libnx's default npad, and rumble on both of its
+# vibration devices. Copied from the horizon port's third_party/gilrs-core; gamepad.rs reads the pad through it.
+gilrs-core = { path = "switch/patches/gilrs-core" }
+# hidapi 2.6.7, whose build script stops on an OS it has no backend for. This copy builds on Horizon and
+# reports that there are no HID devices (src/horizon.rs); dualsense.rs then runs without a DualSense.
+hidapi = { path = "switch/patches/hidapi" }

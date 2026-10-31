@@ -549,7 +549,10 @@ pub fn make_player(level: &Level, (params, eye_height, bob): (MoveParams, f64, f
     }
 }
 
+mod horizon;
+
 fn main() {
+    horizon::init();
     prof::init();
     // DXT1 textures go to the GPU compressed (desktop GPUs and the Steam Deck take BC formats; checked again once
     // the render device exists). DXVIEW_NO_BC1 decodes them as before.
@@ -561,7 +564,8 @@ fn main() {
         .filter(|a| !a.starts_with("--"))
         .cloned()
         .or_else(|| {
-            let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+            // Beside the exe, or in the working folder where the exe's path is unknown (the Switch).
+            let dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())).unwrap_or_default();
             std::fs::read_to_string(dir.join("launcher.txt"))
                 .ok()?
                 .lines()
@@ -677,6 +681,7 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(horizon::SwitchPlugin)
         .insert_resource(ClearColor(Color::srgb(0.05, 0.07, 0.12)))
         // A command aimed at an entity that went away the same frame (a pawn destroyed by the mission script,
         // an effect that despawned itself) is logged, never a crash.

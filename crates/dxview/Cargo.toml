@@ -8,7 +8,7 @@ version.workspace = true
 winresource = "0.1"
 
 [dependencies]
-bevy = { version = "0.19.1", default-features = false, features = ["3d", "ui", "experimental_pbr_pcss"] }
+bevy = { version = "0.19.1", default-features = false }
 dx-level = { path = "../dx-level" }
 imsim-core = { path = "../imsim-core" }
 unreal-pkg = { path = "../unreal-pkg" }
@@ -31,3 +31,20 @@ spans = ["bevy/trace"]
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
 raw-window-handle = "0.6"
+
+# Bevy's features are per platform. Its "3d" and "ui" collections bring default_platform (winit, gilrs), which has
+# no Switch backend, so the Switch build names the same features without it and bevy_horizon's HorizonPlugin
+# stands in (src/horizon.rs). bevy stays in [dependencies] too: Bevy's derive macros look for it only there.
+[target.'cfg(not(target_os = "horizon"))'.dependencies]
+bevy = { version = "0.19.1", default-features = false, features = ["3d", "ui", "experimental_pbr_pcss"] }
+
+# Nintendo Switch: bevy-horizon checked out next to this repository; switch/build.sh builds the NRO.
+[target.'cfg(target_os = "horizon")'.dependencies]
+bevy = { version = "0.19.1", default-features = false, features = [
+    # "3d" and "ui" without default_platform
+    "default_app", "3d_bevy_render", "ui_api", "ui_bevy_render", "bevy_ui_widgets", "scene", "picking",
+    # the parts of default_platform that work on Horizon
+    "std", "multi_threaded", "default_font",
+    "experimental_pbr_pcss",
+] }
+bevy_horizon = { path = "../../../bevy-horizon/crates/bevy_horizon", features = ["vulkan", "render", "top_down_alloc"] }
