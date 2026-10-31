@@ -11,7 +11,9 @@
 #   dxview.nro
 #   launcher.txt   GamePath=sdmc:/switch/dxview/DeusEx
 #   DeusEx/        System/, Maps/, Textures/, Sounds/ and Music/ from your own Deus Ex install
-# The game writes settings.txt, keybinds.txt, session.txt and Save/ there, bevy-horizon log.txt and panic.txt.
+#   options.txt    optional: profiling and A/B switches (template: switch/options.txt)
+# The game writes settings.txt, keybinds.txt, session.txt and Save/ there, bevy-horizon log.txt, panic.txt and,
+# when profiling, cpu-profile.txt.
 # Start it with a game's memory (a forwarder, or hold R while starting a game), not from the album.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

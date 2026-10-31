@@ -1,0 +1,19 @@
+# DX RUST on the Switch: copy this beside dxview.nro as sdmc:/switch/dxview/options.txt.
+# One option per line; '#' starts a comment. log.txt echoes what was read: "[DX RUST] options.txt: ...".
+# crates/dxview/src/horizon.rs says what each option does.
+#
+# Change one thing per run, and play the same route each time: 30 s in the main menu, New Game, then on
+# Liberty Island 30 s standing at the start and 60 s walking towards the statue. Keep log.txt, cpu-profile.txt
+# and the ELF of the same build (target/aarch64-nintendo-horizon/release/dxview).
+
+# Profiling, on in every run so they compare: the game's report every 5 s in log.txt (per-system and per-pass
+# times, scene counts, uploads a frame) and bevy-horizon's sampling profiler (cpu-profile.txt beside log.txt).
+env DXVIEW_PROF=1
+env BEVY_HORIZON_CPU_PROFILE=1
+
+# A/B switches, one per run after the baseline:
+# single_threaded
+# gpu_clocks=fast
+# env DXVIEW_NO_PREFETCH=1
+# env BH_THREAD_CORES=any
+# env BH_ROBUST_BUFFER_ACCESS=0
