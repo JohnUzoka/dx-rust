@@ -133,6 +133,22 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("RealtimeShadows", 0.0),
     ("ModernAim", 0.0),
     ("EnhancedFX", 0.0),
+    ("SkeletalCharacters", 0.0),
+    ("Ragdolls", 0.0),
+    ("FluidBlood", 0.0),
+    ("RemasteredLighting", 0.0),
+    ("ReliefMaps", 2.0),
+    ("WorkerThreads", 0.0),
+    ("MaterialSpecular", 1.0),
+    ("EmissiveSurfaces", 0.0),
+    ("RemasterGain", 1.0),
+    ("RemasterAmbient", 0.0),
+    ("AugGlows", 0.0),
+    ("CoatCloth", 0.0),
+    ("DiegeticHealing", 0.0),
+    ("FirstPersonBody", 0.0),
+    ("HurtPoses", 0.0),
+    ("BodyWounds", 0.0),
     ("Elements", 0.0),
     ("Mantling", 0.0),
     ("CarryCover", 0.0),
@@ -193,6 +209,10 @@ pub const DEFAULTS: &[(&str, f32)] = &[
 ];
 
 fn path() -> std::path::PathBuf {
+    // DXVIEW_SETTINGS=<file>: another settings file (profile runs with the defaults use an empty one).
+    if let Some(p) = std::env::var_os("DXVIEW_SETTINGS") {
+        return p.into();
+    }
     std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|p| p.join("settings.txt")))

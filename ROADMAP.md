@@ -63,6 +63,24 @@ GPU, paged GPU vertex animation, weapons prepared at map load so drawing one nev
 re-uploaded every frame (shiny surfaces, relit decorations, the weapon in hand). Since then: the inventory, persona and
 menu screens draw at 1x and copy their unchanging art (about a third of the frame time they used), fire textures
 only animate while seen and step on all cores, and rain drops find their landing spots per cell instead of per drop.
+Latest pass (measured on an RTX 3050 with every Modern option and all the mods): the frame was held up by the
+render thread, which drew 29 views a frame - five cameras and 24 shadow-map faces. Real-time shadows now use one
+aimed spot view per light, and only for lights with someone in them, which took the frame from about 30 ms to 21 ms
+(32 to 47 fps). Rain is built on the GPU from a small data texture (it re-uploaded about 2.5 MB of mesh a frame),
+and water reflections redraw every other frame.
+CPU pass (November 2026, after a report of poor frame rates on a Xeon E5-2680 v4 with an RTX 2070, default settings):
+the GPU was nearly idle; the main thread and the render thread each took 12-14 ms on a Ryzen 5 3600, so slower
+cores fell under 60 fps and VSync halved that to 30. Fixed: collision tests skip what they can't reach (the AI cost a
+third of before), the ragdoll physics sleeps while nothing falls, static meshes (water, the open sea, level surfaces)
+no longer have their bounds recomputed every frame because their materials animate (1.6 million vertices a frame),
+the sky room is drawn by the world camera instead of its own, the worker pool stops at 10 threads on many-core CPUs,
+render passes stay on the render thread, unused Bevy plugins are off, the depth pre-pass waits until Modern Water needs it,
+and the release build is optimised as one program. On the Ryzen 5 3600 the main thread went from 13.9 to
+7.9 ms a frame and the render thread from about 12 to 9.4 ms; default settings run at 10.2 ms (98 fps, was 72 fps
+before the last fixes). Modern with every option and mod: about 24 ms (41 fps), all of it the render thread (pass
+recording and Bevy's per-view preparation). Next: Bevy's per-view render
+bookkeeping (bind groups and buffers rebuilt each frame), the weapon view's own pass, and the Update schedule's
+scheduling overhead (about 160 small systems).
 
 ### 5. Release polish
 - Steam Deck tuning at 800p / 60 fps.
@@ -158,41 +176,56 @@ Shadows with contact hardening.
     over their heads. Still to come from GMDX: smarter strafing, melee bashes, NPC grenades, wider alarms.
 39. HD textures and models (done with the HDTP, New Vision and Helios mods - Helios dresses the people, HDTP the
     items - switchable in Settings), PBR and smoother animation.
-40. JC's body visible in first person.
-41. Diegetic damage, healing and augs shown on the body.
-42. Ragdolls and posable models.
-43. Cloth and wetness.
+40. JC's body visible in first person (done in code, needs Skeletal Characters): look down to see his stomach,
+    coat and legs, as Half-Life mods show the body; the head, arms and chest are left out of it (the view model's
+    arms are the arms) and it is hidden while crouched.
+41. Diegetic damage, healing and augs shown on the body (done in code): wound marks that ride the bone they hit,
+    hurt poses (a hanging arm, a stiff-legged limp), aug glows where the augs sit, a healing glow and screen pulse,
+    and diegetic healing - hold a medkit, look at the limb to treat and use it there (anywhere else treats the head).
+42. Ragdolls (done in code, with the Avian physics crate): the killed and knocked out go limp at once, pushed by the
+    hit and carried by their run, on 11 jointed capsules against the level's real geometry; frozen once still.
+    JC falls the same way when he dies.
+    Explosions still gib, now with Fluid Blood: droplets that fly and splatter, blood that runs down walls and
+    pools spreading under the dead. Still to come: posable models.
+43. Cloth (done in code): coat tails ripple and settle around the legs (damped spring bones held within a few
+    degrees of the animation and pushed out of the legs). Wet bodies in the rain were tried and dropped (everyone
+    came out shiny and smooth).
 44. Computers shown in the world while it keeps running (done: Terminals In The World - the view moves in to the
     monitor, the security terminal unfolds, the original interface shows on the screen and the mouse works on it;
     keypads are pressed button by button with a small display above; move the mouse away to step back).
-45. More NPCs and livelier locations.
 46. **Mod support** (done in code; being tested): the Lay D Denton Project, HDTP, New Vision, Visible
     Attachments, Augmentique (outfits and weapon skins) and GMDX: Augmented Edition (perks, bugfixes and
     quality-of-life options), any number at once from the launcher's Mods page.
-47. No loading screens.
 48. Co-op and deathmatch multiplayer.
-49. **Remastered lighting** (an Enhancement, off by default; the look of the cancelled 2026 remaster's trailer):
-    the baked lightmaps dropped and every level surface lit in real time by the map's own Light actors (the
-    nearest ones with shadows, the rest unshadowed), so lamps light the walls and floors with real falloff and the
-    existing real-time shadows, soft shadows, ambient occlusion and bloom all apply to the lit result. Needs a
-    per-zone ambient term and a global gain tuned by walking the maps, since the editor's light placements were
-    tuned for Unreal's baker, with per-map overrides where a room comes out wrong. The original lightmap renderer
-    stays the default.
-50. **Normal and parallax maps** for the level textures: nobody ships them for Deus Ex, so they are generated from
-    each texture's own colour (height from luminance, filtered into a normal map) with a per-texture allow list
-    (bricks, grates, planks and panels gain relief; textures with painted-in lighting stay flat), feeding the
-    real-time lights above. Hand-made normal maps from the HD mods used where they exist.
-51. **Material table**: roughness, metalness and reflectance per texture group and per weapon / item mesh (metal,
-    glass, wood, skin, cloth), so guns, chrome, wet stone and glass get real specular highlights and reflections
-    from an environment map per zone or screen-space reflections, instead of today's flat, matte materials.
-52. **Emissive surfaces**: every glowing texture group (lamp fixtures, ceiling panels, console screens, signs,
-    alarm lights) marked emissive so it blooms and, with remastered lighting, lights its surroundings itself.
+
+(Items 45, more NPCs and livelier locations, and 47, no loading screens, were cut.)
+49. **Remastered lighting** (done in code; an Enhancement, in the Modern preset): every BSP surface relit per pixel
+    by its three strongest lights, with their real falloff and the angle they strike at, while the bake's shadows
+    stay. The bake already knows, for every lightmap texel, whether each lamp reaches it; the shader takes each of
+    those lights' flat baked term back out of the lightmap and puts it back worked out over the surface's relief
+    normal, with a highlight by the surface's material. Dropping the lightmaps outright, as first planned, let
+    lamps shine through walls: the editor placed its lights for Unreal's baker, which traced their shadows.
+    A global gain and an added-light term are there for tuning; per-zone ambient and per-map overrides are not
+    done yet.
+50. **Normal and parallax maps** (done in code; Relief Maps setting: normal maps, or with parallax): the Parallax
+    Occlusion Mapping addon's normal / height maps for about 1,100 textures (shipped with the release, used from the
+    Parallax Maps mod folder, or from the game's Textures folder where the DX11 renderer reads them; only its
+    `.bump` / `.height` files are read, never its colour replacements, so it works beside Helios and New Vision),
+    and generated maps for the rest (height from luminance) on an allow list: brick, stone, concrete, planks, tiles,
+    grates, metal panels. Signs, screens, lamps, windows and effects stay flat.
+51. **Material table** (done for level surfaces): roughness, highlight strength and metalness by texture name
+    (glass, polished metal, painted metal, tiles and marble, wood, plastic, stone and concrete), so metal, glass and
+    tiles catch the light. Still to come: weapons and items (their light is worked out per vertex on the CPU) and
+    reflections from an environment map or screen-space reflections.
+52. **Emissive surfaces** (done in code; Glowing Surfaces setting): surfaces drawn full bright (light fittings,
+    screens, signs) and textures named as lamps, screens or neon glow past white, so Bloom gives them a halo.
+    Still to come: lighting their surroundings themselves.
 
 Also done: **achievements** - the fifty of Deus Ex Remastered with our own icons, an Achievements screen off the
 Logs screen, an unlock notice in the HUD, kept for the player across saves.
 
-53. **Skeletal characters** (an Enhancement, from a community rig of the Deus Ex people, used only with its
-    author's permission and read from the player's own copy, like the mods): rebuilt male and female bodies
+53. **Skeletal characters** (done in code, an Enhancement in the Modern preset; the Machine God team's rig and
+    rebuilt bodies, shipped with the game with their blessing and credited in the credits): rebuilt male and female bodies
     (trench coat, suit, dress shirt, jumpsuit, hoodie, dress, skirt suit, children) on two rigs with 126 deforming
     bones each - 72 of them in the coat tails - and 172 animations: every sequence the game plays, at the original
     frame counts, plus 8-way strafes, cover moves, head look-at, masculine / feminine walks and idles and about 30
@@ -203,12 +236,16 @@ Logs screen, an unlock notice in the HUD, kept for the player across saves.
     - third-person and NPC animation that blends, layers aim over running and turns heads to speakers (53b);
     - JC's own body in first person, his shadow and reflection (item 40);
     - ragdolls on the deforming bones with a physics crate, and spring coat tails (items 42, 43).
-    Steps: a bake script per body (Blender, run once on the player's machine or ours), a skinned-mesh path beside
-    gpuanim.rs keyed by mesh name, animation notifies (footsteps, melee hits) mapped by frame position, and the
-    original vertex meshes kept as the default. Not covered by the rig: commandos, robots and animals.
+    Done: twelve bodies baked and packed small enough to ship inside the exe (about 3 MB), every person on those
+    meshes drawn with them in their original skins, moves cross-faded, lip sync / blinks / glances / brows on the
+    face's blend shapes, the weapon in the rebuilt hand, lit by the same lights as before, and JC's mirror and
+    third-person body. Mods: Helios repaints and Augmentique outfits (JC, Lay D and the people they dress) are worn
+    by the rebuilt bodies; HDTP's people are switched off while Skeletal Characters is on. Still to come: aim layered
+    over running, heads turning to speakers, strafing right (the left strafe plays for both), animation notifies
+    from the rig. Not covered by the rig: commandos, robots, animals and HDTP's replacement meshes.
 
-Characters in Deus Ex are vertex-animated meshes without skeletons, which is why items that need bones sit in the
-last tier.
+Characters in Deus Ex are vertex-animated meshes without skeletons, which is why items that need bones sat in the
+last tier until the skeletal bodies above arrived.
 
 ## Engine principles
 - **Original gameplay:** keep its quirks, but not its engine flaws.

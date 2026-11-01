@@ -29,6 +29,17 @@ pub const PRESET: &[(&str, f32)] = &[
     ("Bloom", 1.0),
     ("Clouds", 1.0),
     ("EnhancedFX", 1.0),
+    ("SkeletalCharacters", 1.0),
+    ("Ragdolls", 1.0),
+    ("FluidBlood", 1.0),
+    ("RemasteredLighting", 1.0),
+    ("EmissiveSurfaces", 1.0),
+    ("AugGlows", 1.0),
+    ("CoatCloth", 1.0),
+    ("DiegeticHealing", 1.0),
+    ("FirstPersonBody", 1.0),
+    ("HurtPoses", 1.0),
+    ("BodyWounds", 1.0),
     ("FlashlightCone", 1.0),
     ("FogVolumes", 1.0),
     ("LightHalos", 1.0),
@@ -155,7 +166,13 @@ pub fn switch_values(to_modern: bool, current: impl Fn(&str) -> f32) -> (Vec<(St
 /// for it to show).
 pub fn switch(to_modern: bool) -> bool {
     let (vals, memory) = switch_values(to_modern, crate::settings::get);
-    let mods_changed = vals.iter().any(|(k, v)| MOD_KEYS.iter().any(|m| m.0 == k) && crate::settings::get(k) != *v);
+    // Skeletal characters switch HDTP's people off (hdtp::characters_on), so with HDTP that is a reload too.
+    let mods_changed = vals.iter().any(|(k, v)| {
+        (MOD_KEYS.iter().any(|m| m.0 == k)
+            || crate::relight::RELOAD_KEYS.contains(&k.as_str())
+            || (k == "SkeletalCharacters" && unreal_pkg::mods::active("hdtp").is_some()))
+            && crate::settings::get(k) != *v
+    });
     for (k, v) in memory.iter().chain(vals.iter()) {
         crate::settings::set(k, *v);
     }

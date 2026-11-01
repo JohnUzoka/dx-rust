@@ -51,12 +51,22 @@ It runs as a native Windows program and on Steam Deck / Linux, with no old engin
   modern one, like the graphics switch in some remasters. Modern turns on every enhancement below at once and puts
   back your own mix the next time; Classic is the game as it shipped.
 - **A modern look (all optional):**
+  - **remastered lighting**: walls and floors relit per pixel by the lamps that reach them, with relief maps
+    (the Parallax Occlusion Mapping addon's normal and height maps, shipped with the release, and generated ones
+    for the rest), highlights on metal, glass and tiles, and glowing lamps, screens and signs - while every shadow
+    the original baked stays;
   - real-time shadows from the map's own lights, ambient occlusion, soft shadows and bloom;
   - rain with splashes, ripples and lightning storms (with the Precipitation mod's sounds), volumetric night
     clouds and rolling fog, light shafts and haze;
   - modern water with waves, reflections and an open sea, mirrors that reflect JC;
   - a photographic city skyline, light halos and modern coronas, a modern night-vision view;
-  - Helios repaints and HD textures, and enhanced particle effects, barrel smoke and bullet impacts.
+  - Helios repaints and HD textures, and enhanced particle effects, barrel smoke and bullet impacts;
+  - **skeletal characters**: the Machine God team's rebuilt human bodies on a real skeleton, in the original skins,
+    with blended moves and faces that lip-sync, blink and glance around; JC's own body (or Lay D's, in any
+    Augmentique outfit) in mirrors, third person and under the view in first person; Helios repaints carry over to
+    the rebuilt bodies, and HDTP's people step aside while they are on;
+  - **ragdolls** (Avian physics) for the killed and knocked out, and for JC himself, fluid blood (droplets, runs down walls, pools
+    under the dead, bloodier gibs), wound marks, hurt poses and limps, and coat tails that ripple as people move.
 - **Modern play (all optional):**
   - Modern Aiming: the aim sways within the accuracy cone (wide when untrained, steady when you master the
     weapon or hold still) and the crosshair and gun follow it, with aim-down-sights on guns;
@@ -66,6 +76,7 @@ It runs as a native Windows program and on Steam Deck / Linux, with no old engin
   - elements (shocks in water, spreading fire), bullet penetration, melee arcs, thrown-object noise and body
     alarms;
   - terminals and keypads used in the world: the camera moves in to the screen and you click on it;
+  - diegetic healing: hold a medkit, look at the limb to treat and use it there; aug glows on JC's body;
   - better audio: smoother mixing, sound through walls, room reverb and a distant soundscape.
 - **Achievements.** Fifty achievements in the style of the *Remastered* list, with their own page in the
   persona screens and an unlock notice in play.
@@ -142,13 +153,18 @@ On Windows, `BUILD_RELEASE.bat` makes a shareable `dist\` folder.
 The whole game is implemented. Before 1.0:
 - a full playthrough, with fixes for whatever it finds;
 - tuning by eye (water, a few intro effects);
-- a performance pass;
+- more performance work on the render thread (Modern with every mod runs about 41 fps on an RTX 3050);
 - Steam Deck tuning;
 - save round-trip tests on every map.
 
 Much of the v2.0 list is already in (the Classic / Modern switch, real-time shadows, weather, modern water,
-third person, Smarter AI, achievements). Still to come: remastered lighting with normal maps, skeletal characters
-with better faces and ragdolls, and multiplayer, among others. Every item stays optional.
+third person, Smarter AI, achievements, skeletal characters, ragdolls, fluid blood and remastered lighting with
+relief maps). Still to come: aim and head-turning layered on the skeletal bodies, and multiplayer, among others.
+Every item stays optional. A GPU pass took Modern from about 32 to 47 fps on an RTX 3050, and a CPU pass (for
+slower and many-core processors, where the game's own threads were the limit) took the default settings on a
+Ryzen 5 3600 from 72 to 98 fps, nearly halving the main thread's work. If your frame rate sits at exactly 30, the
+frame is just over VSync's 60 fps budget: try turning off *Vertical Sync* (Settings > Display). On a CPU with many
+cores, also try *Settings > Enhancements > Display: CPU Worker Threads*.
 
 The full list is in [ROADMAP.md](ROADMAP.md). Bug reports from playthroughs are very welcome: say which map you
 were on and what you did.
@@ -160,6 +176,8 @@ were on and what you did.
   from your own copy at run time.
 - The Lay D Denton Project belongs to its authors and is used with their permission. HDTP, New Vision, Visible
   Attachments, Augmentique, Helios, Precipitation and GMDX belong to their authors. No mod's files are redistributed here.
+- The rebuilt human bodies, rig and animations in `assets/rig` are the Machine God team's, included with their
+  permission (credit them if you reuse them). They contain no Deus Ex data.
 - DX RUST's own source code is licensed under the **GNU GPL v3.0 or later** (see [LICENSE](LICENSE)).
 
 ## Credits
@@ -167,4 +185,5 @@ were on and what you did.
 - The Lay D Denton Project team, for the mod and permission to support it.
 - The HDTP team, the New Vision team, the authors of Visible Attachments, Augmentique, Helios, Precipitation and
   GMDX (CyberP, and Sarge and the Augmented Edition team), for their mods.
+- The Machine God team, for the rebuilt human bodies, rig and animations behind Skeletal Characters.
 - The Bevy, egui, gilrs and hidapi projects, and the Rust community.

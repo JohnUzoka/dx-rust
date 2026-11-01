@@ -38,13 +38,13 @@ pub fn hdr() -> bool {
 }
 
 /// Skip GPU work that adds no pixels (setting LeanRendering): duplicate copies to the window, MSAA writebacks,
-/// a depth prepass nothing reads, shadow lookups with no shadow lights, Modern Water's fine mesh in Classic.
+/// shadow lookups with no shadow lights, Modern Water's fine mesh in Classic.
 pub fn lean_rendering() -> bool {
     flags() & LEAN_RENDERING != 0
 }
 
-/// Skip CPU work that changes nothing (setting LeanUpdates): redrawing unchanged menu windows, rewriting hidden
-/// text and unchanged components, copying collision lists per pawn.
+/// Skip CPU work that changes nothing (setting LeanUpdates): redrawing unchanged menu, HUD and conversation windows,
+/// rewriting hidden text and unchanged components, posing what nobody sees.
 pub fn lean_updates() -> bool {
     flags() & LEAN_UPDATES != 0
 }

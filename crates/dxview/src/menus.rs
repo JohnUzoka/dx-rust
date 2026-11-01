@@ -427,11 +427,23 @@ pub fn present_mode(v: f32) -> bevy::window::PresentMode {
 /// The Bevy window mode for a DisplayMode setting.
 /// The window mode for a DisplayMode setting. The primary monitor, not "current": at startup there is no window
 /// yet, so winit has no current monitor and Bevy panics ("Unable to get monitor").
+/// On Linux, Wayland has no primary monitor (and no exclusive fullscreen): Bevy's exclusive mode panicked there
+/// ("Unable to get monitor", GitHub issue #4), so both full-screen modes are borderless on the first monitor.
 pub fn window_mode(v: f32) -> WindowMode {
-    match v.round() as i32 {
-        0 => WindowMode::Fullscreen(MonitorSelection::Primary, bevy::window::VideoModeSelection::Current),
-        2 => WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-        _ => WindowMode::Windowed,
+    #[cfg(target_os = "linux")]
+    {
+        match v.round() as i32 {
+            0 | 2 => WindowMode::BorderlessFullscreen(MonitorSelection::Index(0)),
+            _ => WindowMode::Windowed,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        match v.round() as i32 {
+            0 => WindowMode::Fullscreen(MonitorSelection::Primary, bevy::window::VideoModeSelection::Current),
+            2 => WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+            _ => WindowMode::Windowed,
+        }
     }
 }
 
@@ -697,6 +709,15 @@ impl Enhance {
             ("Soundscape", "Sound", "Soundscape", "Far-off life around the open-air maps - dogs, gulls by the water, gusts of wind (more in the rain) - now and then, quietly, from the game's own sounds."),
             ("RestrictedCombatMusic", "Sound", "Combat Music Needs Two Attackers", "The combat music only starts when at least two enemies are fighting you, so one far-off guard doesn't set it off (GMDX)."),
             ("ModernAim", "Gameplay", "Modern Aiming", "Shots go where your sights drift instead of scattering at random, and the crosshair follows that point; the accuracy brackets always show. Hold the scope key (Z or LT) with a weapon that has no scope to aim down the sights: steadier, a little zoom, walking pace."),
+            ("SkeletalCharacters", "Visuals", "Skeletal Characters", "People get rebuilt bodies on a real skeleton (by the Machine God team): smooth joints and blending between moves, a face that lip-syncs, blinks and glances around. They keep the skins the original gives them. Characters the HD mods replace stay as they are."),
+            ("Ragdolls", "Gameplay", "Ragdolls", "With Skeletal Characters on, people go limp the moment they're killed or knocked out, thrown by the hit and carried by how they were moving, and fall against whatever is around them. Explosions still blow them apart."),
+            ("FluidBlood", "Visuals", "Fluid Blood", "Hits throw droplets that fly and splatter where they land; on walls the blood runs down. The dead bleed out into a spreading pool, and explosions throw blood over everything near."),
+            ("BodyWounds", "Visuals", "Wounds On Bodies", "With Skeletal Characters on, shots leave wound marks on people where they went in, and the marks move with them."),
+            ("HurtPoses", "Gameplay", "Hurt Poses", "With Skeletal Characters on, the wounded move like it: a badly hurt arm hangs, a hurt leg stiffens into a limp. JC's own body too."),
+            ("FirstPersonBody", "Visuals", "First-Person Body", "With Skeletal Characters on, look down and see JC's body and legs under you; his arms show while a medkit is in hand."),
+            ("DiegeticHealing", "Gameplay", "Diegetic Healing", "With First-Person Body on: hold a medkit, look at the arm, leg or chest you want to treat and use it there. Used looking anywhere else, it treats the head. A label under the crosshair says which part."),
+            ("AugGlows", "Visuals", "Aug Glows", "Running augmentations glow on JC's body where they sit: eyes, arms, legs, chest (in mirrors, third person and the first-person body)."),
+            ("CoatCloth", "Visuals", "Coat Cloth", "With Skeletal Characters on, long coats swing and trail with the body's motion and fall around the legs instead of moving as one stiff piece."),
             ("EnhancedFX", "Visuals", "Enhanced Effects", "More particles: sparks off metal, dust off stone, splinters off wood and splashes off water where bullets hit; spark showers and rolling smoke from explosions; smoke from gun barrels; a spray of blood on hits."),
             ("Elements", "Gameplay", "Elemental Reactions", "Electric shocks run through water to everyone standing in it (you too), people on fire set others they touch alight, and fire caught by someone in water goes out."),
             ("Mantling", "Gameplay", "Mantling", "Jump at a ledge you can reach - up to about the height of your arms - and you climb onto it; jump at a low obstacle and you vault onto it. Not while crouched or carrying anything heavy."),
@@ -785,6 +806,16 @@ impl Enhance {
         }
         {
             let mut c = debug_mode_choice();
+            c.key = "WorkerThreads".into();
+            c.label = "CPU Worker Threads".into();
+            c.help = "How many threads the game spreads its parallel work over. Auto leaves room for the main and render threads and stops at 10: on processors with many cores (workstation Xeons, Threadrippers) more threads only add overhead. Takes effect on the next start.".into();
+            c.kind = ChoiceKind::Enum(crate::threads::STEPS.iter().map(|&n| if n == 0 { "Auto".to_string() } else { n.to_string() }).collect());
+            c.value = crate::threads::step_index(crate::settings::get("WorkerThreads"));
+            c.saved = c.value;
+            items.push(tag(c, "Display"));
+        }
+        {
+            let mut c = debug_mode_choice();
             c.key = "RealtimeShadows".into();
             c.label = "Real-Time Shadows".into();
             c.help = "People and objects cast moving shadows from the lamps around them, as dark as the light they block. Low uses the two strongest lights near you, High four.".into();
@@ -798,8 +829,8 @@ impl Enhance {
         for (key, lbl, help) in [
             ("AntiAliasing", "Anti-Aliasing (4x MSAA)", "Smooths the edges of the world and the weapon with 4x multisampling. Off saves a lot of GPU time and memory on slow GPUs. (With Ambient Occlusion on, SMAA smooths the edges instead.)"),
             ("HDRRendering", "HDR Rendering", "Draws the scene in 16-bit colour before it reaches the screen. Off draws it in 8-bit, half the memory traffic; the picture is the same except for faint differences where bright things show through glass. Glow And Bloom turns it back on."),
-            ("LeanRendering", "Lean Rendering", "Leaves out GPU work that adds nothing to the picture: copies of each camera's picture to the screen that the next camera covers, a depth pass only Modern Water and Ambient Occlusion read, shadow lookups with no shadow lights, and Modern Water's fine mesh while Modern Water is off (it comes back at the next map)."),
-            ("LeanUpdates", "Lean Updates", "Leaves out CPU work that changes nothing: redrawing menu and HUD windows that haven't changed, rewriting hidden text and unchanged lights, copying the collision list for every person every frame, and posing birds, flies and electric arcs nobody can see (one coming into view may show its last pose for a frame)."),
+            ("LeanRendering", "Lean Rendering", "Leaves out GPU work that adds nothing to the picture: copies of each camera's picture to the screen that the next camera covers, shadow lookups with no shadow lights, and Modern Water's fine mesh while Modern Water is off (it comes back at the next map)."),
+            ("LeanUpdates", "Lean Updates", "Leaves out CPU work that changes nothing: redrawing menu, HUD and conversation windows that haven't changed, rewriting hidden text and unchanged lights, and posing birds, flies and electric arcs nobody can see (one coming into view may show its last pose for a frame)."),
             ("FPSCounter", "FPS Counter", "Shows frames per second and the average frame time in the top-right corner, over each half second."),
         ] {
             let mut c = debug_mode_choice();
@@ -809,6 +840,22 @@ impl Enhance {
             c.value = crate::settings::get(key);
             c.saved = c.value;
             items.push(tag(c, "Performance"));
+        }
+        // Remastered lighting (relight.rs): applied when the map next loads.
+        for (key, label, help, values) in [
+            ("RemasteredLighting", "Remastered Lighting", "Every wall and floor lit per pixel by the lamps that reach it, with real falloff and shape, and the original's shadows kept. Needed for Relief Maps and Material Highlights. Takes effect on the next map.", vec!["Off", "On"]),
+            ("ReliefMaps", "Relief Maps", "With Remastered Lighting: bricks, planks, tiles and grates catch the light with normal maps - the Parallax Occlusion addon's where it has them (shipped with the game), the rest made from each texture. Parallax adds depth to them as you move. Takes effect on the next map.", vec!["Off", "Normal Maps", "Normal + Parallax"]),
+            ("MaterialSpecular", "Material Highlights", "With Remastered Lighting: metal, glass, tiles and polished floors shine where the light catches them. Takes effect on the next map.", vec!["Off", "On"]),
+            ("EmissiveSurfaces", "Glowing Surfaces", "Light fittings, screens and signs glow past white (with Bloom, a soft halo). Takes effect on the next map.", vec!["Off", "On"]),
+        ] {
+            let mut c = debug_mode_choice();
+            c.key = key.into();
+            c.label = label.into();
+            c.help = help.into();
+            c.kind = ChoiceKind::Enum(values.iter().map(|v| v.to_string()).collect());
+            c.value = crate::settings::get(key);
+            c.saved = c.value;
+            items.push(tag(c, "Visuals"));
         }
         // HUD customisation: each part shown or hidden, sized, faded.
         for (key, name) in crate::classic_hud::HUD_PARTS {

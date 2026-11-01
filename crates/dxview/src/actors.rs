@@ -36,18 +36,33 @@ pub struct World<'a> {
     pub movers: Option<&'a [crate::movers::MoverRt]>,
 }
 
-impl World<'_> {
-    /// `trace`, also walking `extra` cylinders after the blockers as if appended to them (their hit indices go
-    /// on from `blockers.len()`), so a caller adding a few cylinders needn't copy the whole blocker list.
-    pub fn trace_with(&self, start: DVec3, end: DVec3, extent: DVec3, extra: &[Cylinder]) -> Hit {
+impl CollisionWorld for World<'_> {
+    fn trace(&self, start: DVec3, end: DVec3, extent: DVec3) -> Hit {
         let h = self.level.collision.trace(start, end, extent);
         let mut best = Hit {
             fraction: h.fraction,
             normal: h.normal,
             actor: None,
         };
+        // The box the swept shape covers: anything wholly outside it can't be hit (most cylinders and movers on
+        // the map, for a short trace), so it is skipped before the exact test.
+        let lo = start.min(end) - extent;
+        let hi = start.max(end) + extent;
         if let Some(rts) = self.movers {
+            let ext_len = extent.length();
+            let seg = end - start;
+            let seg_len2 = seg.length_squared();
             for (info, rt) in self.level.movers.iter().zip(rts) {
+                // A mover reaches at most info.reach from its Location, however it's turned.
+                let reach = info.reach + ext_len;
+                let c = rt.location;
+                if c.x + reach < lo.x || c.x - reach > hi.x || c.y + reach < lo.y || c.y - reach > hi.y || c.z + reach < lo.z || c.z - reach > hi.z {
+                    continue;
+                }
+                let t = if seg_len2 > 1e-12 { ((c - start).dot(seg) / seg_len2).clamp(0.0, 1.0) } else { 0.0 };
+                if (start + seg * t - c).length_squared() > reach * reach {
+                    continue;
+                }
                 if let Some(hm) = crate::movers::trace_mover(info, rt, start, end, extent) {
                     if hm.fraction < best.fraction {
                         best = hm;
@@ -55,23 +70,19 @@ impl World<'_> {
                 }
             }
         }
-        // Lean Updates: skip cylinders whose box (grown by the extent, as `trace_cylinder` grows them) misses the
-        // segment's box. Every hit `trace_cylinder` reports is at a point of the segment inside that grown
-        // cylinder, up to rounding far below the unit of slack, so nothing that could hit is skipped.
-        let lean = crate::perf::lean_updates();
-        let (lo, hi) = (start.min(end) - DVec3::ONE, start.max(end) + DVec3::ONE);
-        for (i, c) in self.blockers.iter().chain(extra).enumerate() {
+        for (i, c) in self.blockers.iter().enumerate() {
             // Destroyed decorations and gibbed pawns keep a zero-size cylinder: nothing to hit.
             if Some(i) == self.ignore || c.radius <= 0.0 || c.height <= 0.0 {
                 continue;
             }
-            // Lean Updates: the box test first, so the hash lookup below only runs for cylinders near the sweep (it
-            // was 6% of the Switch's main thread on Liberty Island, run 3). Both only skip, so the order changes no hit.
-            if lean {
-                let (r, h, p) = (c.radius + extent.x, c.height + extent.z, c.center);
-                if lo.x > p.x + r || hi.x < p.x - r || lo.y > p.y + r || hi.y < p.y - r || lo.z > p.z + h || hi.z < p.z - h {
-                    continue;
-                }
+            if c.center.x + c.radius < lo.x
+                || c.center.x - c.radius > hi.x
+                || c.center.y + c.radius < lo.y
+                || c.center.y - c.radius > hi.y
+                || c.center.z + c.height < lo.z
+                || c.center.z - c.height > hi.z
+            {
+                continue;
             }
             // BlockPlayer stops only the player (whose world carries the push masses): shots, projectiles, sight
             // lines and other pawns pass (the training range's booth has one in the line of fire).
@@ -90,29 +101,9 @@ impl World<'_> {
         }
         best
     }
-}
 
-impl CollisionWorld for World<'_> {
-    fn trace(&self, start: DVec3, end: DVec3, extent: DVec3) -> Hit {
-        self.trace_with(start, end, extent, &[])
-    }
     fn pushable_mass(&self, actor: usize) -> Option<f64> {
         self.pushable.and_then(|m| m.get(&actor).copied())
-    }
-}
-
-/// A `World` plus cylinders only one sweeper collides with (pawns: the player, BlockMonsters); see `World::trace_with`.
-pub struct ExtraWorld<'a> {
-    pub world: World<'a>,
-    pub extra: &'a [Cylinder],
-}
-
-impl CollisionWorld for ExtraWorld<'_> {
-    fn trace(&self, start: DVec3, end: DVec3, extent: DVec3) -> Hit {
-        self.world.trace_with(start, end, extent, self.extra)
-    }
-    fn pushable_mass(&self, actor: usize) -> Option<f64> {
-        self.world.pushable_mass(actor)
     }
 }
 

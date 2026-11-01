@@ -175,12 +175,14 @@ pub fn aim_dir(level: &dx_level::Level, eye: DVec3, fw: DVec3) -> DVec3 {
 
 /// The view's render layers: the world, mirror faces, shadow lights when on, and JC's body in third person.
 pub fn camera_layers() -> RenderLayers {
-    let mut l = vec![0, crate::mirror::LAYER, crate::weather::RAIN_LAYER];
+    let mut l = vec![0, crate::mirror::LAYER, crate::weather::RAIN_LAYER, crate::skyfollow::LAYER];
     if crate::shadowlight::level() > 0 {
         l.push(crate::shadowlight::SHADOW_LAYER);
     }
     if active() {
         l.push(crate::mirror::BODY_LAYER);
+    } else if crate::bodyfx::fp_on() {
+        l.push(crate::bodyfx::FP_LAYER);
     }
     RenderLayers::from_layers(&l)
 }

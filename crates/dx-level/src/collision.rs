@@ -54,8 +54,6 @@ pub struct BspCollision {
     leaf_hulls: Vec<i32>,
     hulls: Vec<Hull>,
     planes: Vec<DVec4>,
-    /// Union of every hull's (shrunk) box: no trace can hit outside it (see `may_hit`).
-    bounds: (DVec3, DVec3),
 }
 
 thread_local! {
@@ -82,13 +80,7 @@ impl BspCollision {
                 zone: n.zone,
             })
             .collect();
-        let mut c = BspCollision {
-            nodes,
-            leaf_hulls: model.leaf_hulls.clone(),
-            hulls: Vec::new(),
-            planes: Vec::new(),
-            bounds: (DVec3::INFINITY, DVec3::NEG_INFINITY),
-        };
+        let mut c = BspCollision { nodes, leaf_hulls: model.leaf_hulls.clone(), hulls: Vec::new(), planes: Vec::new() };
         let mut by_offset = std::collections::HashMap::new();
         for i in 0..c.nodes.len() {
             let cb = c.nodes[i].collision_bound;
@@ -98,22 +90,7 @@ impl BspCollision {
             let id = *by_offset.entry(cb).or_insert_with(|| c.build_hull(cb as usize));
             c.nodes[i].hull = id;
         }
-        // A hull with a NaN bound never passes `trace`'s bounds test, so it can be left out.
-        c.bounds = c
-            .hulls
-            .iter()
-            .filter(|h| !h.bmin.is_nan() && !h.bmax.is_nan())
-            .fold(c.bounds, |(lo, hi), h| (lo.min(h.bmin), hi.max(h.bmax)));
         c
-    }
-
-    /// False when `trace(start, end, extent)` certainly hits nothing: the swept box's bounds (the same ones
-    /// `trace` tests each hull against) miss the union of all hull boxes, so every hull would fail that test.
-    /// A cheap reject for small models (movers) far from the sweep; never false when `trace` could hit.
-    pub fn may_hit(&self, start: DVec3, end: DVec3, extent: DVec3) -> bool {
-        let lo = start.min(end) - extent - DVec3::ONE;
-        let hi = start.max(end) + extent + DVec3::ONE;
-        self.bounds.1.cmpge(lo).all() && self.bounds.0.cmple(hi).all()
     }
 
     /// Prepare one leaf hull (see `Hull`); -1 when its data is unreadable (such hulls never block).

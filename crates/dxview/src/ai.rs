@@ -353,6 +353,15 @@ impl PlayerHealth {
         }
     }
 
+    /// Diegetic Healing: the treated part first (up to 100), what's left as HealPlayer spreads it.
+    pub fn heal_part(&mut self, part: usize, n: f32) -> f32 {
+        let i = part.min(5);
+        let take = (100.0 - self.parts[i]).max(0.0).min(n.max(0.0));
+        self.parts[i] += take;
+        self.total();
+        take + self.heal(n - take)
+    }
+
     /// HealPlayer: points go to the head first, then torso, right leg, left leg, right arm, left arm, each up to 100.
     pub fn heal(&mut self, n: f32) -> f32 {
         if n < 0.0 {
@@ -2925,10 +2934,10 @@ pub fn npc_system(
     if let Ok(mut c) = CLEANERS.lock() {
         c.clear();
     }
-    // The cylinders pawns collide with beyond the blockers, rebuilt per pawn in one buffer.
-    let mut extra: Vec<Cylinder> = Vec::new();
+    let mut solid_buf: Vec<Cylinder> = Vec::with_capacity(blockers.list.len() + 8 + lvl.monster_blocks.len());
     for (mut npc, mut deco, mut an, mut tf) in &mut q {
         let npc = &mut *npc;
+        let _a1 = crate::prof::scope("ai/1 setup+damage");
         npc.just_fired = false;
         npc.weapon_timer += dt;
         let state_before = std::mem::discriminant(&npc.state);
@@ -3230,6 +3239,10 @@ pub fn npc_system(
                     }
                     h.damage *= scale;
                 }
+                // A wound mark on a rebuilt body where the shot went in (bodyfx.rs).
+                if !npc.hp_body.robot && matches!(h.damage_type, "Shot" | "Sabot" | "Exploded" | "Burned" | "Flamed") {
+                    crate::bodyfx::wound(npc.blocker, h.hit_loc, h.hit_loc - h.attacker_pos, h.damage_type);
+                }
                 let stunned = matches!(npc.state, NpcState::Stunned(_) | NpcState::RubbingEyes(_));
                 // EMP: robots lose EMPHitPoints and shut down (Robot state Disabled) at zero; people don't care.
                 if h.damage_type == "EMP" {
@@ -3450,6 +3463,14 @@ pub fn npc_system(
                         }
                         npc.state = NpcState::Dead;
                         npc.knocked_out = knocked_out;
+                        // A rebuilt body goes limp at once (ragdoll.rs), pushed by the blow and carried by its run.
+                        crate::ragdoll::request(crate::ragdoll::Death {
+                            blocker: npc.blocker,
+                            hit: h.hit_loc,
+                            from: h.attacker_pos,
+                            damage: h.damage,
+                            vel: deco.body.velocity,
+                        });
                         npc.weapon_drawn = false;
                         // DeusExCarcass.InitFor: the body alerts others only if dead (not unconscious), not a robot.
                         npc.killer_alliance = match h.attacker {
@@ -3726,13 +3747,15 @@ pub fn npc_system(
             }
         }
 
+        drop(_a1); let _a2 = crate::prof::scope("ai/2 render check");
         let me = blockers.list[npc.blocker];
         let my_eye = eye_of(&me);
         // LastRenderTime: on screen = inside the view (a cone a little wider than the 90 degree view, so the
         // corners count) and some part of the cylinder not hidden by the world from the camera.
         npc.render_check -= dt;
         if npc.render_check <= 0.0 {
-            npc.render_check = 0.2;
+            // About every 0.2 s, each pawn on a slightly different period so they don't all trace on one frame.
+            npc.render_check = 0.18 + 0.04 * ((npc.blocker as f32 * 0.618_034).fract());
             let eye = _player_eye;
             let fwd = {
                 let f = cam.forward().as_vec3();
@@ -3805,6 +3828,7 @@ pub fn npc_system(
             }
             npc.smart.was_attacking = atk;
         }
+        drop(_a2); let _a3 = crate::prof::scope("ai/3 senses+think");
         // Senses. ReactionLevel climbs while anything is up (UpdateReactionLevel) and the surprise pause on
         // attacking is what it hasn't covered yet; it ebbs over 7 seconds otherwise.
         let stunned_now = matches!(
@@ -3991,6 +4015,7 @@ pub fn npc_system(
             }
         }
 
+        drop(_a3); let _a4 = crate::prof::scope("ai/4 reactions");
         // The reaction callbacks (ScriptedPawn.UpdateReactionCallbacks): which stimuli this state listens for
         // (SetReactions), and what the pawn's bReact / bHate / bFear flags make of each.
         npc.fear.tick(dt);
@@ -4502,6 +4527,7 @@ pub fn npc_system(
             npc.readiness = 0.0;
             npc.target = None;
         }
+        drop(_a4); let _a5 = crate::prof::scope("ai/5 act");
         // Act.
         let mut wish = DVec3::ZERO;
         let mut running = false;
@@ -5663,40 +5689,30 @@ pub fn npc_system(
         let before = body.location;
         if !npc.sitting {
             let steps = ((dt as f64) / (1.0 / 60.0)).ceil().max(1.0) as usize;
-            // Pawns can't walk through the player either.
-            extra.clear();
+            // Pawns can't walk through the player either. (One buffer for every pawn: copied into, not allocated.)
+            let solid = &mut solid_buf;
+            solid.clear();
+            solid.extend_from_slice(&blockers.list);
             if !ph.dead {
-                extra.push(player_cyl);
+                solid.push(player_cyl);
             }
             // BlockMonsters stop pawns only.
-            extra.extend(lvl.monster_blocks.iter().map(|c| Cylinder { actor: usize::MAX, ..c.clone() }));
+            solid.extend(lvl.monster_blocks.iter().map(|c| Cylinder { actor: usize::MAX, ..c.clone() }));
             // ...nor through what the player is carrying.
             if let Some(h) = carrying.held.as_ref() {
-                extra.push(Cylinder {
+                solid.push(Cylinder {
                     center: blockers.list[h.blocker].center,
                     radius: h.radius,
                     height: h.height,
                     actor: usize::MAX,
                 });
             }
-            // Lean Updates: the trace walks `extra` after the blockers (same order and indices as the appended
-            // copy) instead of every pawn copying the whole blocker list each frame.
-            let lean = crate::perf::lean_updates();
-            let solid: Vec<Cylinder>;
-            let world = crate::actors::ExtraWorld {
-                world: World {
-                    level: lvl,
-                    blockers: if lean {
-                        &blockers.list[..]
-                    } else {
-                        solid = [&blockers.list[..], &extra[..]].concat();
-                        &solid[..]
-                    },
-                    ignore: Some(npc.blocker),
-                    pushable: None,
-                    movers: Some(&mv.rt),
-                },
-                extra: if lean { &extra[..] } else { &[] },
+            let world = World {
+                level: lvl,
+                blockers: &solid[..],
+                ignore: Some(npc.blocker),
+                pushable: None,
+                movers: Some(&mv.rt),
             };
             for _ in 0..steps {
                 body.tick(&world, &params, wish, false, dt as f64 / steps as f64);
@@ -6242,6 +6258,7 @@ pub fn npc_weapon_models(
         Local<u64>,
         Res<Blockers>,
     ),
+    skels: Query<&crate::skeletal::SkelBody>,
 ) {
     let _prof = crate::prof::scope("ai::npc_weapon_models");
     for (e, npc) in &new {
@@ -6377,6 +6394,9 @@ pub fn npc_weapon_models(
         let (start, frames, f) = crate::actors::current_frame(an, anim);
         let coords = if npc.state == NpcState::Dead || !npc.weapon_drawn {
             None
+        } else if let Some(w) = crate::skeletal::weapon_coords(&skels, e) {
+            // A rebuilt body (skeletal.rs): its own weapon triangle, skinned.
+            w
         } else {
             anim.mesh.weapon_coords(start, frames, f)
         };

@@ -119,6 +119,10 @@ pub struct WeatherState {
     splashes: Vec<Splash>,
     mesh: Option<Handle<Mesh>>,
     splash_mesh: Option<Handle<Mesh>>,
+    /// Per-quad data the rain shader builds the streaks from (two Rgba32Float texels a quad).
+    data: Option<Handle<Image>>,
+    splash_data: Option<Handle<Image>>,
+    mats: Vec<Handle<RainMaterial>>,
     spawned: bool,
     profile: Option<Profile>,
     density: f32,
@@ -270,7 +274,7 @@ pub fn weather_system(
         ResMut<RuntimeAssets>,
         ResMut<Assets<Image>>,
         ResMut<Assets<Mesh>>,
-        ResMut<Assets<StandardMaterial>>,
+        ResMut<Assets<RainMaterial>>,
     ),
     mut vis: Query<&mut Visibility, With<RainMesh>>,
 ) {
@@ -331,12 +335,12 @@ pub fn weather_system(
     // The streak mesh (and the splash mesh), once a map.
     if !st.spawned {
         st.spawned = true;
-        // Fixed quads: the UVs and indices never change; each frame only writes positions and colours in place
-        // (unused quads collapse to a point far below the map).
-        let empty = |cap: usize| {
-            let p = vec![HIDDEN; cap * 4];
+        // Fixed quads that never change: POSITION carries (quad, corner); the shader (shaders/rain.wgsl) builds each
+        // camera-facing streak from the quad's two data texels, written each frame (a tenth of the bytes the
+        // finished quads were, and no mesh re-upload).
+        let quads = |cap: usize| {
+            let p: Vec<[f32; 3]> = (0..cap).flat_map(|q| (0..4).map(move |c| [q as f32, c as f32, 0.0])).collect();
             let u: Vec<[f32; 2]> = (0..cap).flat_map(|_| [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]).collect();
-            let c = vec![[0.0f32; 4]; cap * 4];
             let i: Vec<u32> = (0..cap as u32).flat_map(|q| {
                 let k = q * 4;
                 [k, k + 1, k + 2, k, k + 2, k + 3]
@@ -344,27 +348,31 @@ pub fn weather_system(
             let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
             m.insert_attribute(Mesh::ATTRIBUTE_POSITION, p);
             m.insert_attribute(Mesh::ATTRIBUTE_UV_0, u);
-            m.insert_attribute(Mesh::ATTRIBUTE_COLOR, c);
             m.insert_indices(Indices::U32(i));
             m
         };
-        let add_mat = |materials: &mut Assets<StandardMaterial>, tex: Option<Handle<Image>>| {
-            materials.add(StandardMaterial {
-                base_color_texture: tex,
-                unlit: true,
-                double_sided: true,
-                cull_mode: None,
-                alpha_mode: AlphaMode::Add,
-                ..default()
-            })
+        let data_image = |images: &mut Assets<Image>, cap: usize| {
+            let rows = (cap * 2).div_ceil(DATA_W) as u32;
+            let mut img = Image::new_fill(
+                bevy::render::render_resource::Extent3d { width: DATA_W as u32, height: rows, depth_or_array_layers: 1 },
+                bevy::render::render_resource::TextureDimension::D2,
+                &[0u8; 16],
+                bevy::render::render_resource::TextureFormat::Rgba32Float,
+                RenderAssetUsages::default(),
+            );
+            img.sampler = bevy::image::ImageSampler::nearest();
+            images.add(img)
         };
         let drop_tex = image_for(&mut assets, &mut images, "Precipitation.Skins.Raindrop");
         // Splashlets: little streaks thrown up and out of the impact (the drop texture, stretched along the motion).
         let splash_tex = drop_tex.clone().or_else(|| image_for(&mut assets, &mut images, "Effects.Generated.WtrDrpSmall"));
-        let m = meshes.add(empty(MAX_DROPS));
-        let sm = meshes.add(empty(MAX_SPLASHES));
-        let mat = add_mat(&mut materials, drop_tex);
-        let smat = add_mat(&mut materials, splash_tex);
+        let m = meshes.add(quads(MAX_DROPS));
+        let sm = meshes.add(quads(MAX_SPLASHES));
+        let d = data_image(&mut images, MAX_DROPS);
+        let sd = data_image(&mut images, MAX_SPLASHES);
+        let mat = materials.add(RainMaterial { tex: drop_tex.unwrap_or_default(), data: d.clone() });
+        let smat = materials.add(RainMaterial { tex: splash_tex.unwrap_or_default(), data: sd.clone() });
+        st.mats = vec![mat.clone(), smat.clone()];
         for (mesh, mat) in [(m.clone(), mat), (sm.clone(), smat)] {
             commands.spawn((
                 Mesh3d(mesh),
@@ -380,6 +388,8 @@ pub fn weather_system(
         }
         st.mesh = Some(m);
         st.splash_mesh = Some(sm);
+        st.data = Some(d);
+        st.splash_data = Some(sd);
         st.height = 300.0;
     }
     for mut v in &mut vis {
@@ -470,39 +480,26 @@ pub fn weather_system(
         let end = pos + vel * life as f64;
         let lkey = ((pos.x / 16.0).floor() as i32, (pos.y / 16.0).floor() as i32, key.2);
         let ws = &mut *st;
-        let land = *ws.landing.entry(lkey).or_insert_with(|| {
-            // Straight down from the cell's ceiling (wind slant is small against the fall).
-            let c = DVec3::new((lkey.0 as f64 + 0.5) * 16.0, (lkey.1 as f64 + 0.5) * 16.0, top);
-            let low = DVec3::new(c.x, c.y, me.z - 2500.0);
-            let h = lvl.collision.trace(c, low, DVec3::ZERO);
-            let (mut z, mut n) = if h.fraction < 1.0 { (c.z + (low.z - c.z) * h.fraction, h.normal) } else { (f64::NEG_INFINITY, DVec3::Z) };
-            // A drawn roof above where it would land (no collision there): it lands on the roof.
-            if let Some(rz) = roofs_below(&ws.roofs, c, c.z - z.max(low.z)) {
-                if rz > z + 1.0 {
-                    z = rz;
-                    n = DVec3::Z;
-                }
-            }
-            // Water on the way down: if where it ends is in water, the surface is somewhere between (bisect).
-            let at = DVec3::new(c.x, c.y, z.max(low.z) + 0.5);
-            let water = crate::actors::water_at(lvl, at).map(|_| {
-                let (mut a, mut b) = (c, at);
-                if crate::actors::water_at(lvl, a).is_some() {
-                    return a.z + 1.0;
-                }
-                for _ in 0..12 {
-                    let m = (a + b) * 0.5;
-                    if crate::actors::water_at(lvl, m).is_some() {
-                        b = m;
-                    } else {
-                        a = m;
-                    }
-                }
-                b.z
-            });
-            Land { z, n, water }
-        });
+        let land = land_cell(ws, lvl, lkey, top, me.z);
         // Starting below where this cell's rain lands (inside, under the roof): it never fell from the sky.
+        if land.z > pos.z - 1.0 {
+            continue;
+        }
+        // The wind slants the fall: where it comes down is another cell (under a roof's edge, the dock's), so land
+        // by the cell under the point it reaches that height (twice, for a slope).
+        let mut land = land;
+        for _ in 0..2 {
+            let t = ((pos.z - land.z.max(end.z)) / -vel.z).max(0.0);
+            let p = pos + vel * t;
+            let k2 = ((p.x / 16.0).floor() as i32, (p.y / 16.0).floor() as i32, key.2);
+            if k2 == lkey {
+                break;
+            }
+            land = land_cell(ws, lvl, k2, top, me.z);
+            if land.z > pos.z - 1.0 {
+                break;
+            }
+        }
         if land.z > pos.z - 1.0 {
             continue;
         }
@@ -587,35 +584,32 @@ pub fn weather_system(
         let r = cam.right().as_vec3();
         DVec3::new(r.x as f64, r.z as f64, r.y as f64)
     };
+    if std::env::var_os("DXVIEW_RAINLOG").is_some() {
+        eprintln!("RAIN density {:.1} drops {} splashes {} height {:.0}", st.density, st.drops.len(), st.splashes.len(), st.height);
+    }
     let drops = &st.drops;
-    if let Some(m) = st.mesh.as_ref().and_then(|h| meshes.get_mut(h)) {
-        let mut m = m;
-        write_quads(&mut m, drops.len(), MAX_DROPS, |i, p, c| {
+    if let Some(mut img) = st.data.as_ref().and_then(|h| images.get_mut(h)) {
+        write_data(&mut img, drops.len(), MAX_DROPS, |i| {
             let d = &drops[i];
             let dir = (d.vel - pvel * DVec3::new(0.2, 0.2, 0.0)).normalize_or_zero();
-            let to_eye = eye - d.pos;
             // Far streaks get wider and dimmer by the same amount (the same light on screen) instead of thinning to
             // flickering sub-pixel lines.
-            let spread = (to_eye.length() / 400.0).max(1.0);
-            let side = dir.cross(to_eye.normalize_or_zero()).normalize_or_zero() * 0.35 * spread;
+            let spread = ((eye - d.pos).length() / 400.0).max(1.0);
             let tail = d.pos - dir * d.len as f64;
-            p.copy_from_slice(&[bv(d.pos - side), bv(d.pos + side), bv(tail + side), bv(tail - side)]);
             // Fading in under the column's top (over 700 units) hides where the rain begins.
             let under = ((d.top - d.pos.z) / 700.0).clamp(0.0, 1.0) as f32;
             let g = d.glow * ambient / spread as f32 * under * under;
-            c.copy_from_slice(&[[g, g, g, 1.0]; 4]);
+            let (h, t) = (bv(d.pos), bv(tail));
+            [h[0], h[1], h[2], g, t[0], t[1], t[2], (0.35 * spread) as f32 * dx_level::METERS_PER_UNIT]
         });
     }
     // Splashlets: short streaks along each droplet's motion, facing the camera.
     let splashes = &st.splashes;
-    if let Some(m) = st.splash_mesh.as_ref().and_then(|h| meshes.get_mut(h)) {
-        let mut m = m;
-        write_quads(&mut m, splashes.len(), MAX_SPLASHES, |i, p, c| {
+    if let Some(mut img) = st.splash_data.as_ref().and_then(|h| images.get_mut(h)) {
+        write_data(&mut img, splashes.len(), MAX_SPLASHES, |i| {
             let s = &splashes[i];
             let speed = s.vel.length().max(1.0);
             let dir = s.vel / speed;
-            let to_eye = (eye - s.pos).normalize_or_zero();
-            let side = dir.cross(to_eye).normalize_or(right) * 0.35;
             let mut len = (speed * 0.025).clamp(1.0, 4.0);
             // The tail never reaches under the surface it was thrown off.
             let fall = -dir.dot(s.n);
@@ -623,10 +617,16 @@ pub fn weather_system(
                 len = len.min(((s.pos - s.base).dot(s.n) - 0.3).max(0.0) / -fall);
             }
             let tail = s.pos - dir * len;
-            p.copy_from_slice(&[bv(s.pos - side), bv(s.pos + side), bv(tail + side), bv(tail - side)]);
             let g = (s.life / s.max.max(0.01)).clamp(0.0, 1.0) * 0.5;
-            c.copy_from_slice(&[[g, g, g, 1.0]; 4]);
+            let (h, t) = (bv(s.pos), bv(tail));
+            [h[0], h[1], h[2], g, t[0], t[1], t[2], 0.35 * dx_level::METERS_PER_UNIT]
         });
+    }
+    let _ = right;
+    // The materials' bind groups hold the data images' GPU textures: a re-uploaded image is a new texture, so
+    // the materials are touched to rebuild them.
+    for h in &st.mats {
+        let _ = materials.get_mut(h);
     }
     drop(_p3);
     // Shelter: how much open sky is about the player (its own zone, and points around it in sight), eased.
@@ -703,10 +703,6 @@ const WIDE_RAD: f64 = 1500.0;
 const RAIN_TOP: f64 = 2600.0;
 const MAX_SPLASHES: usize = 1500;
 
-/// Fills the quad buffers up to `cap` quads with collapsed (zero-area, black) ones: the meshes keep one size, so the
-/// render world never reallocates them (a mesh changing size every frame, or going empty, upset the slab allocator).
-/// Where an unused quad's corners go: one point far below the map (zero area, never drawn).
-const HIDDEN: [f32; 3] = [0.0, -1.0e5, 0.0];
 
 fn roofs_below(roofs: &Option<Roofs>, p: DVec3, depth: f64) -> Option<f64> {
     roofs.as_ref().and_then(|r| r.below(p, depth))
@@ -718,33 +714,119 @@ fn bv(p: DVec3) -> [f32; 3] {
 
 /// Fills the first `n` quads of a fixed-size quad mesh (positions and colours, 4 corners each) with `f`, in
 /// parallel, and hides the rest.
-fn write_quads(m: &mut Mesh, n: usize, cap: usize, f: impl Fn(usize, &mut [[f32; 3]], &mut [[f32; 4]]) + Sync) {
-    use bevy::mesh::VertexAttributeValues as V;
+/// Texels a row in the rain data images.
+const DATA_W: usize = 1024;
+
+/// Fill a rain data image: quad i = two texels (head xyz + brightness, tail xyz + half width; Bevy metres),
+/// unused quads zero (brightness 0: the shader drops them). The quads are split over all cores.
+fn write_data(img: &mut Image, n: usize, cap: usize, f: impl Fn(usize) -> [f32; 8] + Sync) {
     let n = n.min(cap);
-    let mut pos = match m.remove_attribute(Mesh::ATTRIBUTE_POSITION) {
-        Some(V::Float32x3(v)) => v,
-        _ => vec![HIDDEN; cap * 4],
-    };
-    let mut col = match m.remove_attribute(Mesh::ATTRIBUTE_COLOR) {
-        Some(V::Float32x4(v)) => v,
-        _ => vec![[0.0; 4]; cap * 4],
-    };
-    pos.resize(cap * 4, HIDDEN);
-    col.resize(cap * 4, [0.0; 4]);
+    if std::env::var_os("DXVIEW_RAINLOG").is_some() {
+        eprintln!("RAIN data {:?} {:?} n {n} first {:?}", img.data.as_ref().map(|d| d.len()), img.texture_descriptor.size, (0..n.min(3)).map(|i| f(i)).collect::<Vec<_>>());
+    }
+    let Some(bytes) = img.data.as_mut() else { return };
     const CHUNK: usize = 1024;
     let pool = bevy::tasks::ComputeTaskPool::get();
     let f = &f;
+    let used = (n * 32).min(bytes.len());
+    let (live, rest) = bytes.split_at_mut(used);
     pool.scope(|sc| {
-        for (ci, (pc, cc)) in pos[..n * 4].chunks_mut(CHUNK * 4).zip(col[..n * 4].chunks_mut(CHUNK * 4)).enumerate() {
+        for (ci, chunk) in live.chunks_mut(CHUNK * 32).enumerate() {
             sc.spawn(async move {
-                for (q, (p, c)) in pc.chunks_exact_mut(4).zip(cc.chunks_exact_mut(4)).enumerate() {
-                    f(ci * CHUNK + q, p, c);
+                for (q, out) in chunk.chunks_exact_mut(32).enumerate() {
+                    for (k, v) in f(ci * CHUNK + q).iter().enumerate() {
+                        out[k * 4..k * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                    }
                 }
             });
         }
     });
-    pos[n * 4..].fill(HIDDEN);
-    col[n * 4..].fill([0.0; 4]);
-    m.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
-    m.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    rest.fill(0);
+}
+
+pub const RAIN_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("8d4c2b1e-7f3a-4e95-a6d0-3b9e1c5f7a28");
+
+/// Rain streaks and splashlets built on the GPU from a data image (shaders/rain.wgsl).
+#[derive(Asset, bevy::render::render_resource::AsBindGroup, Reflect, Debug, Clone)]
+pub struct RainMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    pub tex: Handle<Image>,
+    #[texture(2, sample_type = "float", filterable = false)]
+    pub data: Handle<Image>,
+}
+
+impl Material for RainMaterial {
+    fn vertex_shader() -> bevy::shader::ShaderRef {
+        RAIN_SHADER.into()
+    }
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        RAIN_SHADER.into()
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Add
+    }
+    fn enable_prepass() -> bool {
+        false
+    }
+    fn enable_shadows() -> bool {
+        false
+    }
+    // The streaks face the camera whichever way they wind.
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialPipelineKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        Ok(())
+    }
+}
+
+pub fn setup_rain_shader(mut shaders: ResMut<Assets<Shader>>) {
+    let _ = shaders.insert(&RAIN_SHADER, Shader::from_wgsl(include_str!("shaders/rain.wgsl"), "dxview/rain.wgsl"));
+}
+
+/// Where rain coming down a 16-unit cell lands: straight down from the cell's ceiling `top` (the collision, a drawn
+/// roof over it, water on the way down), cached per cell.
+fn land_cell(ws: &mut WeatherState, lvl: &dx_level::Level, lkey: (i32, i32, i32), top: f64, me_z: f64) -> Land {
+    if let Some(l) = ws.landing.get(&lkey) {
+        return *l;
+    }
+    let me = DVec3::new(0.0, 0.0, me_z);
+    let land = (|| {
+            // Straight down from the cell's ceiling (wind slant is small against the fall).
+            let c = DVec3::new((lkey.0 as f64 + 0.5) * 16.0, (lkey.1 as f64 + 0.5) * 16.0, top);
+            let low = DVec3::new(c.x, c.y, me.z - 2500.0);
+            let h = lvl.collision.trace(c, low, DVec3::ZERO);
+            let (mut z, mut n) = if h.fraction < 1.0 { (c.z + (low.z - c.z) * h.fraction, h.normal) } else { (f64::NEG_INFINITY, DVec3::Z) };
+            // A drawn roof above where it would land (no collision there): it lands on the roof.
+            if let Some(rz) = roofs_below(&ws.roofs, c, c.z - z.max(low.z)) {
+                if rz > z + 1.0 {
+                    z = rz;
+                    n = DVec3::Z;
+                }
+            }
+            // Water on the way down: if where it ends is in water, the surface is somewhere between (bisect).
+            let at = DVec3::new(c.x, c.y, z.max(low.z) + 0.5);
+            let water = crate::actors::water_at(lvl, at).map(|_| {
+                let (mut a, mut b) = (c, at);
+                if crate::actors::water_at(lvl, a).is_some() {
+                    return a.z + 1.0;
+                }
+                for _ in 0..12 {
+                    let m = (a + b) * 0.5;
+                    if crate::actors::water_at(lvl, m).is_some() {
+                        b = m;
+                    } else {
+                        a = m;
+                    }
+                }
+                b.z
+            });
+            Land { z, n, water }
+        })();
+    ws.landing.insert(lkey, land);
+    land
 }
