@@ -7,13 +7,21 @@
 //!   per-system, per-pass and scene report to log.txt every 5 s (prof.rs); `BEVY_HORIZON_CPU_PROFILE=1` writes
 //!   bevy-horizon's cpu-profile.txt; `DXVIEW_NO_PREFETCH=1`, `BH_THREAD_CORES=any` and `BH_ROBUST_BUFFER_ACCESS=0`
 //!   are A/B switches.
-//! - `single_threaded`: the main world's schedules and the render world's extract run on one thread, as Skate 3
-//!   Rust Engine runs them on the Switch (its findings 63 §6.2, 52.5 to 57.5 fps; and 66 §3).
+//! - `multi_threaded`: Bevy's multi-threaded executors. Without it, the main world's schedules and the render
+//!   world's extract run on one thread, as Skate 3 Rust Engine runs them on the Switch (its findings 63 §6.2, 52.5
+//!   to 57.5 fps; and 66 §3): most of DX RUST's ~160 systems take the same resources, so they ran one at a time
+//!   anyway, paying for the task pool.
+//! - `no_cpu_boost`: keep the normal clocks while a map loads. Without it the CPU runs at 1785 MHz (and the GPU at
+//!   76.8 MHz) from launch until the first frame, and again while the loader works (`boost` below).
 //! - `gpu_clocks=fast` or `gpu_clocks=max`: the faster handheld GPU configuration an application may ask for
 //!   (460.8 MHz instead of 307.2; `max` also takes memory from 1331.2 to 1600 MHz). A measurement: what speeds up
 //!   is shading, what doesn't is memory traffic or the CPU.
 //! - `memory_log`: keep bevy_horizon's `[Memory]` heartbeat line. Its heap walk made a 30 ms frame in the first
 //!   run; without this option it is off.
+//!
+//! The Performance settings (perf.rs) start lean on the Switch: Anti-Aliasing and HDR Rendering off, Lean Rendering
+//! and Lean Updates on, unless settings.txt already has a value for them (`switch_settings`). They are on the
+//! Settings > Enhancements list like the rest.
 
 use bevy::prelude::*;
 
@@ -73,8 +81,15 @@ pub fn init() {
         }
         let read = if options.is_empty() { "none".to_string() } else { options.replace('\n', "; ") };
         eprintln!("[DX RUST] options.txt: {read}");
+        switch_settings();
         eprintln!("[DX RUST] settings: {}", settings_line());
         clocks::start(value("gpu_clocks"));
+        if option("no_cpu_boost") {
+            eprintln!("[Boost] options.txt no_cpu_boost: maps load at the normal clocks");
+        } else {
+            boost::allow();
+            boost::set(true, "the first map loads before the game starts");
+        }
     }
 }
 
@@ -89,7 +104,10 @@ impl Plugin for SwitchPlugin {
             _app.add_plugins(bevy_horizon::HorizonPlugin);
             _app.add_systems(Startup, screen_size);
             _app.add_systems(PreUpdate, dock_clocks);
-            if option("single_threaded") {
+            _app.add_systems(Last, (cpu_boost, shadow_lights_log));
+            if option("multi_threaded") {
+                eprintln!("[DX RUST] options.txt multi_threaded: Bevy's multi-threaded executors");
+            } else {
                 single_threaded(_app);
             }
         }
@@ -106,12 +124,96 @@ fn screen_size(mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>
     }
 }
 
+/// The Performance settings (perf.rs) the Switch starts with, where settings.txt has none: a value there (written
+/// by the menu, or by hand) wins.
+#[cfg(target_os = "horizon")]
+fn switch_settings() {
+    const SWITCH: [(&str, f32); 4] = [("AntiAliasing", 0.0), ("HDRRendering", 0.0), ("LeanRendering", 1.0), ("LeanUpdates", 1.0)];
+    // The working folder is the NRO's, where settings.rs keeps settings.txt when there is no exe path.
+    let saved = std::fs::read_to_string("settings.txt").unwrap_or_default();
+    for (key, value) in SWITCH {
+        let set = saved.lines().any(|line| line.split_once('=').is_some_and(|(k, _)| k.trim() == key));
+        if !set {
+            crate::settings::set(key, value);
+        }
+    }
+}
+
+/// The CPU boost follows the map loader (`loader::busy`): on while a map loads, off for play.
+#[cfg(target_os = "horizon")]
+fn cpu_boost() {
+    boost::set(crate::loader::busy(), "a map loads");
+}
+
+/// The game's markers on its shadow-casting lights, for `shadow_lights_log`.
+#[cfg(target_os = "horizon")]
+type LightMarkers = (
+    Has<crate::shadowlight::ShadowLight>,
+    Has<crate::dynlight::FlashCone>,
+    Has<crate::shafts::MoonShaft>,
+    Has<crate::shafts::ShaftSpot>,
+    Has<crate::shafts::ShaftBeam>,
+    Has<crate::clouds::LightningLight>,
+);
+
+#[cfg(target_os = "horizon")]
+fn light_marker((shadow, cone, moon, spot, beam, lightning): (bool, bool, bool, bool, bool, bool)) -> &'static str {
+    if shadow {
+        "ShadowLight (Real-Time Shadows)"
+    } else if cone {
+        "FlashCone (Flashlight Cone)"
+    } else if moon || spot || beam {
+        "shafts.rs (Light Shafts)"
+    } else if lightning {
+        "LightningLight (clouds.rs)"
+    } else {
+        "no marker"
+    }
+}
+
+/// Logs the shadow-casting lights the renderer takes (visible to a view, as Bevy's extract checks) on the first frame
+/// and whenever that set changes: each one adds shadow passes to every frame. (Run 2's single clears of the 512² cube
+/// and 1024² shadow maps in the title menu were wgpu zero-filling them before their first use, not shadow passes.)
+#[cfg(target_os = "horizon")]
+fn shadow_lights_log(
+    points: Query<(Entity, &PointLight, &ViewVisibility, &GlobalTransform, LightMarkers)>,
+    spots: Query<(Entity, &SpotLight, &ViewVisibility, &GlobalTransform, LightMarkers)>,
+    suns: Query<(Entity, &DirectionalLight, &ViewVisibility, &GlobalTransform, LightMarkers)>,
+    mut shown: Local<Option<Vec<Entity>>>,
+) {
+    let mut now = Vec::new();
+    for (e, l, v, t, m) in &points {
+        if l.shadow_maps_enabled && v.get() {
+            now.push((e, "point", l.intensity, t.translation(), light_marker(m)));
+        }
+    }
+    for (e, l, v, t, m) in &spots {
+        if l.shadow_maps_enabled && v.get() {
+            now.push((e, "spot", l.intensity, t.translation(), light_marker(m)));
+        }
+    }
+    for (e, l, v, t, m) in &suns {
+        if l.shadow_maps_enabled && v.get() {
+            now.push((e, "directional", l.illuminance, t.translation(), light_marker(m)));
+        }
+    }
+    now.sort_by_key(|l| l.0);
+    if shown.as_ref().is_some_and(|shown| now.iter().map(|l| l.0).eq(shown.iter().copied())) {
+        return;
+    }
+    let lights: Vec<String> =
+        now.iter().map(|(e, kind, strength, at, marker)| format!("{e} {kind} {marker}, strength {strength}, at {at:.1}")).collect();
+    eprintln!("[DX RUST] shadow-casting lights now visible: {}", if lights.is_empty() { "none".into() } else { lights.join("; ") });
+    *shown = Some(now.iter().map(|l| l.0).collect());
+}
+
 /// The settings that decide what the GPU draws, for the log: a run's numbers mean little without them.
 #[cfg(target_os = "horizon")]
 fn settings_line() -> String {
-    const KEYS: [&str; 13] = [
+    const KEYS: [&str; 17] = [
         "Resolution", "VSync", "RealtimeShadows", "SoftShadows", "AmbientOcclusion", "Bloom", "ModernWater",
         "LightShafts", "FogVolumes", "AtmosphericFog", "FlashlightCone", "DiegeticScreens", "HDTextures",
+        "AntiAliasing", "HDRRendering", "LeanRendering", "LeanUpdates",
     ];
     let mut line = format!("Modern {}", crate::remaster::is_modern());
     for key in KEYS {
@@ -120,7 +222,7 @@ fn settings_line() -> String {
     line
 }
 
-/// options.txt `single_threaded` (top of file).
+/// One thread for the main world and the render world's extract, unless options.txt has `multi_threaded` (top of file).
 #[cfg(target_os = "horizon")]
 fn single_threaded(app: &mut App) {
     use bevy::app::{
@@ -149,7 +251,7 @@ fn single_threaded(app: &mut App) {
             schedule.set_apply_final_deferred(false);
         });
     }
-    eprintln!("[DX RUST] options.txt single_threaded: the main world and the render world's extract run on one thread");
+    eprintln!("[DX RUST] one thread for the main world and the render world's extract (options.txt multi_threaded: Bevy's executors)");
 }
 
 /// A `[Clocks]` line whenever the console is docked or undocked.
@@ -157,6 +259,64 @@ fn single_threaded(app: &mut App) {
 fn dock_clocks(mode: Res<bevy_horizon::HorizonDisplayMode>) {
     if mode.is_changed() && !mode.is_added() {
         clocks::log("display mode changed");
+    }
+}
+
+/// The CPU boost while maps load (options.txt `no_cpu_boost` turns it off). libnx's `appletSetCpuBoostMode(FastLoad)`
+/// takes the CPU from 1020 to 1785 MHz and the GPU down to 76.8 MHz, so it is on only while nothing but a loading
+/// screen is drawn. The Minecraft port's loads took about half as long with it (workshop horizon-port
+/// OPTIMIZATIONS.md, O8). Only an application (a forwarder or title takeover) may boost.
+#[cfg(target_os = "horizon")]
+mod boost {
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    use std::time::Instant;
+
+    /// libnx `ApmCpuBoostMode` (switch/services/apm.h).
+    const NORMAL: u32 = 0;
+    const FAST_LOAD: u32 = 1;
+
+    unsafe extern "C" {
+        fn appletGetAppletType() -> i32;
+        fn appletSetCpuBoostMode(mode: u32) -> u32;
+    }
+
+    static ALLOWED: AtomicBool = AtomicBool::new(false);
+    static ON: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+    pub(super) fn allow() {
+        // SAFETY: a libnx getter; libnx sets up the applet service before main.
+        let kind = unsafe { appletGetAppletType() };
+        if kind == 0 {
+            ALLOWED.store(true, Relaxed);
+        } else {
+            eprintln!("[Boost] applet type {kind}, not an application: maps load at the normal clocks");
+        }
+    }
+
+    /// Turns the boost on or off, logging each change and how long the boost lasted.
+    pub(super) fn set(on: bool, why: &str) {
+        if !ALLOWED.load(Relaxed) {
+            return;
+        }
+        let Ok(mut since) = ON.lock() else { return };
+        if since.is_some() == on {
+            return;
+        }
+        // SAFETY: allowed for an application (checked in `allow`).
+        let rc = unsafe { appletSetCpuBoostMode(if on { FAST_LOAD } else { NORMAL }) };
+        if rc != 0 {
+            // For example 0x4b59 (libnx IncompatSysVer: the call needs firmware 7.0.0) in an emulator.
+            ALLOWED.store(false, Relaxed);
+            eprintln!("[Boost] appletSetCpuBoostMode failed with 0x{rc:x}: maps load at the normal clocks");
+            return;
+        }
+        if on {
+            *since = Some(Instant::now());
+            eprintln!("[Boost] CPU boost on ({why}): CPU 1785 MHz, GPU 76.8 MHz");
+        } else {
+            let secs = since.take().map_or(0.0, |t| t.elapsed().as_secs_f32());
+            eprintln!("[Boost] CPU boost off after {secs:.1} s");
+        }
     }
 }
 

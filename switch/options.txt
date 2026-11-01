@@ -5,6 +5,9 @@
 # Change one thing per run, and play the same route each time: 30 s in the main menu, New Game, then on
 # Liberty Island 30 s standing at the start and 60 s walking towards the statue. Keep log.txt, cpu-profile.txt
 # and the ELF of the same build (target/aarch64-nintendo-horizon/release/dxview).
+#
+# The Performance settings (Settings > Enhancements > Performance: Anti-Aliasing, HDR Rendering, Lean Rendering,
+# Lean Updates) start lean on the Switch; change them in the game, or in settings.txt beside the NRO.
 
 # Profiling, on in every run so they compare: the game's report every 5 s in log.txt (per-system and per-pass
 # times, scene counts, uploads a frame) and bevy-horizon's sampling profiler (cpu-profile.txt beside log.txt).
@@ -12,8 +15,15 @@ env DXVIEW_PROF=1
 env BEVY_HORIZON_CPU_PROFILE=1
 
 # A/B switches, one per run after the baseline:
-# single_threaded
+# multi_threaded
+# no_cpu_boost
 # gpu_clocks=fast
 # env DXVIEW_NO_PREFETCH=1
 # env BH_THREAD_CORES=any
 # env BH_ROBUST_BUFFER_ACCESS=0
+
+# The intro's frames as PNGs beside log.txt, to show what draws wrongly in it: the game goes to the intro 1 s after
+# the title shows, and saves intro_<seconds>.png at each of these seconds after its first frame (each save stalls
+# a frame or two). Ryujinx can't draw this game's frames, so these are the way to see the console's picture.
+# env DXVIEW_GOTO=1;00_Intro.dx;intro
+# env DXVIEW_TIMED_SHOTS=intro_;15,25,35,45,60,75,90,110,130,150

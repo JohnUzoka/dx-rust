@@ -36,6 +36,11 @@ fn app_id() -> Option<String> {
 
 /// What the presence says now (the map loader calls this on every arrival).
 pub fn set(details: &str, state: &str) {
+    // No Discord on the Switch, and its sockets have no Unix-domain family: the thread would only retry forever
+    // (and still be running at exit).
+    if cfg!(target_os = "horizon") {
+        return;
+    }
     if let Ok(mut w) = WANT.lock() {
         *w = Some((details.to_string(), state.to_string()));
     }
