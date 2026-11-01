@@ -22,8 +22,13 @@ env BEVY_HORIZON_CPU_PROFILE=1
 # env DXVIEW_NO_PREFETCH=1
 # env BH_THREAD_CORES=any
 # env BH_ROBUST_BUFFER_ACCESS=0
-# no_zcull                     # for geometry missing on the console only, like run 3's dock
 # env DXVIEW_MIRROR_SLOTS=0    # no reflections: mirrored floors and glass show their own picture
+
+# Missing geometry on the console only (the intro's red wall panels, the Liberty Island dock): one per run, then
+# watch the intro's red room. log.txt's [Draw check] lines say which level surfaces never got ready.
+# no_zcull                     # the GPU's coarse depth test off
+# no_gpu_culling               # no indirect draws: Bevy's GPU culling out of the picture
+# draw_empty                   # NVK sets up every indirect draw, empty ones too
 
 # The intro's frames as PNGs beside log.txt, to show what draws wrongly in it: the game goes to the intro 1 s after
 # the title shows, and saves intro_<seconds>.png at each of these seconds after its first frame (each save stalls

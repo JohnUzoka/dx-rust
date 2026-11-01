@@ -18,12 +18,16 @@
 //!   is shading, what doesn't is memory traffic or the CPU.
 //! - `memory_log`: keep bevy_horizon's `[Memory]` heartbeat line. Its heap walk made a 30 ms frame in the first
 //!   run; without this option it is off.
-//! - `no_zcull`: ZCULL (the GPU's coarse depth test, which rejects hidden pixels in blocks) off in every render pass.
-//!   An A/B switch for geometry that's missing on the console but not on PC (run 3: the Liberty Island dock, after
-//!   the intro, until a reload).
+//! - Missing geometry on the console only (the intro's red wall panels in runs 2-4, run 3's Liberty Island dock until
+//!   a reload; a desktop build with the same settings draws both), one switch per run:
+//!   - `no_zcull`: ZCULL (the GPU's coarse depth test, which rejects hidden pixels in blocks) off in every pass;
+//!   - `no_gpu_culling`: every camera draws without indirect draws, so Bevy's GPU culling is out of the picture;
+//!   - `draw_empty`: NVK sets up every indirect draw instead of skipping the ones it reads as empty.
+//!   `[Draw check]` lines, 6 s and 20 s after each map arrives, list the level surfaces whose material, texture or
+//!   mesh the renderer still hasn't got; none listed with a surface missing on screen points at the GPU side.
 //!
-//! The Performance settings (perf.rs) start lean on the Switch: Anti-Aliasing and HDR Rendering off, Lean Rendering
-//! and Lean Updates on, unless settings.txt already has a value for them (`switch_settings`). They are on the
+//! The settings the Switch starts with (`switch_settings`), unless settings.txt already has a value: Anti-Aliasing and
+//! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), and Open Sea on (water.rs). They are on the
 //! Settings > Enhancements list like the rest.
 
 use bevy::prelude::*;
@@ -107,7 +111,21 @@ impl Plugin for SwitchPlugin {
             _app.add_plugins(bevy_horizon::HorizonPlugin);
             _app.add_systems(Startup, screen_size);
             _app.add_systems(PreUpdate, dock_clocks);
-            _app.add_systems(Last, (cpu_boost, shadow_lights_log));
+            _app.add_systems(Last, (cpu_boost, shadow_lights_log, draw_check_collect));
+            if let Some(render) = _app.get_sub_app_mut(bevy::render::RenderApp) {
+                render.add_systems(bevy::render::Render, draw_check_report.after(bevy::render::RenderSystems::PrepareAssets));
+            }
+            if option("no_gpu_culling") {
+                // Bevy wants NoIndirectDrawing on a camera from its spawn: every camera the game makes gets it then.
+                _app.add_observer(|add: On<Add, Camera>, mut commands: Commands| {
+                    commands.entity(add.entity).insert(bevy::render::view::NoIndirectDrawing);
+                });
+                eprintln!("[DX RUST] options.txt no_gpu_culling: every camera draws without indirect draws (no GPU culling)");
+            }
+            if option("draw_empty") {
+                let set = bevy_horizon::nvk_tune::set(bevy_horizon::nvk_tune::Knob::SkipEmptyDraws, 0);
+                eprintln!("[DX RUST] options.txt draw_empty: NVK sets up every indirect draw, empty ones too ({})", if set { "set" } else { "this NVK has no switch for it" });
+            }
             if option("multi_threaded") {
                 eprintln!("[DX RUST] options.txt multi_threaded: Bevy's multi-threaded executors");
             } else {
@@ -132,11 +150,12 @@ fn screen_size(mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>
     }
 }
 
-/// The Performance settings (perf.rs) the Switch starts with, where settings.txt has none: a value there (written
-/// by the menu, or by hand) wins.
+/// The settings the Switch starts with, where settings.txt has none (a value there, written by the menu or by hand,
+/// wins): the lean Performance settings (perf.rs), and Open Sea (water.rs), so the sea doesn't end in black.
 #[cfg(target_os = "horizon")]
 fn switch_settings() {
-    const SWITCH: [(&str, f32); 4] = [("AntiAliasing", 0.0), ("HDRRendering", 0.0), ("LeanRendering", 1.0), ("LeanUpdates", 1.0)];
+    const SWITCH: [(&str, f32); 5] =
+        [("AntiAliasing", 0.0), ("HDRRendering", 0.0), ("LeanRendering", 1.0), ("LeanUpdates", 1.0), ("OpenSea", 1.0)];
     // The working folder is the NRO's, where settings.rs keeps settings.txt when there is no exe path.
     let saved = std::fs::read_to_string("settings.txt").unwrap_or_default();
     for (key, value) in SWITCH {
@@ -151,6 +170,97 @@ fn switch_settings() {
 #[cfg(target_os = "horizon")]
 fn cpu_boost() {
     boost::set(crate::loader::busy(), "a map loads");
+}
+
+/// A level surface (BSP batch) for the draw check: its mesh, material and base texture, size and place.
+#[cfg(target_os = "horizon")]
+struct Surface {
+    mesh: AssetId<Mesh>,
+    material: AssetId<crate::shadowlight::BspMaterial>,
+    image: Option<AssetId<Image>>,
+    tris: usize,
+    at: Vec3,
+    seen: bool,
+}
+
+/// The surfaces gathered by `draw_check_collect` for the render world to check, with when.
+#[cfg(target_os = "horizon")]
+static DRAW_CHECK: std::sync::Mutex<Option<(f32, Vec<Surface>)>> = std::sync::Mutex::new(None);
+
+/// `[Draw check]` 6 s and 20 s after each map arrives: hands the level's surfaces to `draw_check_report`, which logs
+/// those the renderer can't draw yet. Run 3 lost the Liberty Island dock and runs 2-4 the intro's red bars on the
+/// console only; this says whether their material, texture or mesh never got ready, or the GPU dropped them.
+#[cfg(target_os = "horizon")]
+fn draw_check_collect(
+    time: Res<Time<Real>>,
+    mats: Res<Assets<crate::shadowlight::BspMaterial>>,
+    meshes: Res<Assets<Mesh>>,
+    surfaces: Query<(
+        &Mesh3d,
+        &MeshMaterial3d<crate::shadowlight::BspMaterial>,
+        &ViewVisibility,
+        Option<&bevy::camera::primitives::Aabb>,
+        &GlobalTransform,
+    )>,
+    mut state: Local<(u64, f32, usize)>,
+) {
+    const AFTER: [f32; 2] = [6.0, 20.0];
+    let now = time.elapsed_secs();
+    if crate::loader::new_map(&mut state.0) {
+        state.1 = now;
+        state.2 = 0;
+    }
+    let Some(&after) = AFTER.get(state.2) else { return };
+    if crate::loader::busy() || now - state.1 < after {
+        return;
+    }
+    state.2 += 1;
+    let list = surfaces
+        .iter()
+        .map(|(mesh, mat, seen, aabb, tf)| Surface {
+            mesh: mesh.0.id(),
+            material: mat.0.id(),
+            image: mats.get(&mat.0).and_then(|m| m.base.base_color_texture.as_ref()).map(|h| h.id()),
+            tris: meshes.get(&mesh.0).and_then(|m| m.indices()).map_or(0, |i| i.len() / 3),
+            at: aabb.map_or(tf.translation(), |a| tf.transform_point(Vec3::from(a.center))),
+            seen: seen.get(),
+        })
+        .collect();
+    if let Ok(mut c) = DRAW_CHECK.lock() {
+        *c = Some((after, list));
+    }
+}
+
+/// The render world's half of the draw check (after its assets are prepared).
+#[cfg(target_os = "horizon")]
+fn draw_check_report(
+    materials: Res<bevy::render::erased_render_asset::ErasedRenderAssets<bevy::pbr::PreparedMaterial>>,
+    images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
+    allocator: Res<bevy::render::mesh::allocator::MeshAllocator>,
+) {
+    let Some((after, list)) = DRAW_CHECK.lock().ok().and_then(|mut c| c.take()) else { return };
+    let mut missing = Vec::new();
+    for s in &list {
+        let material = materials.get(s.material).is_some();
+        let texture = s.image.is_none_or(|i| images.get(i).is_some());
+        let mesh = allocator.mesh_vertex_slice(&s.mesh).is_some();
+        if !(material && texture && mesh) {
+            let mut why = Vec::new();
+            if !material {
+                why.push("material not prepared");
+            }
+            if !texture {
+                why.push("texture not on the GPU");
+            }
+            if !mesh {
+                why.push("mesh not allocated");
+            }
+            let seen = if s.seen { ", in view" } else { "" };
+            missing.push(format!("{} tris at {:.0} ({}){seen}", s.tris, s.at, why.join(", ")));
+        }
+    }
+    let detail = if missing.is_empty() { String::new() } else { format!(": {}", missing.join("; ")) };
+    eprintln!("[Draw check] {after:.0} s after arriving: {} level surfaces, {} not ready{detail}", list.len(), missing.len());
 }
 
 /// The game's markers on its shadow-casting lights, for `shadow_lights_log`.
