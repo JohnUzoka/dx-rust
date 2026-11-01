@@ -7,7 +7,8 @@
 # and the ELF of the same build (target/aarch64-nintendo-horizon/release/dxview).
 #
 # The Performance settings (Settings > Enhancements > Performance: Anti-Aliasing, HDR Rendering, Lean Rendering,
-# Lean Updates) start lean on the Switch; change them in the game, or in settings.txt beside the NRO.
+# Lean Updates) start lean on the Switch; change them in the game, or in settings.txt beside the NRO. The FPS Counter
+# is there too (frames a second and the frame time, top right).
 
 # Profiling, on in every run so they compare: the game's report every 5 s in log.txt (per-system and per-pass
 # times, scene counts, uploads a frame) and bevy-horizon's sampling profiler (cpu-profile.txt beside log.txt).
@@ -21,9 +22,15 @@ env BEVY_HORIZON_CPU_PROFILE=1
 # env DXVIEW_NO_PREFETCH=1
 # env BH_THREAD_CORES=any
 # env BH_ROBUST_BUFFER_ACCESS=0
+# no_zcull                     # for geometry missing on the console only, like run 3's dock
+# env DXVIEW_MIRROR_SLOTS=0    # no reflections: mirrored floors and glass show their own picture
 
 # The intro's frames as PNGs beside log.txt, to show what draws wrongly in it: the game goes to the intro 1 s after
 # the title shows, and saves intro_<seconds>.png at each of these seconds after its first frame (each save stalls
 # a frame or two). Ryujinx can't draw this game's frames, so these are the way to see the console's picture.
 # env DXVIEW_GOTO=1;00_Intro.dx;intro
 # env DXVIEW_TIMED_SHOTS=intro_;15,25,35,45,60,75,90,110,130,150
+
+# Screenshots at any time, to show what draws wrongly: shot_<seconds>.png beside log.txt at each of these seconds
+# after the first frame (here every 15 s for the first 5 minutes).
+# env DXVIEW_TIMED_SHOTS=shot_;30,45,60,75,90,105,120,135,150,165,180,195,210,225,240,255,270,285,300

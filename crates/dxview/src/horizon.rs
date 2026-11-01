@@ -18,6 +18,9 @@
 //!   is shading, what doesn't is memory traffic or the CPU.
 //! - `memory_log`: keep bevy_horizon's `[Memory]` heartbeat line. Its heap walk made a 30 ms frame in the first
 //!   run; without this option it is off.
+//! - `no_zcull`: ZCULL (the GPU's coarse depth test, which rejects hidden pixels in blocks) off in every render pass.
+//!   An A/B switch for geometry that's missing on the console but not on PC (run 3: the Liberty Island dock, after
+//!   the intro, until a reload).
 //!
 //! The Performance settings (perf.rs) start lean on the Switch: Anti-Aliasing and HDR Rendering off, Lean Rendering
 //! and Lean Updates on, unless settings.txt already has a value for them (`switch_settings`). They are on the
@@ -109,6 +112,11 @@ impl Plugin for SwitchPlugin {
                 eprintln!("[DX RUST] options.txt multi_threaded: Bevy's multi-threaded executors");
             } else {
                 single_threaded(_app);
+            }
+            if option("no_zcull") {
+                // After HorizonPlugin, which sets ZCULL's direction; from the first render pass on.
+                let set = bevy_horizon::nvk_tune::set(bevy_horizon::nvk_tune::Knob::Zcull, 0);
+                eprintln!("[DX RUST] options.txt no_zcull: ZCULL off in every render pass ({})", if set { "set" } else { "this NVK has no switch for it" });
             }
         }
     }
