@@ -800,6 +800,7 @@ impl Enhance {
             ("HDRRendering", "HDR Rendering", "Draws the scene in 16-bit colour before it reaches the screen. Off draws it in 8-bit, half the memory traffic; the picture is the same except for faint differences where bright things show through glass. Glow And Bloom turns it back on."),
             ("LeanRendering", "Lean Rendering", "Leaves out GPU work that adds nothing to the picture: copies of each camera's picture to the screen that the next camera covers, a depth pass only Modern Water and Ambient Occlusion read, shadow lookups with no shadow lights, and Modern Water's fine mesh while Modern Water is off (it comes back at the next map)."),
             ("LeanUpdates", "Lean Updates", "Leaves out CPU work that changes nothing: redrawing menu and HUD windows that haven't changed, rewriting hidden text and unchanged lights, copying the collision list for every person every frame, and posing birds, flies and electric arcs nobody can see (one coming into view may show its last pose for a frame)."),
+            ("FPSCounter", "FPS Counter", "Shows frames per second and the average frame time in the top-right corner, over each half second."),
         ] {
             let mut c = debug_mode_choice();
             c.key = key.into();

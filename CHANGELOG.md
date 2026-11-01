@@ -4,14 +4,16 @@
 
 ### Performance settings (*Settings > Enhancements > Performance*)
 - **Anti-Aliasing** (4x MSAA) and **HDR Rendering** can be switched off for slow GPUs. Both stay on by default.
+  Anti-Aliasing also covers the world drawn into mirrors, security feeds and the aug and outfit views.
 - **Lean Rendering** leaves out GPU work that adds nothing to the picture: copies of each camera's picture that the
   next camera covers, a depth pass nothing reads, shadow lookups with no shadow lights, and Modern Water's fine mesh
   while Modern Water is off.
-- **Lean Updates** leaves out CPU work that changes nothing: unchanged menu and HUD windows aren't redrawn, hidden
-  text and unchanged lights aren't rewritten, people no longer copy the collision list every frame, and birds, flies
-  and electric arcs nobody can see aren't posed.
+- **Lean Updates** leaves out CPU work that changes nothing: unchanged menu, HUD and conversation windows aren't
+  redrawn, hidden text and unchanged lights aren't rewritten, people no longer copy the collision list every frame,
+  and birds, flies and electric arcs nobody can see aren't posed.
 - Both lean settings are off by default; the Nintendo Switch build starts with them on and with Anti-Aliasing and
   HDR Rendering off.
+- **FPS Counter**: frames per second and the frame time in the top-right corner. Off by default.
 
 ## v0.10.0
 

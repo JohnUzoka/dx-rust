@@ -38,6 +38,16 @@ pub fn postfx_system(
     mut points: Query<(&mut PointLight, &crate::shadowlight::ShadowLight)>,
     mut spots: Query<&mut SpotLight, With<crate::dynlight::FlashCone>>,
     mut bsp: ResMut<Assets<crate::shadowlight::BspMaterial>>,
+    // The cameras that draw the world into an image: mirrors' reflections, security feeds, the outfit and aug views.
+    others: Query<
+        (Entity, &Msaa),
+        Or<(
+            With<crate::mirror::MirrorCam>,
+            With<crate::computers::FeedCam>,
+            With<crate::outfit_view::OutfitCam>,
+            With<crate::augdisplay::AugViewCam>,
+        )>,
+    >,
     mut ao_gen: Local<Option<(bool, u32)>>,
 ) {
     // The cameras' make-up never changes in play: the SSAO pass, the depth / normal prepasses, MSAA off with SMAA.
@@ -108,6 +118,14 @@ pub fn postfx_system(
         }
         if cam.msaa_writeback != writeback {
             cam.msaa_writeback = writeback;
+        }
+    }
+    // Anti-Aliasing covers the world drawn into images too (4x, Bevy's default, while it's on): with it off, a mirror's
+    // reflection was still drawn multisampled, plus a writeback of its sky into the samples (3.9 ms on the Switch).
+    let image_msaa = if crate::perf::msaa() { Msaa::Sample4 } else { Msaa::Off };
+    for (e, msaa) in &others {
+        if *msaa != image_msaa {
+            commands.entity(e).insert(image_msaa);
         }
     }
     let soft = soft_on() && crate::shadowlight::level() > 0;

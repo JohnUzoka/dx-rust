@@ -1003,6 +1003,17 @@ pub fn classic_hud_system(
                 snap.held.is_some().hash(h);
                 (ww, wh, s).hash(h);
             })),
+            // Lean Updates: the conversation windows (a cut scene is all conversation; run 3's intro spent 7.8 ms a
+            // frame redrawing them). The upper one is only its background; the lower one is the speaker, the line and
+            // the choices, where the letterbox puts it (the choice rows for the mouse stay as last drawn).
+            Win::ConUpper if lean => Some(hkey(&(ww, wh, s))),
+            Win::ConLower if lean => Some(hkey_with(|h| {
+                use std::hash::Hash;
+                (ww, wh, s, y, sw).hash(h);
+                con.play.as_ref().map(|p| (&p.name, &p.text, p.player_line, p.forced, &p.choices, p.focus)).hash(h);
+                crate::gamepad::pad_in_use().hash(h);
+                std::mem::discriminant(&crate::gamepad::glyph_kind()).hash(h);
+            })),
             Win::Belt => {
                 let mut ammo: Vec<_> = snap.loaded_ammo.iter().collect();
                 ammo.sort();

@@ -551,6 +551,7 @@ pub fn make_player(level: &Level, (params, eye_height, bob): (MoveParams, f64, f
 
 mod horizon;
 mod perf;
+mod fps;
 
 fn main() {
     horizon::init();
@@ -711,6 +712,8 @@ fn main() {
         .add_systems(Startup, (detect_bc1, loader::first_level_setup).chain())
         .add_systems(First, loader::loader_system.before(save::save_first_system))
         .add_systems(Update, loader::loading_screen_system)
+        .add_systems(Startup, fps::spawn_fps_text)
+        .add_systems(Update, fps::fps_system)
         .add_systems(
             Update,
             (

@@ -65,16 +65,18 @@ impl World<'_> {
             if Some(i) == self.ignore || c.radius <= 0.0 || c.height <= 0.0 {
                 continue;
             }
-            // BlockPlayer stops only the player (whose world carries the push masses): shots, projectiles, sight
-            // lines and other pawns pass (the training range's booth has one in the line of fire).
-            if self.pushable.is_none() && self.level.players_only.contains(&c.actor) {
-                continue;
-            }
+            // Lean Updates: the box test first, so the hash lookup below only runs for cylinders near the sweep (it
+            // was 6% of the Switch's main thread on Liberty Island, run 3). Both only skip, so the order changes no hit.
             if lean {
                 let (r, h, p) = (c.radius + extent.x, c.height + extent.z, c.center);
                 if lo.x > p.x + r || hi.x < p.x - r || lo.y > p.y + r || hi.y < p.y - r || lo.z > p.z + h || hi.z < p.z - h {
                     continue;
                 }
+            }
+            // BlockPlayer stops only the player (whose world carries the push masses): shots, projectiles, sight
+            // lines and other pawns pass (the training range's booth has one in the line of fire).
+            if self.pushable.is_none() && self.level.players_only.contains(&c.actor) {
+                continue;
             }
             if let Some(hc) = trace_cylinder(c, start, end, extent) {
                 if hc.fraction < best.fraction {
