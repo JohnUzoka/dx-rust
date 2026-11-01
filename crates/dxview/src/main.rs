@@ -1390,6 +1390,10 @@ fn setup(
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, u1);
             mesh.insert_indices(Indices::U32(i));
         } else {
+            // The open sea meets a Classic sheet at its own vertices (Open Sea, water.rs).
+            if b.class == SurfaceClass::Water && !b.sky {
+                sheet_pts.extend_from_slice(&b.positions);
+            }
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, b.positions.clone());
             mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, b.normals.clone());
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, b.uvs.clone());
@@ -1497,7 +1501,8 @@ fn setup(
     if relight::relief_level() > 0 {
         println!("relight: {} textures with relief maps ({} ms)", relief_mats.len(), relief_t0.elapsed().as_millis());
     }
-    if let Some((mesh, mat)) = modern_water.then(|| water::ocean_ring(&mirrors, &level.batches, &sheet_pts)).flatten() {
+    let open_sea = modern_water || water::open_sea();
+    if let Some((mesh, mat)) = open_sea.then(|| water::ocean_ring(&mirrors, &level.batches, &sheet_pts)).flatten() {
         if let (Some(bevy::mesh::VertexAttributeValues::Float32x3(p)), Some(Indices::U32(i))) = (mesh.attribute(Mesh::ATTRIBUTE_POSITION), mesh.indices()) {
             let y = p.first().map_or(0.0, |v| v[1]);
             let back = backing_mat.get_or_insert_with(|| materials.add(water::backing_material())).clone();

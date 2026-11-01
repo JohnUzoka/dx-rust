@@ -142,6 +142,13 @@ pub fn modern() -> bool {
     crate::settings::get("ModernWater") > 0.5
 }
 
+/// Enhancement "Open Sea" (setting OpenSea, ours; the Switch build starts with it on): without Modern Water, the open
+/// sea (`ocean_ring`) still runs past the map's edge to the horizon, drawn the Classic way, the edge walls go, and the
+/// map's water no longer fades out with distance. Classic alone ends the water 30-120 m from the eye in black.
+pub fn open_sea() -> bool {
+    crate::settings::get("OpenSea") > 0.5
+}
+
 /// Each frame: time and the live rings into every water material.
 pub fn water_system(
     time: Res<Time>,
@@ -172,6 +179,7 @@ pub fn water_system(
     let switched = wm.modern != Some(modern);
     wm.modern = Some(modern);
     let rain = (crate::weather::density() / 14.0).clamp(0.0, 1.0);
+    let open_sea = open_sea();
     for (i, h) in wm.mats.iter().enumerate() {
         if let Some(mut m) = mats.get_mut(h) {
             m.extension.params.t.x = t;
@@ -180,6 +188,12 @@ pub fn water_system(
             m.extension.params.m.z = rain;
             m.extension.params.moon = moon_dir.extend(1.0);
             m.extension.params.far.w = if modern { WAVE_M } else { 0.0 };
+            // Classic water fades out between far.x and far.y metres from the eye; the open sea goes to the horizon.
+            let (near, far) = if open_sea { (1.0e6, 2.0e6) } else { (30.0, 120.0) };
+            if m.extension.params.far.x != near {
+                m.extension.params.far.x = near;
+                m.extension.params.far.y = far;
+            }
             if switched {
                 let opaque = wm.opaque.get(i).copied().unwrap_or(false);
                 m.base.alpha_mode = match (opaque, modern) {
@@ -632,7 +646,7 @@ pub fn ocean_system(
             *v = want;
         }
     }
-    let on = modern() && !q.is_empty();
+    let on = (modern() || open_sea()) && !q.is_empty();
     let want = if on { Visibility::Inherited } else { Visibility::Hidden };
     for mut v in &mut q {
         if *v != want {

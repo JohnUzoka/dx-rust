@@ -91,6 +91,11 @@
   HDR Rendering off.
 - **FPS Counter**: frames per second and the frame time in the top-right corner. Off by default.
 
+### Open Sea (*Settings > Enhancements > Visuals*)
+- Without Modern Water, the sea runs on past the map's edge to the horizon in the original water's look, instead
+  of fading to black 30-120 m away in front of the black walls at the edge of the map. Off by default (the Nintendo
+  Switch build starts with it on); it costs one extra mesh.
+
 ## v0.10.0
 
 Everything new since v0.9.0. Every change to the original game is still an option in *Settings > Enhancements*,
