@@ -162,17 +162,34 @@ fn pose(
     parts: &[MeshPart],
     handles: &[Handle<Mesh>],
 ) {
+    let lean = crate::perf::lean_updates();
     let f = clip.frame();
     for (pi, hm) in handles.iter().enumerate() {
         if let Some(mut mm) = meshes.get_mut(hm) {
-            let pos: Vec<[f32; 3]> = parts[pi]
-                .vert_ids
+            let ids = &parts[pi].vert_ids;
+            let pos = ids
                 .iter()
-                .map(|&v| ue_to_bevy(mesh.sample(clip.start, clip.frames, f, v as usize)))
-                .collect();
-            mm.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+                .map(|&v| ue_to_bevy(mesh.sample(clip.start, clip.frames, f, v as usize)));
+            // Lean Updates: into the positions the mesh already has, not a new array.
+            match mm.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
+                Some(bevy::mesh::VertexAttributeValues::Float32x3(dst)) if lean && dst.len() == ids.len() => {
+                    for (d, p) in dst.iter_mut().zip(pos) {
+                        *d = p;
+                    }
+                }
+                _ => mm.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.collect::<Vec<[f32; 3]>>()),
+            }
         }
     }
+}
+
+/// Lean Updates: was this mesh (any of its parts) drawn last frame? Like actors::animate, a critter nobody saw
+/// isn't posed; its clock still runs, so it is posed on time once seen. Always true without Lean Updates.
+fn drawn(e: Entity, kids: &Query<&Children>, seen: &Query<&ViewVisibility>) -> bool {
+    !crate::perf::lean_updates()
+        || kids
+            .get(e)
+            .map_or(true, |k| k.iter().any(|c| seen.get(c).map_or(true, |v| v.get())))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -190,6 +207,7 @@ pub fn trash_system(
         ResMut<Assets<Mesh>>,
         ResMut<Assets<StandardMaterial>>,
     ),
+    (kids, seen): (Query<&Children>, Query<&ViewVisibility>),
 ) {
     let _prof = crate::prof::scope("trash::trash_system");
     let lvl = &level.0;
@@ -379,7 +397,9 @@ pub fn trash_system(
             }
             t.clip.t += dt;
         }
-        pose(&mut meshes, &t.mesh, &t.clip, &t.parts, &t.handles);
+        if drawn(e, &kids, &seen) {
+            pose(&mut meshes, &t.mesh, &t.clip, &t.parts, &t.handles);
+        }
         let rot = to_rot(t.rot);
         tf.translation = Vec3::from(ue_to_bevy(t.pos.as_vec3().to_array()));
         tf.rotation = quat_of(rot);
@@ -505,7 +525,7 @@ pub fn trash_system(
             lit_at: DVec3::splat(1e9),
         });
     }
-    for (_, mut f, mut tf) in &mut flies {
+    for (e, mut f, mut tf) in &mut flies {
         let f = &mut *f;
         let Some(g) = st.flies.get(f.gen) else {
             continue;
@@ -534,7 +554,9 @@ pub fn trash_system(
             f.pos = next;
         }
         f.clip.t += dt;
-        pose(&mut meshes, &f.mesh, &f.clip, &f.parts, &f.handles);
+        if drawn(e, &kids, &seen) {
+            pose(&mut meshes, &f.mesh, &f.clip, &f.parts, &f.handles);
+        }
         let yaw = (f.vel.y.atan2(f.vel.x) / std::f64::consts::TAU * 65536.0) as i32;
         let rot = [0, yaw, 0];
         tf.translation = Vec3::from(ue_to_bevy(f.pos.as_vec3().to_array()));

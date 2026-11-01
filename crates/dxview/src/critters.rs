@@ -250,6 +250,7 @@ pub fn critter_system(
         ResMut<Assets<Mesh>>,
         ResMut<Assets<StandardMaterial>>,
     ),
+    (kids, seen): (Query<&Children>, Query<&ViewVisibility>),
 ) {
     let _prof = crate::prof::scope("critters::critter_system");
     let lvl = &level.0;
@@ -781,14 +782,29 @@ pub fn critter_system(
         };
         b.clip.t += dt * rate;
         let f = b.clip.frame();
-        for (pi, hm) in b.handles.iter().enumerate() {
-            if let Some(mut mm) = meshes.get_mut(hm) {
-                let pos: Vec<[f32; 3]> = b.parts[pi]
-                    .vert_ids
-                    .iter()
-                    .map(|&v| ue_to_bevy(b.mesh.sample(b.clip.start, b.clip.frames, f, v as usize)))
-                    .collect();
-                mm.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+        // Lean Updates: like actors::animate, only a bird drawn last frame is posed (its clock above still runs),
+        // and into the positions it already has.
+        let lean = crate::perf::lean_updates();
+        let drawn = !lean
+            || kids
+                .get(e)
+                .map_or(true, |k| k.iter().any(|c| seen.get(c).map_or(true, |v| v.get())));
+        if drawn {
+            for (pi, hm) in b.handles.iter().enumerate() {
+                if let Some(mut mm) = meshes.get_mut(hm) {
+                    let ids = &b.parts[pi].vert_ids;
+                    let pos = ids
+                        .iter()
+                        .map(|&v| ue_to_bevy(b.mesh.sample(b.clip.start, b.clip.frames, f, v as usize)));
+                    match mm.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
+                        Some(bevy::mesh::VertexAttributeValues::Float32x3(dst)) if lean && dst.len() == ids.len() => {
+                            for (d, p) in dst.iter_mut().zip(pos) {
+                                *d = p;
+                            }
+                        }
+                        _ => mm.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.collect::<Vec<[f32; 3]>>()),
+                    }
+                }
             }
         }
         let rot = [

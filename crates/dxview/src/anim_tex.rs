@@ -64,7 +64,28 @@ pub fn anim_tex_system(time: Res<Time>, mut images: ResMut<Assets<Image>>) {
             a.at = (a.at + 1) % a.frames.len();
         }
         if let Some(mut im) = images.get_mut(&a.handle) {
-            *im = a.frames[a.at].clone();
+            let next = &a.frames[a.at];
+            // Lean Updates: when only the pixels differ (the frames of a loop are decoded alike), hand over the
+            // frame's bytes alone - into the image's own buffer while it still has one (the render world takes
+            // a RENDER_WORLD image's bytes when it uploads them) - instead of a whole new Image.
+            if crate::perf::lean_updates() && same_but_data(&im, next) {
+                match (im.data.as_mut(), next.data.as_ref()) {
+                    (Some(d), Some(n)) if d.len() == n.len() => d.copy_from_slice(n),
+                    _ => im.data = next.data.clone(),
+                }
+            } else {
+                *im = next.clone();
+            }
         }
     }
+}
+
+/// Every field but the pixels equal: then setting the data alone gives the same Image as cloning the frame.
+fn same_but_data(a: &Image, b: &Image) -> bool {
+    a.texture_descriptor == b.texture_descriptor
+        && a.sampler == b.sampler
+        && a.texture_view_descriptor == b.texture_view_descriptor
+        && a.asset_usage == b.asset_usage
+        && a.data_order == b.data_order
+        && a.copy_on_resize == b.copy_on_resize
 }

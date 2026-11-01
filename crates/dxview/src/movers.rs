@@ -43,6 +43,10 @@ pub struct MoverRt {
     pub frobbable: Option<bool>,
     /// Mover.WaitingPawn: the pawn (blocker) that frobbed it open (ScriptedPawn.FrobDoor); others leave it alone.
     pub waiting_pawn: Option<usize>,
+    /// `rotator_axes(axes_rot)`, refreshed by `tick_movers` under Lean Updates so traces skip the trig;
+    /// only used while `axes_rot == rotation`.
+    pub axes: [[f32; 3]; 3],
+    pub axes_rot: [i32; 3],
 }
 
 #[derive(Resource)]
@@ -137,6 +141,8 @@ pub fn spawn_movers(
             carried: DVec3::ZERO,
             breakable: None,
             frobbable: None,
+            axes: rotator_axes(info.rotation),
+            axes_rot: info.rotation,
         };
         let parent = commands
             .spawn((
@@ -179,7 +185,8 @@ pub fn trace_mover(
     end: DVec3,
     extent: DVec3,
 ) -> Option<Hit> {
-    let ax = rotator_axes(rt.rotation);
+    let lean = crate::perf::lean_updates();
+    let ax = if lean && rt.axes_rot == rt.rotation { rt.axes } else { rotator_axes(rt.rotation) };
     let pre = to_dvec(info.pre_pivot);
     let to_local = |p: DVec3| {
         let d = p - rt.location;
@@ -190,7 +197,12 @@ pub fn trace_mover(
             d.x * ax[2][0] as f64 + d.y * ax[2][1] as f64 + d.z * ax[2][2] as f64,
         ) + pre
     };
-    let h = info.collision.trace(to_local(start), to_local(end), extent);
+    let (from, to) = (to_local(start), to_local(end));
+    // Far from the mover: its BSP can't report a hit (`may_hit`), so skip the walk.
+    if lean && !info.collision.may_hit(from, to, extent) {
+        return None;
+    }
+    let h = info.collision.trace(from, to, extent);
     if h.fraction >= 1.0 {
         return None;
     }
@@ -476,6 +488,10 @@ pub fn tick_movers(
             }
             if changed {
                 rt.moved_since_lit = true;
+                if crate::perf::lean_updates() && rt.axes_rot != rt.rotation {
+                    rt.axes = rotator_axes(rt.rotation);
+                    rt.axes_rot = rt.rotation;
+                }
             }
         }
         mover_sounds(level, i, &movers.rt[i], &mut was);

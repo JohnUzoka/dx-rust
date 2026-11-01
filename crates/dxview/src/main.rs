@@ -550,6 +550,7 @@ pub fn make_player(level: &Level, (params, eye_height, bob): (MoveParams, f64, f
 }
 
 mod horizon;
+mod perf;
 
 fn main() {
     horizon::init();
@@ -1208,6 +1209,10 @@ fn setup(
     let mut backing_mat: Option<Handle<StandardMaterial>> = None;
     // The tessellated water sheets' vertices (the open sea's first band meets them vertex to vertex).
     let mut sheet_pts: Vec<[f32; 3]> = Vec::new();
+    // Lean Rendering (perf.rs): Modern Water's fine sheets, dark backings and open sea are built only when Modern
+    // Water is on as the map loads (now, or in the Modern mix Classic / Modern remembers). Classic water doesn't move,
+    // so its own triangles draw the same picture.
+    let modern_water = !perf::lean_rendering() || water::modern() || settings::get("Modern.ModernWater") > 0.5;
     let mut bsp_cache: std::collections::HashMap<AssetId<StandardMaterial>, Handle<shadowlight::BspMaterial>> = Default::default();
     let level = &level.0;
     let mut mirrors = mirror::Mirrors::default();
@@ -1286,7 +1291,7 @@ fn setup(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
         );
-        if b.class == SurfaceClass::Water && !b.sky {
+        if b.class == SurfaceClass::Water && !b.sky && modern_water {
             // Fine enough for the surface to move with the swell (Modern Water's waves).
             let (p, n, u, u1, i) = water::tessellate(&b.positions, &b.normals, &b.uvs, &b.uvs1, &b.indices, 2.0);
             sheet_pts.extend_from_slice(&p);
@@ -1313,7 +1318,7 @@ fn setup(
                 mirror::add_water(&mut mirrors, &wm, &b.positions);
                 // Flat sheets get a dark backing under their moving surface (see water::WaterBacking).
                 let (lo, hi) = b.positions.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p[1]), a.1.max(p[1])));
-                if hi - lo < 0.05 {
+                if hi - lo < 0.05 && modern_water {
                     let back = backing_mat.get_or_insert_with(|| materials.add(water::backing_material())).clone();
                     commands.spawn((
                         Mesh3d(meshes.add(water::backing_mesh(&b.positions, &b.indices))),
@@ -1373,7 +1378,7 @@ fn setup(
         }
     }
 
-    if let Some((mesh, mat)) = water::ocean_ring(&mirrors, &level.batches, &sheet_pts) {
+    if let Some((mesh, mat)) = modern_water.then(|| water::ocean_ring(&mirrors, &level.batches, &sheet_pts)).flatten() {
         if let (Some(bevy::mesh::VertexAttributeValues::Float32x3(p)), Some(Indices::U32(i))) = (mesh.attribute(Mesh::ATTRIBUTE_POSITION), mesh.indices()) {
             let y = p.first().map_or(0.0, |v| v[1]);
             let back = backing_mat.get_or_insert_with(|| materials.add(water::backing_material())).clone();
@@ -2496,11 +2501,22 @@ fn overlay_update(
     }
     // The corner readout is a Debug Mode feature (Settings > Enhancements).
     let debug = crate::settings::debug_mode() || std::env::var("DXVIEW_SHOT").is_ok();
-    *text.1 = if *on && debug && !inventory_screen::screen_open() && !consys::third_person() && !cinematic::active() {
+    let vis = if *on && debug && !inventory_screen::screen_open() && !consys::third_person() && !cinematic::active() {
         Visibility::Inherited
     } else {
         Visibility::Hidden
     };
+    // Lean Updates (perf.rs): while hidden the readout is left alone (rewriting it re-lays out the text every frame).
+    if perf::lean_updates() {
+        if *text.1 != vis {
+            *text.1 = vis;
+        }
+        if vis == Visibility::Hidden {
+            return;
+        }
+    } else {
+        *text.1 = vis;
+    }
     let s = &level.0.stats;
     let p = cam.0.translation;
     let mode = if player.noclip {
@@ -2545,7 +2561,9 @@ fn uv_scroll(
             m.base.uv_transform = bevy::math::Affine2::from_translation(Vec2::new(off.x.fract(), off.y.fract()));
         }
     }
-    for (h, speed, water) in &scroll.0 {
+    // These StandardMaterials are only the templates the level's water, mirror and BSP materials were copied from
+    // (setup): no entity draws them, so Lean Updates leaves them alone.
+    for (h, speed, water) in scroll.0.iter().filter(|_| !perf::lean_updates()) {
         if let Some(mut m) = materials.get_mut(h) {
             let mut off = *speed * t;
             if *water {

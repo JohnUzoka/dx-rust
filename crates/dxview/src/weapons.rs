@@ -689,6 +689,11 @@ pub fn fov_system(
     for (mut p, is_vm) in &mut cams {
         let fov = if is_vm { DEFAULT_FOV } else { world_fov };
         let vfov = 2.0 * ((fov.to_radians() / 2.0).tan() / aspect).atan();
+        // Lean Updates (perf.rs): look before writing, so an unchanged projection isn't marked changed every frame.
+        let stale = matches!(&*p, Projection::Perspective(pp) if (pp.fov - vfov).abs() > 1e-4);
+        if crate::perf::lean_updates() && !stale {
+            continue;
+        }
         if let Projection::Perspective(pp) = &mut *p {
             if (pp.fov - vfov).abs() > 1e-4 {
                 pp.fov = vfov;
@@ -1719,8 +1724,13 @@ pub fn weapon_system(
         }
     }
     let Some(h) = weapons.held.as_mut() else {
-        ammo_text.0.clear();
-        lock_text.0 .0.clear();
+        // Lean Updates: emptied once, not every frame (each write re-lays out the text).
+        if !crate::perf::lean_updates() || !ammo_text.0.is_empty() {
+            ammo_text.0.clear();
+        }
+        if !crate::perf::lean_updates() || !lock_text.0 .0.is_empty() {
+            lock_text.0 .0.clear();
+        }
         return;
     };
     // GetWeaponSkill: the governing skill's value plus the Targeting aug's.
@@ -2827,11 +2837,15 @@ pub fn weapon_system(
     }
 
     let clip_now = *clips.0.get(&h.stats.class).unwrap_or(&0);
-    ammo_text.0 = match (h.stats.hand_to_hand || h.stats.reload_count == 0, pool) {
+    let ammo = match (h.stats.hand_to_hand || h.stats.reload_count == 0, pool) {
         (true, _) => h.stats.name.to_uppercase(),
         (false, Some(p)) => format!("{}  {} / {}", h.stats.name.to_uppercase(), clip_now, p),
         (false, None) => format!("{}  {}", h.stats.name.to_uppercase(), clip_now),
     };
+    // Lean Updates: written only when it changes (each write re-lays out the text).
+    if !crate::perf::lean_updates() || ammo_text.0 != ammo {
+        ammo_text.0 = ammo;
+    }
     if let Some(p) = pending_ammo {
         weapons.ammo_note = Some(p);
     }

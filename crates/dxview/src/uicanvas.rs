@@ -116,6 +116,18 @@ impl Canvas {
         }
     }
 
+    /// Makes this canvas what `Canvas::new(w, h, s)` would, keeping its allocation (Lean Updates: a menu window
+    /// redrawn into the canvas it had).
+    pub fn reset(&mut self, w: i32, h: i32, s: i32) {
+        let s = s.max(1);
+        self.w = w;
+        self.h = h;
+        self.s = s;
+        self.px.clear();
+        self.px.resize((w * s * h * s).max(0) as usize, [0.0; 4]);
+        self.clip = (0, 0, w, h);
+    }
+
     /// Limit drawing to a rectangle (a child window's area); `None` resets to the whole canvas.
     pub fn set_clip(&mut self, r: Option<(i32, i32, i32, i32)>) {
         self.clip = match r {
@@ -381,13 +393,32 @@ impl Canvas {
     pub fn to_rgba8(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.px.len() * 4];
         for (o, p) in out.chunks_exact_mut(4).zip(&self.px) {
-            for c in 0..4 {
-                // (`as u8` saturates: below 0 is 0, above 255 is 255.)
-                o[c] = (p[c] * 255.0 + 0.5) as u8;
-            }
+            o.copy_from_slice(&rgba8(p));
         }
         out
     }
+
+    /// `to_rgba8` written into `out` in place; true when any byte of it changed (Lean Updates: no frame-sized
+    /// buffer allocated and compared).
+    pub fn to_rgba8_into(&self, out: &mut Vec<u8>) -> bool {
+        let n = self.px.len() * 4;
+        let mut changed = out.len() != n;
+        out.resize(n, 0);
+        for (o, p) in out.chunks_exact_mut(4).zip(&self.px) {
+            let b = rgba8(p);
+            if *o != b {
+                o.copy_from_slice(&b);
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+#[inline(always)]
+fn rgba8(p: &[f32; 4]) -> [u8; 4] {
+    // (`as u8` saturates: below 0 is 0, above 255 is 255.)
+    [0, 1, 2, 3].map(|c| (p[c] * 255.0 + 0.5) as u8)
 }
 
 #[inline(always)]

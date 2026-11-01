@@ -66,7 +66,7 @@ pub fn bsp_material(base: StandardMaterial) -> BspMaterial {
         base,
         extension: BspShadow {
             params: BspShadowParams {
-                p: Vec4::new(STRENGTH, 1.0 / ENCODE, dx_level::lighting::LIGHT_GAIN, std::env::var("DXVIEW_SHADOW_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)),
+                p: Vec4::new(shadow_strength(), 1.0 / ENCODE, dx_level::lighting::LIGHT_GAIN, std::env::var("DXVIEW_SHADOW_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)),
                 q: Vec4::new(if crate::postfx::ao_on() { 0.85 } else { 0.0 }, 0.0, 0.0, 0.0),
             },
         },
@@ -82,6 +82,16 @@ pub fn setup_bsp_shader(mut shaders: ResMut<Assets<Shader>>) {
 
 pub fn level() -> u8 {
     crate::settings::get("RealtimeShadows").round().clamp(0.0, 2.0) as u8
+}
+
+/// The BSP shader's shadow strength. With Lean Rendering and no shadow lights it's 0, which skips the shader's walk
+/// over the lights in each fragment's cluster: with nothing casting, that walk takes nothing off the lightmap.
+pub fn shadow_strength() -> f32 {
+    if crate::perf::lean_rendering() && level() == 0 {
+        0.0
+    } else {
+        STRENGTH
+    }
 }
 
 fn wanted() -> usize {
@@ -273,8 +283,13 @@ pub fn shadow_light_system(
     for (sl, mut pl, mut tf, mut vis) in &mut lights {
         let s = st.slots[sl.slot];
         let Some(info) = s.light.and_then(|i| lvl.lights.get(i)).filter(|_| s.weight > 0.0 && n > 0) else {
-            pl.intensity = 0.0;
-            *vis = Visibility::Hidden;
+            // Lean Updates: a light already off isn't written again (a write re-extracts it every frame).
+            if !crate::perf::lean_updates() || pl.intensity != 0.0 {
+                pl.intensity = 0.0;
+            }
+            if !crate::perf::lean_updates() || *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
             continue;
         };
         // The shader reads colour x intensity / (4 pi) back as the Unreal light's colour (brightness included).

@@ -2925,6 +2925,8 @@ pub fn npc_system(
     if let Ok(mut c) = CLEANERS.lock() {
         c.clear();
     }
+    // The cylinders pawns collide with beyond the blockers, rebuilt per pawn in one buffer.
+    let mut extra: Vec<Cylinder> = Vec::new();
     for (mut npc, mut deco, mut an, mut tf) in &mut q {
         let npc = &mut *npc;
         npc.just_fired = false;
@@ -5662,27 +5664,39 @@ pub fn npc_system(
         if !npc.sitting {
             let steps = ((dt as f64) / (1.0 / 60.0)).ceil().max(1.0) as usize;
             // Pawns can't walk through the player either.
-            let mut solid = blockers.list.clone();
+            extra.clear();
             if !ph.dead {
-                solid.push(player_cyl);
+                extra.push(player_cyl);
             }
             // BlockMonsters stop pawns only.
-            solid.extend(lvl.monster_blocks.iter().map(|c| Cylinder { actor: usize::MAX, ..c.clone() }));
+            extra.extend(lvl.monster_blocks.iter().map(|c| Cylinder { actor: usize::MAX, ..c.clone() }));
             // ...nor through what the player is carrying.
             if let Some(h) = carrying.held.as_ref() {
-                solid.push(Cylinder {
+                extra.push(Cylinder {
                     center: blockers.list[h.blocker].center,
                     radius: h.radius,
                     height: h.height,
                     actor: usize::MAX,
                 });
             }
-            let world = World {
-                level: lvl,
-                blockers: &solid,
-                ignore: Some(npc.blocker),
-                pushable: None,
-                movers: Some(&mv.rt),
+            // Lean Updates: the trace walks `extra` after the blockers (same order and indices as the appended
+            // copy) instead of every pawn copying the whole blocker list each frame.
+            let lean = crate::perf::lean_updates();
+            let solid: Vec<Cylinder>;
+            let world = crate::actors::ExtraWorld {
+                world: World {
+                    level: lvl,
+                    blockers: if lean {
+                        &blockers.list[..]
+                    } else {
+                        solid = [&blockers.list[..], &extra[..]].concat();
+                        &solid[..]
+                    },
+                    ignore: Some(npc.blocker),
+                    pushable: None,
+                    movers: Some(&mv.rt),
+                },
+                extra: if lean { &extra[..] } else { &[] },
             };
             for _ in 0..steps {
                 body.tick(&world, &params, wish, false, dt as f64 / steps as f64);

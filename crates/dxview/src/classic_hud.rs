@@ -519,6 +519,13 @@ fn hkey<T: std::hash::Hash>(t: &T) -> u64 {
     h.finish()
 }
 
+fn hkey_with(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    f(&mut h);
+    h.finish()
+}
+
 fn blank_image(w: u32, h: u32) -> Image {
     let mut img = Image::new_fill(
         Extent3d {
@@ -912,6 +919,7 @@ pub fn classic_hud_system(
     };
 
     let tiny = hud.font(assets, "FontTiny");
+    let lean = crate::perf::lean_updates();
     for w in Win::ALL {
         let (x, y, ww, wh, visible) = layout(w);
         // Enhancement: HUD customisation (each part hidden, sized and faded on its own).
@@ -946,6 +954,55 @@ pub fn classic_hud_system(
         });
         // Windows that only change with what they show are redrawn only when that changes.
         let key: Option<u64> = match w {
+            // Lean Updates: the same keys hashed straight from the fields drawn, without a Debug string per frame.
+            Win::Belt if lean => Some(hkey_with(|h| {
+                use std::hash::Hash;
+                inv.0.belt.hash(h);
+                for &i in inv.0.belt.iter().flatten() {
+                    inv.0
+                        .items
+                        .get(i)
+                        .map(|it| {
+                            let d = &it.def;
+                            (&d.class, &d.belt_name, &d.icon, std::mem::discriminant(&d.kind), it.count)
+                        })
+                        .hash(h);
+                }
+                snap.held.as_ref().map(|v| &v.class).hash(h);
+                snap.pending.hash(h);
+                let mut ammo: Vec<_> = snap.loaded_ammo.iter().collect();
+                ammo.sort();
+                ammo.hash(h);
+                inv.0.ammo.hash(h);
+                (ww, wh, s).hash(h);
+            })),
+            Win::Active if lean => Some(hkey_with(|h| {
+                use std::hash::Hash;
+                snap.augs.hash(h);
+                snap.items.len().hash(h);
+                for (c, f) in &snap.items {
+                    (c, (f * 1000.0) as i32).hash(h);
+                }
+                (ww, wh, s).hash(h);
+            })),
+            // Everything draw_ammo shows: the weapon's own numbers, its ammo pool and (tracking weapons) the
+            // lock-on text. Without Lean Updates it is redrawn every frame.
+            Win::Ammo if lean => Some(hkey_with(|h| {
+                use std::hash::Hash;
+                if let Some(held) = &snap.held {
+                    (&held.class, &held.ammo_class, held.reload_count, held.loaded, held.reloading, held.can_track)
+                        .hash(h);
+                    held.ammo_class
+                        .as_ref()
+                        .map(|a| inv.0.ammo.iter().find(|x| &x.0 == a).map(|x| x.1))
+                        .hash(h);
+                    if held.can_track {
+                        (&snap.lock_text, snap.lock_color).hash(h);
+                    }
+                }
+                snap.held.is_some().hash(h);
+                (ww, wh, s).hash(h);
+            })),
             Win::Belt => {
                 let mut ammo: Vec<_> = snap.loaded_ammo.iter().collect();
                 ammo.sort();
@@ -1143,16 +1200,33 @@ pub const HUD_FADES: [(&str, f32); 4] = [("100%", 1.0), ("75%", 0.75), ("50%", 0
 
 /// (shown, size, opacity) of a HUD window: settings HUD_<Part>_Hide / _Size / _Fade.
 fn hud_part(w: Win) -> (bool, f32, f32) {
-    let key = match w {
-        Win::Hit => "Hit",
-        Win::Compass => "Compass",
-        Win::Ammo => "Ammo",
-        Win::Belt => "Belt",
-        Win::Log => "Log",
-        Win::Active => "Active",
-        Win::Damage => "Damage",
+    let i = match w {
+        Win::Hit => 0,
+        Win::Compass => 1,
+        Win::Ammo => 2,
+        Win::Belt => 3,
+        Win::Log => 4,
+        Win::Active => 5,
+        Win::Damage => 6,
         _ => return (true, 1.0, 1.0),
     };
+    // Lean Updates: the settings only change with settings::generation, so read them once per generation
+    // instead of formatting three keys per window every frame.
+    if crate::perf::lean_updates() {
+        type Parts = [(bool, f32, f32); 7];
+        static CACHE: std::sync::Mutex<(u64, Parts)> = std::sync::Mutex::new((u64::MAX, [(true, 1.0, 1.0); 7]));
+        let generation = crate::settings::generation();
+        if let Ok(mut c) = CACHE.lock() {
+            if c.0 != generation {
+                *c = (generation, std::array::from_fn(|k| read_hud_part(HUD_PARTS[k].0)));
+            }
+            return c.1[i];
+        }
+    }
+    read_hud_part(HUD_PARTS[i].0)
+}
+
+fn read_hud_part(key: &str) -> (bool, f32, f32) {
     let g = |n: &str| crate::settings::get(&format!("HUD_{key}_{n}")).round() as usize;
     (
         g("Hide") == 0,

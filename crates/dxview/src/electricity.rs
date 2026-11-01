@@ -10,6 +10,7 @@ use crate::{LevelRes, Player};
 use bevy::{
     asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
 };
+use bevy::camera::{primitives::Aabb, visibility::{NoAutoAabb, NoFrustumCulling}};
 use dx_level::collision::{trace_cylinder, Cylinder};
 use dx_level::ue_to_bevy;
 use glam::DVec3;
@@ -30,6 +31,9 @@ pub struct Emitter {
     hidden: bool,
     last_damage: f32,
     last_flicker: f32,
+    /// Lean Updates: the bolt mesh's normals, UVs and indices are the ones `emitter_system` writes (not
+    /// beam_mesh's), so a bolt with as many segments only needs its positions rewritten.
+    canonical: bool,
 }
 
 fn beam_mesh() -> Mesh {
@@ -128,6 +132,7 @@ pub fn spawn_emitters(
                 hidden: false,
                 last_damage: 0.0,
                 last_flicker: 0.0,
+                canonical: false,
             },
         ));
     }
@@ -135,13 +140,23 @@ pub fn spawn_emitters(
 
 #[allow(clippy::too_many_arguments)]
 pub fn emitter_system(
+    mut commands: Commands,
     time: Res<Time>,
     level: Res<LevelRes>,
     blockers: Res<Blockers>,
     mv: Res<Movers>,
     player: Res<Player>,
     mut ph: ResMut<PlayerHealth>,
-    mut q: Query<(&mut Emitter, &mut Transform, &mut Visibility, &Mesh3d)>,
+    mut q: Query<(
+        Entity,
+        &mut Emitter,
+        &mut Transform,
+        &mut Visibility,
+        &Mesh3d,
+        &ViewVisibility,
+        Option<&mut Aabb>,
+        Has<NoFrustumCulling>,
+    )>,
     mut meshes: ResMut<Assets<Mesh>>,
     (mut pawn_hits, mut deco_hits, mut seed): (
         ResMut<crate::damage::PawnHits>,
@@ -167,9 +182,18 @@ pub fn emitter_system(
         height: player.params.height,
         actor: usize::MAX,
     };
-    for (mut e, mut tf, mut vis, mesh3d) in &mut q {
+    let lean = crate::perf::lean_updates();
+    for (ent, mut e, mut tf, mut vis, mesh3d, seen, aabb, no_cull) in &mut q {
+        // Shown last frame (only this system sets it).
+        let was_shown = *vis == Visibility::Inherited;
+        if !lean && !no_cull {
+            // Lean Updates was switched off: back to drawing the bolt unculled.
+            commands.entity(ent).insert(NoFrustumCulling);
+        }
         if !e.on {
-            *vis = Visibility::Hidden;
+            if !lean || *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
             continue;
         }
         if e.flicker {
@@ -180,7 +204,9 @@ pub fn emitter_system(
             }
         }
         if e.hidden {
-            *vis = Visibility::Hidden;
+            if !lean || *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
             continue;
         }
         // LaserEmitter.TurnOn: AmbientSound Electricity4 at SoundVolume 128 (0 while the flicker hides the beam),
@@ -259,6 +285,30 @@ pub fn emitter_system(
         let side = dir.cross(DVec3::Z).normalize_or(DVec3::X);
         let up = side.cross(dir).normalize_or(DVec3::Z);
         let n = ((len / 48.0).ceil() as usize).clamp(1, 120);
+        if lean {
+            // Lean Updates: the bolt is frustum-culled against bounds that hold any jitter of this frame's beam
+            // (5 units each way off the line plus the quads' half width, rounded up), so it is only drawn where
+            // it can show. One nobody saw last frame keeps its old mesh: its jitter is random anyway, and the
+            // generator steps exactly as if it had been built, so the flicker and the beam's aim don't change.
+            let (a, b) = (
+                Vec3::from(ue_to_bevy(start.as_vec3().to_array())),
+                Vec3::from(ue_to_bevy(end_pt.as_vec3().to_array())),
+            );
+            let r = Vec3::splat(9.0 * dx_level::METERS_PER_UNIT);
+            let bounds = Aabb::from_min_max(a.min(b) - r, a.max(b) + r);
+            match aabb {
+                Some(mut v) if !no_cull => *v = bounds,
+                _ => {
+                    commands.entity(ent).insert((bounds, NoAutoAabb)).remove::<NoFrustumCulling>();
+                }
+            }
+            if was_shown && !seen.get() {
+                for _ in 0..2 * (n - 1) {
+                    rnd();
+                }
+                continue;
+            }
+        }
         let mut pts = Vec::with_capacity(n + 1);
         for i in 0..=n {
             let t = i as f64 / n as f64;
@@ -273,6 +323,54 @@ pub fn emitter_system(
             Vec3::from(ue_to_bevy(side.as_vec3().to_array())) * w,
             Vec3::from(ue_to_bevy(up.as_vec3().to_array())) * w,
         );
+        if lean {
+            // The same mesh as below, with the positions written over the old ones when the bolt has as many
+            // segments as last time (its normals, UVs and indices depend on nothing else).
+            let pts = &pts;
+            let verts = move || {
+                (0..n)
+                    .flat_map(move |k| {
+                        let (a, b) = (pts[k], pts[k + 1]);
+                        [sv, uv_].map(move |off| {
+                            [(a - off).to_array(), (b - off).to_array(), (b + off).to_array(), (a + off).to_array()]
+                        })
+                    })
+                    .flatten()
+            };
+            if let Some(mut m) = meshes.get_mut(&mesh3d.0) {
+                let nv = n * 8;
+                let in_place = e.canonical
+                    && match m.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
+                        Some(bevy::mesh::VertexAttributeValues::Float32x3(dst)) if dst.len() == nv => {
+                            for (d, p) in dst.iter_mut().zip(verts()) {
+                                *d = p;
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                if !in_place {
+                    let idx: Vec<u32> = (0..2 * n as u32)
+                        .flat_map(|q| {
+                            let b = q * 4;
+                            [b, b + 1, b + 2, b, b + 2, b + 3]
+                        })
+                        .collect();
+                    m.insert_attribute(Mesh::ATTRIBUTE_POSITION, verts().collect::<Vec<[f32; 3]>>());
+                    m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; nv]);
+                    m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; nv]);
+                    m.insert_indices(Indices::U32(idx));
+                    e.canonical = true;
+                }
+            }
+            if *tf != Transform::IDENTITY {
+                *tf = Transform::IDENTITY;
+            }
+            if !was_shown {
+                *vis = Visibility::Inherited;
+            }
+            continue;
+        }
         let mut pos: Vec<[f32; 3]> = Vec::new();
         let mut idx: Vec<u32> = Vec::new();
         for k in 0..n {

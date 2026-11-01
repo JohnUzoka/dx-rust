@@ -9,8 +9,11 @@
 //!   the ground, blurring as the shadow stretches away (contact hardening).
 
 use bevy::anti_alias::smaa::Smaa;
+use bevy::camera::{CameraOutputMode, MsaaWriteback};
+use bevy::light::VolumetricFog;
 use bevy::pbr::ScreenSpaceAmbientOcclusion;
 use bevy::prelude::*;
+use bevy::render::render_resource::BlendState;
 use bevy::render::view::Msaa;
 
 pub fn ao_on() -> bool {
@@ -28,11 +31,14 @@ const POINT_SIZE: f32 = 0.12;
 pub fn postfx_system(
     mut commands: Commands,
     world: Query<(Entity, Has<ScreenSpaceAmbientOcclusion>), (With<crate::FlyCam>, Without<crate::SkyCam>)>,
-    cams: Query<(Entity, &Msaa, Has<Smaa>, Has<crate::weapons::ViewModelCam>), Or<(With<crate::FlyCam>, With<crate::SkyCam>, With<crate::weapons::ViewModelCam>, With<crate::augdisplay::HeatCam>)>>,
+    mut cams: Query<
+        (Entity, &Msaa, Has<Smaa>, Has<crate::weapons::ViewModelCam>, &mut Camera, Has<VolumetricFog>),
+        Or<(With<crate::FlyCam>, With<crate::SkyCam>, With<crate::weapons::ViewModelCam>, With<crate::augdisplay::HeatCam>)>,
+    >,
     mut points: Query<(&mut PointLight, &crate::shadowlight::ShadowLight)>,
     mut spots: Query<&mut SpotLight, With<crate::dynlight::FlashCone>>,
     mut bsp: ResMut<Assets<crate::shadowlight::BspMaterial>>,
-    mut ao_gen: Local<Option<bool>>,
+    mut ao_gen: Local<Option<(bool, u32)>>,
 ) {
     // The cameras' make-up never changes in play: the SSAO pass, the depth / normal prepasses, MSAA off with SMAA.
     // Each of those is part of every material's pipeline, so adding or removing one recompiled them all (a long
@@ -40,12 +46,16 @@ pub fn postfx_system(
     // SSAO but no depth prepass for a frame). The Ambient Occlusion setting is now just how strongly the world's
     // shader uses it.
     let ao = ao_on();
-    if *ao_gen != Some(ao) {
-        *ao_gen = Some(ao);
+    // The BSP shader's shadow strength goes with it: 0 (Lean Rendering with no shadow lights) skips its walk over
+    // the lights in each fragment's cluster.
+    let strength = crate::shadowlight::shadow_strength();
+    if *ao_gen != Some((ao, strength.to_bits())) {
+        *ao_gen = Some((ao, strength.to_bits()));
         let ids: Vec<_> = bsp.ids().collect();
         for id in ids {
             if let Some(mut m) = bsp.get_mut(id) {
                 m.extension.params.q.x = if ao { 0.85 } else { 0.0 };
+                m.extension.params.p.x = strength;
             }
         }
     }
@@ -67,15 +77,37 @@ pub fn postfx_system(
             commands.entity(e).remove::<ScreenSpaceAmbientOcclusion>();
         }
     }
-    let want_msaa = if ssao { Msaa::Off } else { Msaa::Sample4 };
-    for (e, msaa, smaa, last) in &cams {
+    // Anti-Aliasing off (perf.rs) leaves the edges alone; SSAO's SMAA still comes with Ambient Occlusion.
+    let want_msaa = if ssao || !crate::perf::msaa() { Msaa::Off } else { Msaa::Sample4 };
+    // Lean Rendering: the cameras drawing into the window share one picture, so only the last active one copies it
+    // to the window (replacing what is there: the earlier copies were covered by it anyway). Nothing writes the
+    // resolved picture between cameras except volumetric fog, so without it the multisampled one already holds
+    // everything and the MSAA writebacks are left out.
+    let lean = crate::perf::lean_rendering();
+    let last = cams.iter().filter(|c| c.4.is_active).max_by_key(|c| c.4.order).map(|c| c.0);
+    let fog = cams.iter().any(|c| c.5);
+    for (e, msaa, smaa, vm, mut cam, _) in &mut cams {
         if *msaa != want_msaa {
             commands.entity(e).insert(want_msaa);
         }
-        if last && ssao && !smaa {
+        if vm && ssao && !smaa {
             commands.entity(e).insert(Smaa::default());
         } else if smaa && !ssao {
             commands.entity(e).remove::<Smaa>();
+        }
+        let (output, writeback) = if !lean {
+            (CameraOutputMode::default(), MsaaWriteback::Auto)
+        } else if Some(e) == last {
+            let replace = CameraOutputMode::Write { blend_state: Some(BlendState::REPLACE), clear_color: ClearColorConfig::None };
+            (replace, if fog { MsaaWriteback::Auto } else { MsaaWriteback::Off })
+        } else {
+            (CameraOutputMode::Skip, if fog { MsaaWriteback::Auto } else { MsaaWriteback::Off })
+        };
+        if !same_output(&cam.output_mode, &output) {
+            cam.output_mode = output;
+        }
+        if cam.msaa_writeback != writeback {
+            cam.msaa_writeback = writeback;
         }
     }
     let soft = soft_on() && crate::shadowlight::level() > 0;
@@ -95,5 +127,17 @@ pub fn postfx_system(
             s.soft_shadows_enabled = want;
             s.radius = 0.0;
         }
+    }
+}
+
+/// Whether two output modes do the same (`CameraOutputMode` has no `PartialEq`; only these clear colours are set).
+fn same_output(a: &CameraOutputMode, b: &CameraOutputMode) -> bool {
+    match (a, b) {
+        (CameraOutputMode::Skip, CameraOutputMode::Skip) => true,
+        (
+            CameraOutputMode::Write { blend_state: x, clear_color: cx },
+            CameraOutputMode::Write { blend_state: y, clear_color: cy },
+        ) => x == y && std::mem::discriminant(cx) == std::mem::discriminant(cy),
+        _ => false,
     }
 }
