@@ -2683,8 +2683,15 @@ pub fn menu_system(
         if let Ok((mut v, mut bg)) = backdrop.get_mut(e) {
             // MaskBackground (modulated MaskTexture) / UIBackground 2 = black.
             let black = crate::settings::ui_background() == 2 && !intro_map();
-            bg.0 = Color::srgba(0.0, 0.0, 0.0, if black { 1.0 } else { 0.5 });
-            *v = if is_open { Visibility::Inherited } else { Visibility::Hidden };
+            let want = Color::srgba(0.0, 0.0, 0.0, if black { 1.0 } else { 0.5 });
+            let shown = if is_open { Visibility::Inherited } else { Visibility::Hidden };
+            // Lean Updates: written only when they differ (a write marks the node changed, every frame).
+            if !crate::perf::lean_updates() || bg.0 != want {
+                bg.0 = want;
+            }
+            if !crate::perf::lean_updates() || *v != shown {
+                *v = shown;
+            }
         }
     }
     if !is_open {

@@ -283,7 +283,12 @@ pub fn impacts_system(
 
     let hits: Vec<WallHit> = WALL_HITS.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
     let persistent = crate::settings::get("PersistentDebris") > 0.5;
-    let rock = assets.classes.defaults("Rockchip");
+    // Lean Updates: the rock class is looked up when a hit needs it, not every frame (the class data is fixed).
+    let rock = if crate::perf::lean_updates() && hits.is_empty() {
+        Vec::new()
+    } else {
+        assets.classes.defaults("Rockchip")
+    };
     let rock_meshes: Vec<String> = rock
         .iter()
         .filter(|p| p.name.eq_ignore_ascii_case("Fragments"))

@@ -151,7 +151,9 @@ pub fn prof_report_system(
             .iter()
             .filter(|x| x.path().as_str().starts_with("render/"))
             .filter_map(|x| Some((x.path().as_str().to_string(), x.average()?)))
-            .filter(|(p, _)| p.ends_with("elapsed_gpu") || p.ends_with("elapsed_cpu"))
+            .filter(|(p, _)| {
+                p.ends_with("elapsed_gpu") || p.ends_with("elapsed_cpu") || p.starts_with("render/dx_frame/")
+            })
             .collect();
         v.sort_by(|a, b| b.1.total_cmp(&a.1));
         for (p, ms) in v.iter().take(24) {

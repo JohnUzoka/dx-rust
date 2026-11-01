@@ -9,6 +9,8 @@ winresource = "0.1"
 
 [dependencies]
 bevy = { version = "0.19.1", default-features = false }
+# The GPU timer's query sets and buffers (horizon/gpu_frame_time.rs) name wgpu types; bevy's version, default features off.
+wgpu = { version = "29.0.4", default-features = false }
 dx-level = { path = "../dx-level" }
 imsim-core = { path = "../imsim-core" }
 unreal-pkg = { path = "../unreal-pkg" }

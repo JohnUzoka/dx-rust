@@ -32,6 +32,8 @@
 
 use bevy::prelude::*;
 
+mod gpu_frame_time;
+
 /// The NRO's folder: bevy_horizon sets BEVY_ASSET_ROOT to it before main.
 #[cfg(target_os = "horizon")]
 static ROOT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -106,6 +108,10 @@ pub struct SwitchPlugin;
 
 impl Plugin for SwitchPlugin {
     fn build(&self, _app: &mut App) {
+        // The whole-frame GPU timer rides the profiler's switch (prof.rs): every platform, so the desktop renders can check it.
+        if std::env::var_os("DXVIEW_PROF").is_some() {
+            _app.add_plugins(gpu_frame_time::GpuFrameTimePlugin);
+        }
         #[cfg(target_os = "horizon")]
         {
             _app.add_plugins(bevy_horizon::HorizonPlugin);

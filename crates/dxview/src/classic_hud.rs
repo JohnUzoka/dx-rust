@@ -928,9 +928,15 @@ pub fn classic_hud_system(
         if !visible {
             // Hidden windows keep their last image: no canvas, no upload (a hidden ConLower alone was a
             // screen-wide f32 canvas allocated, cleared and converted every frame).
-            for (hw, _, mut vis, _) in &mut nodes {
-                if hw.0 == w && *vis != Visibility::Hidden {
-                    *vis = Visibility::Hidden;
+            for (hw, mut node, mut vis, _) in &mut nodes {
+                if hw.0 == w {
+                    if *vis != Visibility::Hidden {
+                        *vis = Visibility::Hidden;
+                    }
+                    // Lean Updates: out of Bevy's layout too (Visibility keeps a node in it).
+                    if lean && node.display != Display::None {
+                        node.display = Display::None;
+                    }
                 }
             }
             continue;
@@ -1002,6 +1008,14 @@ pub fn classic_hud_system(
                 }
                 snap.held.is_some().hash(h);
                 (ww, wh, s).hash(h);
+            })),
+            // Lean Updates: the message log is drawn from its wrapped lines and size only, and shown for a while
+            // after each message: it is redrawn when a message arrives, not every frame it is up.
+            Win::Log if lean => Some(hkey_with(|h| {
+                use std::hash::Hash;
+                log_lines.hash(h);
+                (ww, wh, s).hash(h);
+                crate::menuui::palette().hash(h);
             })),
             // Lean Updates: the conversation windows (a cut scene is all conversation; run 3's intro spent 7.8 ms a
             // frame redrawing them). The upper one is only its background; the lower one is the speaker, the line and
@@ -1163,6 +1177,10 @@ pub fn classic_hud_system(
             };
             if *vis != want {
                 *vis = want;
+            }
+            // Back in layout when shown (a parked window is Display::None).
+            if node.display != Display::Flex {
+                node.display = Display::Flex;
             }
             // Sized about the screen corner it sits nearest.
             let (sx, sy) = if k == 1.0 {

@@ -189,7 +189,12 @@ pub fn blood_system(
         }
     }
     // Drips from the wounded: a BloodDrop thrown at VRand * 100 from mid-body.
-    let dd = assets.classes.defaults("BloodDrop");
+    // Lean Updates: the drip's mesh is looked up only when a drip is thrown (the class data is fixed).
+    let dd = if crate::perf::lean_updates() && drips.0.is_empty() {
+        Vec::new()
+    } else {
+        assets.classes.defaults("BloodDrop")
+    };
     for at in std::mem::take(&mut drips.0) {
         let v =
             DVec3::new(rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0).normalize_or_zero();
