@@ -30,6 +30,10 @@
 //!   a frame, and indirect draws without them took up to 80 ms of render-thread encoding on Liberty Island. Without
 //!   it every material and lightmap binds on its own (`render_plugin`), every camera draws directly
 //!   (`NoIndirectDrawing`), and the level's surfaces keep CPU culling (`DXVIEW_CPU_CULL`, gpudrive.rs).
+//! - `ssao`: SSAO as the game decides it (postfx.rs: on when Ambient Occlusion is on in either look, the Modern mix
+//!   included, and then for the session). Otherwise it stays off on the Switch (`DXVIEW_AO_NOSSAO`): with the depth
+//!   and normal prepass and the SMAA it brings, it cost about 22 ms of GPU time a frame with Ambient Occlusion off
+//!   (runs 6b to 9), and the Switch keeps it off until the game holds 60 fps without it (the user's call, 2026-11-02).
 //!
 //! The settings the Switch starts with (`switch_settings`), unless settings.txt already has a value: Anti-Aliasing and
 //! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), and Open Sea on (water.rs). They are on the
@@ -108,6 +112,10 @@ pub fn init() {
                 // Direct draws leave the GPU nothing to cull with: the level's surfaces keep CPU culling (gpudrive.rs).
                 std::env::set_var("DXVIEW_CPU_CULL", "1");
             }
+            if !option("ssao") {
+                // No SSAO whatever Ambient Occlusion says (postfx.rs), until the game holds 60 fps without it.
+                std::env::set_var("DXVIEW_AO_NOSSAO", "1");
+            }
             // Last, so an env line can change any of the above.
             for (name, value) in options.lines().filter_map(|line| line.strip_prefix("env ")?.split_once('=')) {
                 if !name.trim().is_empty() {
@@ -121,6 +129,11 @@ pub fn init() {
             eprintln!("[DX RUST] options.txt gpu_driven: upstream's GPU-driven drawing (binding arrays, indirect draws, the level culled on the GPU)");
         } else {
             eprintln!("[DX RUST] drawing: no binding arrays, direct draws, the level culled on the CPU (options.txt gpu_driven: upstream's GPU-driven drawing)");
+        }
+        if option("ssao") {
+            eprintln!("[DX RUST] options.txt ssao: SSAO as the game decides it (Ambient Occlusion on in either look)");
+        } else {
+            eprintln!("[DX RUST] SSAO off, whatever Ambient Occlusion says (options.txt ssao: as the game decides it)");
         }
         switch_settings();
         eprintln!("[DX RUST] settings: {}", settings_line());
