@@ -34,10 +34,6 @@
 //!   included, and then for the session). Otherwise it stays off on the Switch (`DXVIEW_AO_NOSSAO`): with the depth
 //!   and normal prepass and the SMAA it brings, it cost about 22 ms of GPU time a frame with Ambient Occlusion off
 //!   (runs 6b to 9), and the Switch keeps it off until the game holds 60 fps without it (the user's call, 2026-11-02).
-//! - `render_scale=<0.5 to 1>`: the share of the screen's width and height the game draws (all of it without the
-//!   option). The window keeps the screen's logical size (`screen_size`), so the game and its HUD lay out as before,
-//!   and the Switch's compositor stretches the smaller picture over the screen, as it stretches a 1280x720 one over a
-//!   docked 1080p screen: no GPU pass of its own. 0.75 draws 960x540 handheld, about 56% of the pixels.
 //!
 //! The settings the Switch starts with (`switch_settings`), unless settings.txt already has a value: Anti-Aliasing and
 //! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), and Open Sea on (water.rs). They are on the
@@ -72,13 +68,6 @@ fn option(name: &str) -> bool {
 fn value(name: &str) -> Option<&'static str> {
     OPTIONS.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix('=')).map(str::trim)
 }
-
-/// options.txt `render_scale=<0.5 to 1>`, the share of the screen's width and height the game draws (the module notes);
-/// 1 without the option.
-#[cfg(target_os = "horizon")]
-static RENDER_SCALE: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
-    value("render_scale").and_then(|v| v.parse::<f32>().ok()).filter(|s| s.is_finite()).map_or(1.0, |s| s.clamp(0.5, 1.0))
-});
 
 /// Bevy's render plugin: on the Switch, without the binding-array features unless options.txt has `gpu_driven` (the
 /// module notes), so every material and lightmap binds on its own.
@@ -146,15 +135,6 @@ pub fn init() {
         } else {
             eprintln!("[DX RUST] SSAO off, whatever Ambient Occlusion says (options.txt ssao: as the game decides it)");
         }
-        let scale = *RENDER_SCALE;
-        if scale < 1.0 {
-            let at = |w: f32, h: f32| format!("{}x{}", (w * scale).round(), (h * scale).round());
-            eprintln!(
-                "[DX RUST] options.txt render_scale={scale}: the game draws {} of the 1280x720 screen ({} of 1920x1080 docked); the compositor stretches it",
-                at(1280.0, 720.0),
-                at(1920.0, 1080.0)
-            );
-        }
         switch_settings();
         eprintln!("[DX RUST] settings: {}", settings_line());
         clocks::start(value("gpu_clocks"));
@@ -180,7 +160,7 @@ impl Plugin for SwitchPlugin {
         #[cfg(target_os = "horizon")]
         {
             _app.add_plugins(bevy_horizon::HorizonPlugin);
-            _app.add_systems(Update, screen_size);
+            _app.add_systems(Startup, screen_size);
             _app.add_systems(PreUpdate, dock_clocks);
             _app.add_systems(Last, (cpu_boost, shadow_lights_log, draw_check_collect));
             if let Some(render) = _app.get_sub_app_mut(bevy::render::RenderApp) {
@@ -210,25 +190,13 @@ impl Plugin for SwitchPlugin {
     }
 }
 
-/// The window draws at the screen's size times `render_scale` (1280x720 handheld, 1920x1080 docked) and keeps the
-/// screen's logical size, so the game and its HUD lay out as at full size. Checked every frame: the game starts at its
-/// saved desktop resolution (1600x900 by default), its Display menu can set another, and bevy_horizon sets the whole
-/// resolution again, scale included, when the dock state changes (`monitor_dock_status`, PreUpdate).
+/// The window takes the screen's size. bevy_horizon resizes it only when the dock state changes, so a start in
+/// handheld mode would keep the saved desktop resolution (1600x900 by default). Docked, its first frame sets
+/// 1920x1080 after this.
 #[cfg(target_os = "horizon")]
-fn screen_size(mode: Res<bevy_horizon::HorizonDisplayMode>, mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>) {
-    let (width, height) = match *mode {
-        bevy_horizon::HorizonDisplayMode::Docked => (1920.0, 1080.0),
-        bevy_horizon::HorizonDisplayMode::Handheld => (1280.0, 720.0),
-    };
-    let scale = *RENDER_SCALE;
-    let (w, h) = ((width * scale).round() as u32, (height * scale).round() as u32);
-    let factor = (scale < 1.0).then_some(scale);
+fn screen_size(mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>) {
     for mut window in &mut windows {
-        let now = &window.resolution;
-        if now.physical_width() != w || now.physical_height() != h || now.scale_factor_override() != factor {
-            window.resolution.set_scale_factor_override(factor);
-            window.resolution.set_physical_resolution(w, h);
-        }
+        window.resolution.set_physical_resolution(1280, 720);
     }
 }
 

@@ -24,7 +24,6 @@ env BEVY_HORIZON_CPU_PROFILE=1
 # env BH_ROBUST_BUFFER_ACCESS=0
 # env DXVIEW_MIRROR_SLOTS=0    # no reflections: mirrored floors and glass show their own picture
 # ssao                         # SSAO as the game decides it; off on the Switch from run 11 (about 22 ms a frame)
-# render_scale=0.75            # draw 960x540 and let the Switch stretch it over the screen (0.5 to 1)
 
 # Upstream's GPU-driven drawing (bindless materials, multi-draw indirect calls, the level culled on the GPU): off
 # on the Switch since run 10, because it cost the title about 30 ms of GPU time a frame in run 9.
