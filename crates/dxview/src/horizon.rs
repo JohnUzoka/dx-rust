@@ -21,17 +21,15 @@
 //! - Missing geometry on the console only (the intro's red wall panels in runs 2-4, run 3's Liberty Island dock until
 //!   a reload; a desktop build with the same settings draws both), one switch per run:
 //!   - `no_zcull`: ZCULL (the GPU's coarse depth test, which rejects hidden pixels in blocks) off in every pass;
-//!   - `no_gpu_culling`: every camera draws without indirect draws, so Bevy's GPU culling is out of the picture;
-//!   - `draw_empty`: NVK sets up every indirect draw instead of skipping the ones it reads as empty.
+//!   - `draw_empty`, with `gpu_driven`: NVK sets up every indirect draw instead of skipping the ones it reads as empty.
 //!   `[Draw check]` lines, 6 s and 20 s after each map arrives, list the level surfaces whose material, texture or
 //!   mesh the renderer still hasn't got; none listed with a surface missing on screen points at the GPU side.
-//! - Upstream's GPU-driven drawing (bindless materials and multi-draw indirect calls, GPU culling of the level's
-//!   surfaces; run 8 lost about 30 ms of GPU time a frame with it), one switch per run:
-//!   - `no_gpu_culling` (above) also takes out the multi-draw indirect calls;
-//!   - `no_bindless`: Bevy's render plugin without the binding-array features (`render_plugin`), so every material
-//!     and lightmap binds on its own, as the level's and the characters' materials did before upstream made them
-//!     bindless;
-//!   - `env DXVIEW_CPU_CULL=1` (gpudrive.rs): the level's surfaces keep CPU culling.
+//! - `gpu_driven`: upstream's GPU-driven drawing, otherwise off on the Switch: bindless materials (binding arrays),
+//!   multi-draw indirect calls, and the level's surfaces culled on the GPU. NVK has no indirect-count draws before
+//!   Turing, and run 9 measured both halves on the console: the binding arrays cost the title about 30 ms of GPU time
+//!   a frame, and indirect draws without them took up to 80 ms of render-thread encoding on Liberty Island. Without
+//!   it every material and lightmap binds on its own (`render_plugin`), every camera draws directly
+//!   (`NoIndirectDrawing`), and the level's surfaces keep CPU culling (`DXVIEW_CPU_CULL`, gpudrive.rs).
 //!
 //! The settings the Switch starts with (`switch_settings`), unless settings.txt already has a value: Anti-Aliasing and
 //! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), and Open Sea on (water.rs). They are on the
@@ -67,12 +65,12 @@ fn value(name: &str) -> Option<&'static str> {
     OPTIONS.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix('=')).map(str::trim)
 }
 
-/// Bevy's render plugin: its default, except with options.txt `no_bindless` on the Switch (the module notes).
+/// Bevy's render plugin: on the Switch, without the binding-array features unless options.txt has `gpu_driven` (the
+/// module notes), so every material and lightmap binds on its own.
 pub fn render_plugin() -> bevy::render::RenderPlugin {
     #[cfg(target_os = "horizon")]
-    if option("no_bindless") {
+    if !option("gpu_driven") {
         use bevy::render::settings::{WgpuFeatures, WgpuSettings};
-        eprintln!("[DX RUST] options.txt no_bindless: no binding arrays; every material and lightmap binds on its own");
         return bevy::render::RenderPlugin {
             render_creation: WgpuSettings {
                 disabled_features: Some(WgpuFeatures::TEXTURE_BINDING_ARRAY | WgpuFeatures::BUFFER_BINDING_ARRAY),
@@ -106,6 +104,10 @@ pub fn init() {
             if !option("memory_log") {
                 std::env::set_var("BEVY_HORIZON_MEMORY_EVERY", "0");
             }
+            if !option("gpu_driven") {
+                // Direct draws leave the GPU nothing to cull with: the level's surfaces keep CPU culling (gpudrive.rs).
+                std::env::set_var("DXVIEW_CPU_CULL", "1");
+            }
             // Last, so an env line can change any of the above.
             for (name, value) in options.lines().filter_map(|line| line.strip_prefix("env ")?.split_once('=')) {
                 if !name.trim().is_empty() {
@@ -115,6 +117,11 @@ pub fn init() {
         }
         let read = if options.is_empty() { "none".to_string() } else { options.replace('\n', "; ") };
         eprintln!("[DX RUST] options.txt: {read}");
+        if option("gpu_driven") {
+            eprintln!("[DX RUST] options.txt gpu_driven: upstream's GPU-driven drawing (binding arrays, indirect draws, the level culled on the GPU)");
+        } else {
+            eprintln!("[DX RUST] drawing: no binding arrays, direct draws, the level culled on the CPU (options.txt gpu_driven: upstream's GPU-driven drawing)");
+        }
         switch_settings();
         eprintln!("[DX RUST] settings: {}", settings_line());
         clocks::start(value("gpu_clocks"));
@@ -146,12 +153,11 @@ impl Plugin for SwitchPlugin {
             if let Some(render) = _app.get_sub_app_mut(bevy::render::RenderApp) {
                 render.add_systems(bevy::render::Render, draw_check_report.after(bevy::render::RenderSystems::PrepareAssets));
             }
-            if option("no_gpu_culling") {
+            if !option("gpu_driven") {
                 // Bevy wants NoIndirectDrawing on a camera from its spawn: every camera the game makes gets it then.
                 _app.add_observer(|add: On<Add, Camera>, mut commands: Commands| {
                     commands.entity(add.entity).insert(bevy::render::view::NoIndirectDrawing);
                 });
-                eprintln!("[DX RUST] options.txt no_gpu_culling: every camera draws without indirect draws (no GPU culling)");
             }
             if option("draw_empty") {
                 let set = bevy_horizon::nvk_tune::set(bevy_horizon::nvk_tune::Knob::SkipEmptyDraws, 0);
