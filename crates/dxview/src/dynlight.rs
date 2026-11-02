@@ -53,8 +53,6 @@ impl Spec {
 
 /// DeusExWeapon.MuzzleFlashLight: MuzzleFlash (hue 28, saturation 160, brightness 255, radius 3, 0.1 s).
 pub const MUZZLE_FLASH: Spec = Spec::new(28, 160, 255, 3.0);
-/// Fireball (the flamethrower's flame): hue 16, saturation 32, brightness 200, radius 2.
-pub const FIREBALL: Spec = Spec::new(16, 32, 200, 2.0);
 /// A lit flare: hue 16, saturation 96, brightness 255, radius 8 (LE_TorchWaver).
 pub const FLARE: Spec = Spec::new(16, 96, 255, 8.0);
 
@@ -191,35 +189,53 @@ static SHADOW_CACHE: Mutex<Option<HashMap<(i32, i32, i32, i32), std::sync::Arc<V
 /// The lights that reach an actor at `center` (half height `half_h`), as Unreal lights actors: static lights that
 /// can see it (cached per spot), plus the dynamic lights on now that can see it.
 pub fn lights_at(level: &dx_level::Level, center: [f32; 3], half_h: f32) -> Vec<LightInfo> {
+    let mut v = Vec::new();
+    lights_at_into(level, center, half_h, &mut v);
+    v
+}
+
+/// Run `f` on `lights_at`'s answer held in a per-thread buffer (no allocation once warm).
+pub fn with_lights_at<R>(level: &dx_level::Level, center: [f32; 3], half_h: f32, f: impl FnOnce(&[LightInfo]) -> R) -> R {
+    thread_local! {
+        static BUF: std::cell::RefCell<Vec<LightInfo>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    BUF.with(|b| {
+        let Ok(mut b) = b.try_borrow_mut() else { return f(&lights_at(level, center, half_h)) };
+        lights_at_into(level, center, half_h, &mut b);
+        f(&b)
+    })
+}
+
+/// `lights_at` into a caller's buffer (cleared first).
+pub fn lights_at_into(level: &dx_level::Level, center: [f32; 3], half_h: f32, v: &mut Vec<LightInfo>) {
+    v.clear();
     let key = (
         (center[0] / 32.0).floor() as i32,
         (center[1] / 32.0).floor() as i32,
         (center[2] / 32.0).floor() as i32,
         (half_h / 16.0).round() as i32,
     );
-    let statics = {
+    {
         let mut g = SHADOW_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         let map = g.get_or_insert_with(HashMap::new);
         if map.len() > 200_000 {
             map.clear();
         }
-        map.entry(key)
-            .or_insert_with(|| {
-                // The middle of the cell, so every actor in it gets the same answer.
-                let c = [(key.0 as f32 + 0.5) * 32.0, (key.1 as f32 + 0.5) * 32.0, (key.2 as f32 + 0.5) * 32.0];
-                std::sync::Arc::new(dx_level::actors::shadowed_lights(&level.collision, &level.lights, c, half_h))
-            })
-            .clone()
-    };
-    let cur = current();
-    let mut v: Vec<LightInfo> = statics.as_ref().clone();
-    if !cur.is_empty() {
-        v.extend(dx_level::actors::shadowed_lights(&level.collision, &cur, center, half_h));
+        let statics = map.entry(key).or_insert_with(|| {
+            // The middle of the cell, so every actor in it gets the same answer.
+            let c = [(key.0 as f32 + 0.5) * 32.0, (key.1 as f32 + 0.5) * 32.0, (key.2 as f32 + 0.5) * 32.0];
+            std::sync::Arc::new(dx_level::actors::shadowed_lights(&level.collision, &level.lights, c, half_h))
+        });
+        v.extend_from_slice(statics);
     }
+    with_current_copy(|cur| {
+        if !cur.is_empty() {
+            dx_level::actors::shadowed_lights_into(&level.collision, cur, center, half_h, v);
+        }
+    });
     if let Some(l) = flash_spot_on(level, center) {
         v.push(l);
     }
-    v
 }
 
 /// The Flashlight Cone's light on a vertex-lit mesh: the cone from the eye, as a light just in front of the mesh
@@ -272,6 +288,10 @@ fn flash_spot_on(level: &dx_level::Level, center: [f32; 3]) -> Option<LightInfo>
 #[derive(Component)]
 pub struct FlashCone;
 
+/// The flashlight's wide, dim spill round its hot spot (also a FlashCone).
+#[derive(Component)]
+pub struct FlashSpill;
+
 /// Enhancement: a flashlight cone with soft spill instead of the beam light (setting FlashlightCone).
 pub fn flashlight_cone() -> bool {
     crate::settings::get("FlashlightCone") > 0.5
@@ -290,6 +310,30 @@ static CPU_ONLY: Mutex<Vec<LightInfo>> = Mutex::new(Vec::new());
 /// The dynamic lights on right now.
 pub fn current() -> Vec<LightInfo> {
     CURRENT.lock().map(|c| c.clone()).unwrap_or_default()
+}
+
+/// Run `f` on a copy of this frame's dynamic lights held in a per-thread buffer (no allocation once warm, and the
+/// list isn't kept locked while `f` traces).
+pub fn with_current_copy<R>(f: impl FnOnce(&[LightInfo]) -> R) -> R {
+    thread_local! {
+        static BUF: std::cell::RefCell<Vec<LightInfo>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    BUF.with(|b| {
+        // A nested call on this thread (should not happen) falls back to a fresh copy.
+        let Ok(mut b) = b.try_borrow_mut() else { return f(&current()) };
+        b.clear();
+        with_current(|c| b.extend_from_slice(c));
+        f(&b)
+    })
+}
+
+/// This frame's dynamic lights, read in place (no copy). `f` must not call back into this module's light lookups
+/// (`lights_at`, `current`): the list is locked while it runs.
+pub fn with_current<R>(f: impl FnOnce(&[LightInfo]) -> R) -> R {
+    match CURRENT.lock() {
+        Ok(c) => f(&c),
+        Err(_) => f(&[]),
+    }
 }
 
 #[derive(Component)]
@@ -327,8 +371,7 @@ pub fn setup_dynlights(mut commands: Commands) {
                 .id(),
         );
     }
-    let gain = std::env::var("DXVIEW_DYNLIGHT_GAIN")
-        .ok()
+    let gain = env_val!("DXVIEW_DYNLIGHT_GAIN")
         .and_then(|v| v.parse().ok())
         .unwrap_or(1.0);
     commands.insert_resource(DynLights {
@@ -349,6 +392,14 @@ fn rand(seed: &mut u32) -> f32 {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[derive(Default)]
+pub struct DynScratch {
+    active: Vec<(LightInfo, Spec)>,
+    held: Vec<(u64, DVec3, Spec, f32)>,
+    seen: HashSet<u64>,
+    keys: HashMap<u64, [f32; 3]>,
+}
+
 pub fn dynlight_system(
     time: Res<Time>,
     level: Res<LevelRes>,
@@ -356,6 +407,7 @@ pub fn dynlight_system(
     blockers: Res<crate::actors::Blockers>,
     cam: Single<&Transform, (With<FlyCam>, Without<SkyCam>, Without<DynLightSlot>)>,
     mut slots: Query<(&mut PointLight, &mut Transform, &mut Visibility), With<DynLightSlot>>,
+    mut scratch: Local<DynScratch>,
 ) {
     let _prof = crate::prof::scope("dynlight::dynlight_system");
     let dt = time.delta_secs();
@@ -470,18 +522,14 @@ pub fn dynlight_system(
     }
 
     // Everything on this frame.
-    let mut active: Vec<(LightInfo, Spec)> = st
-        .transients
-        .iter()
-        .map(|t| (t.spec.info(t.pos, 1.0), t.spec))
-        .collect();
-    let held: Vec<(u64, DVec3, Spec, f32)> = HELD
-        .lock()
-        .map(|mut h| std::mem::take(&mut *h))
-        .unwrap_or_default();
-    let mut seen = HashSet::new();
-    let mut active_keys: HashMap<u64, [f32; 3]> = HashMap::new();
-    for (key, pos, spec, flicker) in held {
+    // (Buffers kept between frames.)
+    let DynScratch { active, held, seen, keys: active_keys } = &mut *scratch;
+    active.clear();
+    active.extend(st.transients.iter().map(|t| (t.spec.info(t.pos, 1.0), t.spec)));
+    crate::queue::swap_out(&HELD, held);
+    seen.clear();
+    active_keys.clear();
+    for (key, pos, spec, flicker) in held.drain(..) {
         if !seen.insert(key) {
             continue;
         }
@@ -505,7 +553,8 @@ pub fn dynlight_system(
     let beam_key = crate::sound::key_of("aug-light-beam");
     let beam_pos = active_keys.get(&beam_key).copied();
     if let Ok(mut c) = CURRENT.lock() {
-        *c = active.iter().filter(|(l, _)| beam_pos.is_none_or(|b| l.pos != b)).map(|(l, _)| *l).collect();
+        c.clear();
+        c.extend(active.iter().filter(|(l, _)| beam_pos.is_none_or(|b| l.pos != b)).map(|(l, _)| *l));
         if let Ok(x) = CPU_ONLY.lock() {
             c.extend(x.iter().copied());
         }
@@ -648,7 +697,7 @@ pub fn aug_light_system(
     level: Res<LevelRes>,
     player: Res<Player>,
     cam: Single<&Transform, (With<FlyCam>, Without<SkyCam>, Without<FlashCone>)>,
-    mut cone: Query<(&mut SpotLight, &mut Transform, &mut Visibility), With<FlashCone>>,
+    mut cone: Query<(&mut SpotLight, &mut Transform, &mut Visibility, Has<FlashSpill>), With<FlashCone>>,
     st: Option<Res<DynLights>>,
 ) {
     let _prof = crate::prof::scope("dynlight::aug_light_system");
@@ -656,7 +705,7 @@ pub fn aug_light_system(
     let on = crate::abilities::aug_active("AugLight") && !crate::consys::third_person();
     let cone_on = on && flashlight_cone();
     if !cone_on {
-        for (mut sl, _, mut vis) in &mut cone {
+        for (mut sl, _, mut vis, _) in &mut cone {
             sl.intensity = 0.0;
             *vis = Visibility::Hidden;
         }
@@ -698,7 +747,7 @@ pub fn aug_light_system(
         let gain = st.as_ref().map_or(1.0, |s| s.gain);
         // (capped: aimed at the sky, the light needed to reach "the spot" 1024 units off blew out everything near)
         let d = (dist.clamp(64.0, 256.0) / 64.0) as f32;
-        let intensity = std::f32::consts::PI.powi(2) * r_m * r_m * k * gain * d * d * 5.0 * std::env::var("DXVIEW_CONE_GAIN").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+        let intensity = std::f32::consts::PI.powi(2) * r_m * r_m * k * gain * d * d * 5.0 * env_val!("DXVIEW_CONE_GAIN").map(str::to_owned).and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
         let c = hsv_white(32, 140);
         let right = cam.right().as_vec3();
         // Just off the eye (a little right and down, so shadows show as thin edges): from the shoulder, the pool's
@@ -709,35 +758,36 @@ pub fn aug_light_system(
         if let Ok(mut f) = FLASH.lock() {
             *f = Some((pos, (look - pos).normalize_or(Vec3::NEG_Z), dist as f32 * dx_level::METERS_PER_UNIT));
         }
-        match cone.iter_mut().next() {
-            Some((mut sl, mut t, mut vis)) => {
-                if std::env::var_os("DXVIEW_CONELOG").is_some() {
-                    println!("CONE dist {dist:.0} intensity {intensity:.0} at {:?}", tf.translation);
-                }
-                sl.intensity = intensity;
-                sl.color = Color::srgb(c[0], c[1], c[2]);
-                *t = tf;
-                *vis = Visibility::Inherited;
-            }
-            None => {
-                commands.spawn((
+        // A plain cone worked out in the shaders, no shadow map (a shadow view every frame, and its acne on grazing
+        // walls lit from beside the eye): a hot spot, and a wide spill at 22% round it.
+        if env_on!("DXVIEW_CONELOG") {
+            println!("CONE dist {dist:.0} intensity {intensity:.0} at {:?}", tf.translation);
+        }
+        if cone.is_empty() {
+            for spill in [false, true] {
+                let mut e = commands.spawn((
                     SpotLight {
-                        intensity,
+                        intensity: 0.0,
                         color: Color::srgb(c[0], c[1], c[2]),
                         range: 2048.0 * dx_level::METERS_PER_UNIT,
-                        inner_angle: 0.04,
-                        outer_angle: 0.48,
-                        shadow_maps_enabled: std::env::var_os("DXVIEW_CONE_NOSHADOW").is_none(),
-                        // Grazing walls lit from almost the eye: the default biases left acne (black lines, a
-                        // dark wedge, speckles) on them.
-                        shadow_depth_bias: 0.12,
-                        shadow_normal_bias: 3.0,
+                        inner_angle: if spill { 0.3 } else { 0.05 },
+                        outer_angle: if spill { 0.85 } else { 0.32 },
+                        shadow_maps_enabled: false,
                         ..default()
                     },
                     tf,
                     FlashCone,
                 ));
+                if spill {
+                    e.insert(FlashSpill);
+                }
             }
+        }
+        for (mut sl, mut t, mut vis, spill) in &mut cone {
+            sl.intensity = intensity * if spill { 0.22 } else { 1.0 };
+            sl.color = Color::srgb(c[0], c[1], c[2]);
+            *t = tf;
+            *vis = Visibility::Inherited;
         }
     } else {
         hold(crate::sound::key_of("aug-light-beam"), beam_at, beam, 0.0);
@@ -817,7 +867,7 @@ pub fn brightness_key_system(
     let g = crate::settings::generation();
     if g != *gen {
         *gen = g;
-        if std::env::var("DXVIEW_GAMMA").is_err() {
+        if !env_on!("DXVIEW_GAMMA") {
             for mut b in &mut q {
                 b.gamma = crate::settings::gamma();
             }
@@ -858,5 +908,44 @@ pub fn reset_level() {
     }
     if let Ok(mut v) = SHADOW_CACHE.lock() {
         *v = None;
+    }
+}
+
+/// Glowing surfaces that light their surroundings (with Glowing Surfaces on): the nano-augmentation canister's blue
+/// light, bio cells, computer and ATM screens, keypads - each a small light of its own colour following the object
+/// (picked up, it's gone). Ours: the original gives these no light (Surreal 98's emissive look).
+const GLOWS: &[(&str, Spec)] = &[
+    ("AugmentationCannister", Spec::new(150, 70, 150, 3.0)),
+    ("AugmentationUpgradeCannister", Spec::new(150, 70, 150, 3.0)),
+    ("BioelectricCell", Spec::new(140, 90, 110, 2.0)),
+    ("ComputerPersonal", Spec::new(130, 150, 70, 2.5)),
+    ("ComputerPublic", Spec::new(130, 150, 70, 2.5)),
+    ("ComputerSecurity", Spec::new(110, 150, 70, 2.5)),
+    ("ATM", Spec::new(90, 140, 70, 2.5)),
+    ("Keypad1", Spec::new(85, 120, 60, 1.0)),
+    ("Keypad2", Spec::new(85, 120, 60, 1.0)),
+    ("Keypad3", Spec::new(85, 120, 60, 1.0)),
+];
+
+pub fn glow_lights_system(
+    level: Res<LevelRes>,
+    cam: Single<&Transform, (With<FlyCam>, Without<SkyCam>)>,
+    actors: Query<(&crate::actors::MeshActorRef, &GlobalTransform, &InheritedVisibility)>,
+) {
+    if crate::settings::get("EmissiveSurfaces") < 0.5 {
+        return;
+    }
+    let eye = DVec3::from(dx_level::bevy_to_ue(cam.translation.to_array()).map(|v| v as f64));
+    for (r, gt, vis) in &actors {
+        if !vis.get() {
+            continue;
+        }
+        let Some(ma) = level.0.mesh_actors.get(r.0) else { continue };
+        let Some(a) = level.0.actors.get(ma.actor) else { continue };
+        let Some((_, spec)) = GLOWS.iter().find(|(c, _)| a.class.eq_ignore_ascii_case(c)) else { continue };
+        let p = DVec3::from(dx_level::bevy_to_ue(gt.translation().to_array()).map(|v| v as f64));
+        if p.distance(eye) < 2500.0 {
+            hold(0xE_0000_0000 | ma.actor as u64, p + DVec3::Z * 4.0, *spec, 0.0);
+        }
     }
 }

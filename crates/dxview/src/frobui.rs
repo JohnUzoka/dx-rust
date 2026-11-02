@@ -170,6 +170,10 @@ pub fn frob_target_system(
     // (fraction along the ray, radius for "smallest", is pawn, is mover, highlight)
     let mut hits: Vec<(f64, f64, bool, bool, Highlight)> = Vec::new();
     for (idx, (info, rt)) in lvl.movers.iter().zip(&mv.rt).enumerate() {
+        // Out of reach (the frob ray is short): no brush trace.
+        if rt.location.distance(eye) > info.reach + FROB_DIST + 2.0 {
+            continue;
+        }
         let a = &lvl.actors[info.actor];
         if matches!(find(&a.props, "bHighlight"), Some(Value::Bool(false))) {
             continue;
@@ -468,9 +472,13 @@ pub fn frob_target_system(
                 best = Some(h);
                 break;
             }
-        } else if r < min_size {
-            min_size = r;
-            best = Some(h);
+        } else {
+            // Transcended: the smallest by volume (CollisionRadius^2 x CollisionHeight), not radius alone.
+            let size = if crate::transcended::fixes() { h.ext.x * h.ext.x * h.ext.z } else { r };
+            if size < min_size {
+                min_size = size;
+                best = Some(h);
+            }
         }
     }
     HAS_TARGET.store(best.is_some(), std::sync::atomic::Ordering::Relaxed);

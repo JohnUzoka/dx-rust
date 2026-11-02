@@ -27,6 +27,7 @@ pub type AnimMaterial = ExtendedMaterial<StandardMaterial, VertAnim>;
 
 pub const ANIM_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("6f0c2f7e-1a8b-4c9d-9e2f-0d5b7a3c1e44");
 pub const ANIM_PREPASS_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("6f0c2f7e-1a8b-4c9d-9e2f-0d5b7a3c1e45");
+pub const ANIM_FRAG_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("6f0c2f7e-1a8b-4c9d-9e2f-0d5b7a3c1e46");
 
 /// MeshTag meaning "draw the mesh's own positions" (CPU-posed this frame).
 pub const SENTINEL: u32 = u32::MAX;
@@ -46,6 +47,10 @@ impl MaterialExtension for VertAnim {
     fn vertex_shader() -> ShaderRef {
         ANIM_SHADER.into()
     }
+    fn fragment_shader() -> ShaderRef {
+        // Real-time shadows received (shaders/anim_frag.wgsl).
+        ANIM_FRAG_SHADER.into()
+    }
     fn enable_prepass() -> bool {
         false
     }
@@ -62,6 +67,10 @@ pub fn setup_anim_shader(mut shaders: ResMut<Assets<Shader>>) {
     let _ = shaders.insert(
         &ANIM_SHADER,
         Shader::from_wgsl(include_str!("shaders/vert_anim.wgsl"), "dxview/vert_anim.wgsl"),
+    );
+    let _ = shaders.insert(
+        &ANIM_FRAG_SHADER,
+        Shader::from_wgsl(include_str!("shaders/anim_frag.wgsl"), "dxview/anim_frag.wgsl"),
     );
     let _ = shaders.insert(
         &ANIM_PREPASS_SHADER,
@@ -162,7 +171,7 @@ impl GpuAnim {
         }
         let v = (pi, base, fv as u32, lo, hi);
         self.keyed.insert(key, v);
-        if std::env::var_os("DXVIEW_GPUANIM_LOG").is_some() {
+        if env_on!("DXVIEW_GPUANIM_LOG") {
             let total: usize = self.pages.iter().map(|p| p.len).sum();
             println!("GPUANIM +{need} texels: {total} in {} page(s), {} meshes", self.pages.len(), self.keyed.len());
         }
@@ -217,7 +226,7 @@ pub fn gpuanim_setup(
     if new.is_empty() {
         return;
     }
-    let cpu_only = std::env::var("DXVIEW_CPU_ANIM").is_ok();
+    let cpu_only = env_on!("DXVIEW_CPU_ANIM");
     let mut todo = Vec::new();
     for (e, a, children) in &new {
         let ma = &level.0.mesh_actors[a.mesh_actor];

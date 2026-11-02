@@ -99,10 +99,16 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("SmarterAI", 0.0),
     ("DiegeticScreens", 0.0),
     ("AlertIndicators", 0.0),
+    ("HudFade", 0.0),
+    ("Upscaling", 0.0),
+    ("Grass", 0.0),
+    ("Trees", 0.0),
     ("ThrownNoise", 0.0),
     ("SurfaceFootsteps", 0.0),
     ("WeaponInertia", 0.0),
     ("FlashlightCone", 0.0),
+    ("MaterialSheen", 0.0),
+    ("ModernGlass", 0.0),
     ("BulletPenetration", 0.0),
     ("SmoothLean", 0.0),
     ("MeleeArc", 0.0),
@@ -112,6 +118,17 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("FixBlastDoors", 0.0),
     ("FixGibLoot", 0.0),
     ("FixCarryJump", 0.0),
+    // Confix's conversation packages in place of the game's (needs the mod; on in the Modern preset).
+    ("ConfixFixes", 0.0),
+    // Transcended's bug fixes (on in the Modern preset) and its bigger changes (all off).
+    ("TranscendedFixes", 0.0),
+    ("TrUnconsciousDeath", 0.0),
+    ("TrNoisyObjects", 0.0),
+    ("TrWeaponPointing", 0.0),
+    ("TrRadarCloak", 0.0),
+    ("TrNpcLimp", 0.0),
+    ("TrBossResist", 0.0),
+    ("TrLongFlares", 0.0),
     // GMDX quality of life (all off).
     ("ToolCounts", 0.0),
     ("ItemCounts", 0.0),
@@ -135,6 +152,7 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("OpenSea", 0.0),
     ("RealtimeShadows", 0.0),
     ("ModernAim", 0.0),
+    ("DiegeticScope", 0.0),
     ("EnhancedFX", 0.0),
     ("SkeletalCharacters", 0.0),
     ("Ragdolls", 0.0),
@@ -304,9 +322,6 @@ pub fn object_names() -> bool {
 pub fn auto_reload() -> bool {
     enabled("WeaponAutoReload")
 }
-pub fn low_gore() -> bool {
-    get("GoreLevel") < 0.5
-}
 pub fn subtitles() -> bool {
     on("Subtitles")
 }
@@ -357,9 +372,6 @@ pub fn sound_volume() -> f32 {
 }
 pub fn speech_volume() -> f32 {
     get("SpeechVolume") / 255.0
-}
-pub fn reverse_stereo() -> bool {
-    on("ReverseStereo")
 }
 /// Renderer gamma for the Brightness slider (0..1, default 0.5 = 1.15).
 pub fn gamma() -> f32 {

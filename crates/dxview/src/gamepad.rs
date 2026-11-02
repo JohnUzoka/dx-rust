@@ -403,12 +403,6 @@ pub fn set_bindings(map: Vec<Option<PadBtn>>) {
     *BINDS.lock().unwrap() = Some(map);
 }
 
-/// The pad action bound to a button (the first one).
-pub fn action_of(b: PadBtn) -> PadAction {
-    let map = bindings();
-    PAD_ACTIONS.iter().zip(&map).find(|(_, m)| **m == Some(b)).map(|(a, _)| a.1.clone()).unwrap_or(PadAction::None)
-}
-
 /// The button bound to a pad action (for prompts), by action name.
 pub fn button_for(name: &str) -> Option<PadBtn> {
     let map = bindings();
@@ -470,6 +464,8 @@ pub fn pad_in_use() -> bool {
 pub fn outputs(key_map: &[Input], dt: f32, ui: bool, snap_ok: bool) -> PadOut {
     let f = frame();
     let mut out = PadOut { inputs: Vec::new(), scroll: 0.0, cursor: Vec2::ZERO, snap: None };
+    // Y's "code from notes" lasts one frame (whoever is open takes it; nobody keeps it for later).
+    PAD_NOTES.store(false, std::sync::atomic::Ordering::Relaxed);
     if !f.connected {
         return out;
     }

@@ -429,6 +429,48 @@ pub fn present_mode(v: f32) -> bevy::window::PresentMode {
 /// yet, so winit has no current monitor and Bevy panics ("Unable to get monitor").
 /// On Linux, Wayland has no primary monitor (and no exclusive fullscreen): Bevy's exclusive mode panicked there
 /// ("Unable to get monitor", GitHub issue #4), so both full-screen modes are borderless on the first monitor.
+/// The mode the window is created in. On Linux winit may not have listed any monitor yet when the first window is
+/// made (Wayland, some X11 setups: GitHub issue #4, "Unable to get monitor" from Bevy as it looks the monitor up), so
+/// a full-screen mode starts windowed and `fullscreen_when_ready_system` switches once a monitor is known.
+pub fn start_window_mode(v: f32) -> WindowMode {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = v;
+        WindowMode::Windowed
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        window_mode(v)
+    }
+}
+
+/// Linux: the saved full-screen mode, applied once Bevy knows of a monitor (see `start_window_mode`). If none ever
+/// shows up the window stays windowed, maximized, instead of crashing.
+pub fn fullscreen_when_ready_system(
+    time: Res<Time<Real>>,
+    monitors: Query<&bevy::window::Monitor>,
+    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+    mut done: Local<bool>,
+) {
+    if *done || !cfg!(target_os = "linux") {
+        return;
+    }
+    let want = crate::settings::get("DisplayMode").round() as i32;
+    let Ok(mut w) = windows.single_mut() else { return };
+    if want == 1 {
+        *done = true;
+        return;
+    }
+    if !monitors.is_empty() && time.elapsed_secs() > 0.2 {
+        w.mode = window_mode(want as f32);
+        *done = true;
+    } else if time.elapsed_secs() > 5.0 {
+        println!("dxview: no monitor reported - staying windowed");
+        w.set_maximized(true);
+        *done = true;
+    }
+}
+
 pub fn window_mode(v: f32) -> WindowMode {
     #[cfg(target_os = "linux")]
     {
@@ -667,7 +709,7 @@ impl Enhance {
             ("NPCFiniteAmmo", "Gameplay", "NPC Ammo Runs Out", "Enemies use up their ammo, reload every clip and switch weapons (or to melee) when they run dry, as the original scripts say."),
             ("FloorConsumables", "Gameplay", "Use Consumables From The Floor", "With no room in your inventory, a medkit, bioelectric cell, food or drink you pick up is used on the spot."),
             ("LadderGrab", "Gameplay", "Grab Ladders", "Use takes hold of a ladder and Jump lets go; on it, forward and back climb up and down."),
-            ("NotesAutofill", "Gameplay", "Codes From Notes", "Keypad codes and computer logins you've noted are offered: Tab types a keypad code, logins are filled in."),
+            ("NotesAutofill", "Gameplay", "Codes From Notes", "Keypad codes and computer logins you've noted are offered: Tab (pad: Y) types a keypad code or fills in a login."),
             ("DialogueHotkeys", "Interface", "Dialogue Hotkeys", "Number the first four conversation choices; keys 1-4 pick them."),
             ("InventorySort", "Interface", "Inventory Auto-Sort", "A Sort button on the inventory screen packs the items neatly, weapons first."),
             ("PersistentDebris", "Visuals", "Casings And Blood Stay", "Shell casings never vanish, many more blood splats stay, and blood, bullet holes and casings are still there when you come back to a map or load a save."),
@@ -675,10 +717,13 @@ impl Enhance {
             ("DiscordPresence", "Interface", "Discord Rich Presence", "Show your location, mission and difficulty in Discord."),
             ("BodyAlarms", "AI", "Bodies Raise Alarms", "Guards who find a friend's body - dead or unconscious - run for the nearest alarm and then search the spot; with no alarm about they shout and others come to look."),
             ("SmarterAI", "AI", "Smarter AI", "GMDX's AI work plus our stealth: guards see better by difficulty and may open fire at once when they spot or hear you close by, wait a moment before shooting after losing you, lay down suppressive fire where you vanished, miss more against a moving target; cameras see farther and tell guards where you are. Ours: true darkness hides you beyond arm's reach, guards that searched in vain stay on edge, call each other over, and notice lights going out and doors opening."),
+            ("HudFade", "Interface", "Combat HUD", "Out of combat the crosshair and the status displays (health, compass, ammo, belt, active augs) fade away; they come back at once in a fight, when you aim down the sights or at an enemy, fire, get hurt, are badly hurt or change weapons."),
             ("AlertIndicators", "AI", "Alert Indicators", "A small marker over a hostile guard's head: an eye filling as they grow suspicious, a question mark while they search, an exclamation mark in a fight."),
             ("ThrownNoise", "AI", "Thrown Objects Make Noise", "Anything you throw is heard where it lands or bounces - further for heavy things - and armed guards in earshot go to look. Good for distractions."),
             ("SurfaceFootsteps", "AI", "Footsteps Louder On Hard Floors", "Carpet and grass muffle your steps, metal and water give you away; guards hear you by what you walk on."),
             ("WeaponInertia", "Visuals", "Weapon Inertia", "The weapon in your hands trails a little behind when you turn (GMDX's Viewmodel Inertia)."),
+            ("ModernGlass", "Visuals", "Modern Glass", "Window panes are frosted glass you can see, with their streaks catching the light, instead of a faint additive smear that leaves an empty-looking hole (the UNATCO HQ doors). Takes effect when the map loads."),
+            ("MaterialSheen", "Visuals", "Material Properties", "Weapons and items in your hands catch the light by what they are made of: gun metal shines, plastic less, gloves and skin hardly at all."),
             ("FlashlightCone", "Visuals", "Flashlight Cone", "The flashlight augmentation casts a soft-edged cone with shadows from your shoulder instead of a pool of light where you look."),
             ("BulletPenetration", "Gameplay", "Bullets Through Thin Walls", "Bullets go on through thin wood (walls, doors) and breakable glass, doing less damage on the other side. Bulletproof glass stays bulletproof."),
             ("SmoothLean", "Gameplay", "Smooth Leaning", "Leaning eases in and out, works while crouch-walking, and at a corner your eyes lean on past where your body stops so you can peek."),
@@ -690,6 +735,15 @@ impl Enhance {
             ("FixBlastDoors", "Fixes", "Explosions Break Strong Doors", "An explosion is dealt in five rings, so in the original no ring of even a big blast could beat a sturdy door's damage threshold. With this, a blast strong enough as a whole damages the door (GMDX fix; changes the balance)."),
             ("FixGibLoot", "Fixes", "Gibbed Bodies Drop Their Weapons", "Someone blown apart throws out the weapons they carried instead of losing them (GMDX / G-Flex fix; changes the balance)."),
             ("FixCarryJump", "Fixes", "Muscle Aug Jumps While Carrying", "With the Microfibral Muscle aug on you can jump while carrying heavier things, as the aug was meant to allow (GMDX fix; changes the balance)."),
+            // Transcended (ported by hand; the mod itself isn't needed).
+            ("TranscendedFixes", "Fixes", "Transcended Fixes", "Dozens of the original's bugs fixed as the Transcended mod does: misnamed mission flags (the Hong Kong ROM, the ship breach, the Vandenberg hazlab, Aimee's goal, Jock in Area 51), the ATM account-0 login, EMP'd robots taken as enemies, bot screens left open, the laser left on in conversations, the riot prod breaking crates, burning people left unconscious, barks under water, leather chair colours and more."),
+            ("TrUnconsciousDeath", "Gameplay", "Unconscious Bodies Can Die", "Someone knocked out can still be killed: an explosion, fire or gas that reaches the body finishes them (Transcended; changes the balance)."),
+            ("TrNoisyObjects", "AI", "Using Things Makes Noise", "Doors, buttons, switches, lamps, taps and machines you use make a noise guards nearby hear (Transcended's Noisy Object Usage)."),
+            ("TrWeaponPointing", "AI", "People Mind A Pointed Gun", "Friendly and neutral people you point a drawn weapon at, close up and in their view, complain (Transcended)."),
+            ("TrRadarCloak", "Gameplay", "Thermoptic Camo Fools Machines", "Thermoptic camo also hides you from cameras, turrets, laser beams and mines, as Radar Transparency does; Cloak and Radar Transparency together get you through beams (Transcended; changes the balance)."),
+            ("TrNpcLimp", "AI", "Wounded Legs Slow People", "People with a crippled leg walk at 85% speed, with both legs crippled 70% (Transcended)."),
+            ("TrBossResist", "Gameplay", "Stronger Gunther And Simons", "Gunther and Walton Simons shrug off tear gas and halon and take a third of explosive damage (Transcended; changes the balance)."),
+            ("TrLongFlares", "Gameplay", "Long-Burning Flares", "Flares burn for six minutes instead of thirty seconds (Transcended)."),
             // GMDX quality of life.
             ("ToolCounts", "Interface", "Tools Owned / Needed", "Locks and devices show how many lockpicks or multitools you have against how many they need, as 2/3 picks (GMDX)."),
             ("ItemCounts", "Interface", "Item Count Labels", "A stack of items lying about shows how many there are, as Medkit (3) (GMDX)."),
@@ -708,6 +762,7 @@ impl Enhance {
             ("RoomReverb", "Sound", "Room Reverb", "An echo shaped by where you are: long in big halls, short in corridors, faint outdoors, dull underwater."),
             ("Soundscape", "Sound", "Soundscape", "Far-off life around the open-air maps - dogs, gulls by the water, gusts of wind (more in the rain) - now and then, quietly, from the game's own sounds."),
             ("RestrictedCombatMusic", "Sound", "Combat Music Needs Two Attackers", "The combat music only starts when at least two enemies are fighting you, so one far-off guard doesn't set it off (GMDX)."),
+            ("DiegeticScope", "Gameplay", "Diegetic Scope", "A zoomed rifle scope is a live lens in front of the eye instead of a black screen with a picture: the world stays in view around it, the reticle sits in the glass, and an untrained eye watches the picture wander under it."),
             ("ModernAim", "Gameplay", "Modern Aiming", "Shots go where your sights drift instead of scattering at random, and the crosshair follows that point; the accuracy brackets always show. Hold the scope key (Z or LT) with a weapon that has no scope to aim down the sights: steadier, a little zoom, walking pace."),
             ("SkeletalCharacters", "Visuals", "Skeletal Characters", "People get rebuilt bodies on a real skeleton (by the Machine God team): smooth joints and blending between moves, a face that lip-syncs, blinks and glances around. They keep the skins the original gives them. Characters the HD mods replace stay as they are."),
             ("Ragdolls", "Gameplay", "Ragdolls", "With Skeletal Characters on, people go limp the moment they're killed or knocked out, thrown by the hit and carried by how they were moving, and fall against whatever is around them. Explosions still blow them apart."),
@@ -756,6 +811,7 @@ impl Enhance {
             ("DdsItems", "helios", "Helios Items And Decorations", "Helios's textures on items and decorations that keep their original models (HDTP's models keep their own). Changes take effect when the next map loads."),
             ("DdsWorld", "helios", "DDS World Textures", "Other DDS texture packs found beside Helios for walls, floors and the rest of the world (used in place of New Vision's where both have one). Changes take effect when the next map loads."),
             ("VisAttach", "visibleattachments", "Weapon Mods Shown (Visible Attachments)", "Scopes, silencers and lasers you fit show on the weapon. Changes take effect when the next map loads."),
+            ("ConfixFixes", "confix", "Confix Conversation Fixes", "Conversations from the Confix mod: typos, wrong speakers, missing lines and broken flag checks fixed. Only its conversation files are used. Changes take effect when the next map loads."),
         ] {
             if unreal_pkg::mods::active(id).is_none() {
                 continue;
@@ -812,6 +868,35 @@ impl Enhance {
             c.help = "How many threads the game spreads its parallel work over. Auto leaves room for the main and render threads and stops at 10: on processors with many cores (workstation Xeons, Threadrippers) more threads only add overhead. Takes effect on the next start.".into();
             c.kind = ChoiceKind::Enum(crate::threads::STEPS.iter().map(|&n| if n == 0 { "Auto".to_string() } else { n.to_string() }).collect());
             c.value = crate::threads::step_index(crate::settings::get("WorkerThreads"));
+            c.saved = c.value;
+            items.push(tag(c, "Display"));
+        }
+        {
+            let mut c = debug_mode_choice();
+            c.key = "Grass".into();
+            items.push(tag({
+                let mut t = debug_mode_choice();
+                t.key = "Trees".into();
+                t.label = "Grown Trees".into();
+                t.help = "The parks' flat card trees and bushes are replaced with grown ones: real branches and bark, clusters of leaves, swaying in the wind and casting shadows. Same size and place as the originals.".into();
+                t.value = crate::settings::get("Trees");
+                t.saved = t.value;
+                t
+            }, "Visuals"));
+            c.label = "3D Grass".into();
+            c.help = "Blades of grass grow out of the lawns, lit like the ground they stand on, swaying in the wind and pushed aside by whoever walks through them. Low: fewer blades and a shorter reach.".into();
+            c.kind = ChoiceKind::Enum(vec!["Off".into(), "Low".into(), "High".into()]);
+            c.value = crate::settings::get("Grass");
+            c.saved = c.value;
+            items.push(tag(c, "Visuals"));
+        }
+        {
+            let mut c = debug_mode_choice();
+            c.key = "Upscaling".into();
+            c.label = "Upscaling".into();
+            c.help = "Native AA smooths edges with temporal antialiasing at full resolution. Quality, Balanced, Performance and Ultra Performance draw the world at 1/1.5, 1/1.7, 1/2 or 1/3 the window's size and upscale it with an edge-aware filter (AMD FSR 1) and sharpening - more frames on slower graphics cards. The weapon, HUD and menus always stay at full resolution.".into();
+            c.kind = ChoiceKind::Enum(crate::upscale::NAMES.iter().map(|s| s.to_string()).collect());
+            c.value = crate::settings::get("Upscaling");
             c.saved = c.value;
             items.push(tag(c, "Display"));
         }
@@ -1098,6 +1183,12 @@ pub fn open_keypad(blocker: usize, valid: String, instant: bool) {
 static KEYPAD_NOW: std::sync::Mutex<Option<(usize, String, Option<bool>, usize)>> = std::sync::Mutex::new(None);
 static KEYPAD_PRESSES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
+/// The open keypad's code is in the notes (Codes From Notes): its "Tab / Y: code from notes" hint is wanted.
+pub fn keypad_noted() -> bool {
+    KEYPAD_NOTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+static KEYPAD_NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn keypad_blocker() -> Option<usize> {
     KEYPAD_NOW.lock().ok().and_then(|k| k.as_ref().map(|k| k.0))
 }
@@ -1383,7 +1474,7 @@ fn cut_rows(f: &mut Frame, rows: &[usize]) {
 
 /// Ours: the Enhancements screen - Controller Bindings, the gamepad options (ROADMAP Phase 0.1 / 0.2), Debug Mode.
 fn enhancement_choices() -> Vec<Choice> {
-    let e = |key: &str, label: &str, help: &str, values: &[&str]| {
+    let _e = |key: &str, label: &str, help: &str, values: &[&str]| {
         let v = crate::settings::get(key);
         Choice {
             key: key.into(),
@@ -1847,7 +1938,7 @@ fn draw_win(u: &mut Ui<W>, win: &mut Win, fonts: &Fonts, help_text: &str, waitin
         let fs = fonts.small.clone();
         let (hx, hy, hw, hh) = (cx + 7, cy + f.help_y, f.cw - 21, 27);
         u.c.set_clip(Some((hx, hy, hw, hh)));
-        u.wrapped(&fs, hx + 10, hy, hw - 20, hh, HAlign::Left, VAlign::Center, m_col(7), help_text);
+        u.wrapped_scroll(&fs, hx + 10, hy, hw - 20, hh, m_col(7), help_text);
         u.c.set_clip(None);
     }
 }
@@ -2504,7 +2595,7 @@ pub fn menu_system(
         }
         st.cursor = Some(layer(&mut commands, &mut images, &mut layers, 70));
         // DX.dx: the camera flies the IntroCam path from Position 1 (TravelPostAccept).
-        if mission == -2 && std::env::var("DXVIEW_SHOT").is_err() {
+        if mission == -2 && !env_on!("DXVIEW_SHOT") {
             let pts = crate::interp::path(&level.0, "IntroCam");
             if let Some(first) = crate::interp::at_position(&pts, 1) {
                 let it = crate::interp::Interp::start(&pts, first);
@@ -2608,7 +2699,7 @@ pub fn menu_system(
         st.stack.push(Win { f, body: Body::Keypad(k), pos: None, focus: None, hides_below: true, drop: None });
     }
     // The pad's Y on a keypad: the code from the notes (gamepad.rs).
-    if crate::gamepad::PAD_NOTES.swap(false, std::sync::atomic::Ordering::Relaxed) {
+    if crate::gamepad::PAD_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
         if let Some(Body::Keypad(k)) = st.stack.last_mut().map(|w| &mut w.body) {
             if k.noted && k.wait.is_none() {
                 keypad_from_notes(k);
@@ -2642,6 +2733,8 @@ pub fn menu_system(
             Some(Body::Keypad(k)) => Some((k.blocker, k.input.clone(), k.wait.map(|w| w.1), k.valid.chars().count())),
             _ => None,
         };
+        let noted = matches!(st.stack.last().map(|w| &w.body), Some(Body::Keypad(k)) if k.noted && k.wait.is_none() && k.input != k.valid);
+        KEYPAD_NOTED.store(noted, std::sync::atomic::Ordering::Relaxed);
     }
     // DeusExPlayer.QuickSave / QuickLoad (ConfirmQuickLoad asks first).
     if st.stack.is_empty() && st.intro.is_none() && !others && !others_before {
@@ -2747,7 +2840,7 @@ pub fn menu_system(
     // ---- input
     let hover = st.hits.iter().rev().find(|(_, r, _)| inside(mouse, *r)).map(|h| (h.0, h.2));
     let hover_w = hover.map(|h| h.0);
-    if std::env::var("DXVIEW_SNAPLOG").is_ok() {
+    if env_on!("DXVIEW_SNAPLOG") {
         eprintln!("SNAP mouse {mouse:?} hover {hover:?} hits {:?}", st.hits.iter().map(|h| (h.0, h.1)).collect::<Vec<_>>());
     }
     let shift = binds.keys.pressed(KeyCode::ShiftLeft) || binds.keys.pressed(KeyCode::ShiftRight);
@@ -3566,7 +3659,7 @@ fn set_scroll(win: &mut Win, id: u8, v: i32) {
 }
 
 /// A message box answer (BoxOptionSelected in the window that opened it).
-fn box_answer(st: &mut Menus, top: usize, yes: bool, hud: &mut ClassicHud, assets: &mut RuntimeAssets, acts: &mut Vec<Act>) {
+fn box_answer(st: &mut Menus, top: usize, yes: bool, _hud: &mut ClassicHud, _assets: &mut RuntimeAssets, acts: &mut Vec<Act>) {
     let Body::Msg(m) = &st.stack[top].body else { return };
     let purpose = m.purpose;
     crate::sound::play_player("DeusExSounds.UserInterface.Menu_Press", 0.25, 0.0);

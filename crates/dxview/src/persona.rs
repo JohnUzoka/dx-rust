@@ -14,7 +14,6 @@ use crate::uicanvas::{color_scaled, wrap, Canvas, HAlign, Rgb, Style, VAlign};
 use crate::weapons::RuntimeAssets;
 use unreal_pkg::props::{Property, Value};
 
-pub const SCREEN_INVENTORY: usize = 0;
 pub const SCREEN_HEALTH: usize = 1;
 pub const SCREEN_AUGS: usize = 2;
 pub const SCREEN_SKILLS: usize = 3;
@@ -683,7 +682,31 @@ pub fn page(
             hits.push((PB::ClearLog, (cx + 10, cy + 384, 90, 16), true));
             hits.push((PB::Achievements, (cx + 104, cy + 384, 112, 16), true));
         }
-        SCREEN_ACHIEVEMENTS => hits.push((PB::BackLogs, (cx + 10, cy + 384, 90, 16), true)),
+        SCREEN_ACHIEVEMENTS => {
+            hits.push((PB::BackLogs, (cx + 10, cy + 384, 90, 16), true));
+            // Controller: every row in view (and the one half in view at either edge) is a snap target, and the row
+            // the pad's cursor lands on scrolls fully into view - the D-pad walks down the list.
+            const ROW: i32 = 46;
+            let (lx, ly, lw, lh) = (cx + 14, cy + 30, 400, 346);
+            if let Some(m) = crate::snap::page_map() {
+                let rows = (0..crate::achievements::LIST.len() as i32).filter_map(|i| {
+                    let ry = ly + i * ROW - ui.scroll;
+                    let (top, bot) = (ry.max(ly), (ry + ROW).min(ly + lh));
+                    (bot - top >= 6).then_some((lx, top, lw, bot - top))
+                });
+                crate::snap::offer(crate::snap::LAYER_PERSONA, m, rows.collect::<Vec<_>>());
+            }
+            if crate::gamepad::pad_in_use() && inside(inp.mouse, (lx, ly, lw, lh)) {
+                let i = (inp.mouse.1 - ly + ui.scroll) / ROW;
+                let ry = ly + i * ROW - ui.scroll;
+                let max = (crate::achievements::LIST.len() as i32 * ROW - lh).max(0);
+                if ry < ly {
+                    ui.scroll = (i * ROW).clamp(0, max);
+                } else if ry + ROW > ly + lh {
+                    ui.scroll = (i * ROW + ROW - lh).clamp(0, max);
+                }
+            }
+        }
         SCREEN_GOALS => {
             goals_hits(ui, ctx.fonts, cx, cy, &mut hits);
             if ui.asking_delete {
@@ -1926,8 +1949,8 @@ fn draw_augs(
 // ------------------------------------------------------------------------------------------------ health
 
 /// Region order on the screen (head, torso, right arm, left arm, right leg, left leg) -> PlayerHealth parts.
-const PARTS: [usize; 6] = [P_HEAD, P_TORSO, P_ARM_R, P_ARM_L, P_LEG_R, P_LEG_L];
-const PART_RECTS: [(i32, i32, i32, i32); 6] = [
+pub(crate) const PARTS: [usize; 6] = [P_HEAD, P_TORSO, P_ARM_R, P_ARM_L, P_LEG_R, P_LEG_L];
+pub(crate) const PART_RECTS: [(i32, i32, i32, i32); 6] = [
     (141, 42, 40, 54),
     (133, 98, 56, 73),
     (90, 131, 28, 65),
@@ -1943,7 +1966,7 @@ const REGIONS: [(i32, i32); 6] = [
     (24, 347),
     (222, 347),
 ];
-const PART_TITLES: [(&str, &str); 6] = [
+pub(crate) const PART_TITLES: [(&str, &str); 6] = [
     ("HealthLocationHead", "Head"),
     ("HealthLocationTorso", "Torso"),
     ("HealthLocationRightArm", "Right Arm"),
@@ -3115,7 +3138,7 @@ fn edit_note_keys(ui: &mut PersonaUi, inp: &Input, f: &Fonts) {
     for (k, t) in &inp.typed {
         ed.blink = 0.0;
         let sel = ed.anchor.filter(|a| *a != ed.cursor).map(|a| (a.min(ed.cursor), a.max(ed.cursor)));
-        let mut delete_sel = |chars: &mut Vec<char>, ed: &mut NoteEdit| -> bool {
+        let delete_sel = |chars: &mut Vec<char>, ed: &mut NoteEdit| -> bool {
             if let Some((a, b)) = sel {
                 chars.drain(a..b);
                 ed.cursor = a;

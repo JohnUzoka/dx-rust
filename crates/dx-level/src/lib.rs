@@ -19,6 +19,7 @@ pub mod lighting;
 pub mod movers;
 pub mod nav;
 pub mod firetex;
+pub mod watertex;
 pub mod skincolor;
 pub mod dds;
 pub mod relief;
@@ -176,6 +177,15 @@ pub struct LevelStats {
     pub actors: usize,
 }
 
+/// A reverb zone's echo (ZoneInfo: Delay[6] / Gain[6] bytes, MasterGain, CutoffHz).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoneEcho {
+    pub delays: [u8; 6],
+    pub gains: [u8; 6],
+    pub master: u8,
+    pub cutoff_hz: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Level {
     pub name: String,
@@ -209,6 +219,16 @@ pub struct Level {
     /// Per BSP zone: open to the sky (it has fake-backdrop faces looking into the sky room; the sky room itself
     /// excluded) - where weather falls.
     pub zone_sky: Vec<bool>,
+    /// Each BSP zone's ambient light (linear; dxview hands it to actors::set_zone_ambient when the level is in play).
+    pub zone_ambient: Vec<[f32; 3]>,
+    /// Per level texture (by index): its DetailTexture's index in `textures` and the UV scale from the surface's
+    /// UVs to the detail's (surface width / detail width). Shorter than `textures` where the rest have none.
+    pub texture_detail: Vec<Option<(usize, f32)>>,
+    /// Each BSP zone's echo when it's a reverb zone.
+    pub zone_echo: Vec<Option<ZoneEcho>>,
+    /// Total area (Unreal units squared) of the faces looking into the sky room: large on outdoor maps, small where
+    /// the sky only shows through a few windows.
+    pub sky_area: f32,
     /// AI path network (NavigationPoints + ReachSpecs).
     pub nav: nav::NavGraph,
     /// Blocking actor cylinders (decorations, pawns), Unreal units.
@@ -374,7 +394,11 @@ impl TexLib {
         let (pkg_name, rest) = path.split_once('.')?;
         let pkg = self.package(pkg_name)?;
         let e = pkg.find_export_of_class(rest, "Texture")?;
-        if pkg.class_name(e.class_index) != "FireTexture" {
+        let class = pkg.class_name(e.class_index).to_string();
+        if class == "WetTexture" || class == "WaveTexture" {
+            return self.load_water(path);
+        }
+        if class != "FireTexture" {
             return None;
         }
         let tex = objects::read_texture(pkg, e).ok()?;
@@ -402,6 +426,57 @@ impl TexLib {
             f.mode = firetex::Mode::Pilot;
         }
         Some(f)
+    }
+
+    /// A WetTexture / WaveTexture as a running water simulation (watertex.rs), wrapped as a procedural FireTex.
+    pub fn load_water(&mut self, path: &str) -> Option<firetex::FireTex> {
+        let (pkg_name, rest) = path.split_once('.')?;
+        let pkg = self.package(pkg_name)?;
+        let e = pkg.find_export_of_class(rest, "Texture")?;
+        let class = pkg.class_name(e.class_index).to_string();
+        let tex = objects::read_texture(pkg, e).ok()?;
+        let p = |n: &str| unreal_pkg::props::find(&tex.props, n).cloned();
+        let ip = |n: &str, d: i32| match p(n) {
+            Some(unreal_pkg::props::Value::Int(v)) => v,
+            Some(unreal_pkg::props::Value::Byte(v)) => v as i32,
+            _ => d,
+        };
+        let w = ip("USize", tex.width() as i32).max(1) as usize;
+        let h = ip("VSize", tex.height() as i32).max(1) as usize;
+        let drops: Vec<[u8; 8]> = tex
+            .props
+            .iter()
+            .filter(|q| q.name == "Drops")
+            .filter_map(|q| match &q.value {
+                unreal_pkg::props::Value::Struct(_, b) if b.len() >= 8 => Some([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+                _ => None,
+            })
+            .take(ip("NumDrops", 256).clamp(0, 256) as usize)
+            .collect();
+        let wave_amp = ip("WaveAmp", 128).clamp(0, 255) as u8;
+        let look = if class == "WetTexture" {
+            // The source picture through the WetTexture's own palette (as load_wet draws it).
+            let img = self.load_wet(path)?;
+            let m0 = img.mips.into_iter().next()?;
+            if m0.len() < w * h * 4 {
+                return None;
+            }
+            watertex::Look::Wet { source: m0.chunks_exact(4).take(w * h).map(|c| [c[0], c[1], c[2], c[3]]).collect() }
+        } else {
+            let pal = self.palette_of(pkg_name, tex.palette_ref)?;
+            let mut colors = [[0u8; 4]; 256];
+            for (i, c) in pal.colors.iter().take(256).enumerate() {
+                colors[i] = [c[0], c[1], c[2], 255];
+            }
+            watertex::Look::Wave {
+                palette: colors,
+                light: ip("BumpMapLight", 50) as f32,
+                angle: ip("BumpMapAngle", 0) as f32 / 256.0 * std::f32::consts::TAU,
+                phong_range: ip("PhongRange", 0) as f32,
+                phong_size: ip("PhongSize", 0) as f32,
+            }
+        };
+        Some(firetex::FireTex::from_water(watertex::WaterSim::new(w, h, &drops, wave_amp, look)))
     }
 
     /// A texture's animation (Texture.AnimNext chain): every frame's path from this one round the loop, and the
@@ -468,7 +543,9 @@ impl TexLib {
         if tex.format == unreal_pkg::objects::tex_format::P8 {
             return None;
         }
-        if force_mask {
+        // The game's texture decides whether it's see-through: New Vision's replacements don't always carry bMasked
+        // (Battery Park's ChainLinks vent grates drew their holes black).
+        if force_mask || self.orig_masked(path) {
             tex.masked = true;
         }
         let mut mips = Vec::new();
@@ -481,6 +558,25 @@ impl TexLib {
         if mips.is_empty() {
             return None;
         }
+        // A masked game texture whose HD replacement was stored without punch-through alpha: the holes come from
+        // the game's own picture (its palette index 0), stretched to each mip.
+        if tex.masked && mips.first().is_some_and(|m| m.chunks_exact(4).all(|px| px[3] >= 128)) {
+            if let Some((ow, oh, alpha)) = self.orig_alpha(path) {
+                for (level, m) in mips.iter_mut().enumerate() {
+                    let (w, h) = ((tex.width() >> level).max(1) as usize, (tex.height() >> level).max(1) as usize);
+                    if m.len() != w * h * 4 {
+                        continue;
+                    }
+                    for y in 0..h {
+                        let oy = (y * oh / h).min(oh - 1);
+                        for x in 0..w {
+                            let ox = (x * ow / w).min(ow - 1);
+                            m[(y * w + x) * 4 + 3] = alpha[oy * ow + ox];
+                        }
+                    }
+                }
+            }
+        }
         // Masked textures: DXT1's punch-through alpha already marks the see-through texels; opaque ones keep
         // alpha 255 everywhere.
         if !tex.masked {
@@ -491,6 +587,22 @@ impl TexLib {
             }
         }
         Some((tex, mips))
+    }
+
+    /// The game's own texture's see-through texels (mip 0: width, height, alpha per texel).
+    fn orig_alpha(&mut self, path: &str) -> Option<(usize, usize, Vec<u8>)> {
+        let (pkg_name, rest) = path.split_once('.')?;
+        let tex = self.read_raw(path, false)?;
+        let _ = rest;
+        let palette = self.palette_of(pkg_name, tex.palette_ref);
+        let rgba = tex.mip_to_rgba8(0, palette.as_ref())?;
+        let (w, h) = (tex.mips.first()?.width as usize, tex.mips.first()?.height as usize);
+        Some((w, h, rgba.chunks_exact(4).map(|p| p[3]).collect()))
+    }
+
+    /// The game's own texture is masked (bMasked), whatever the HD / DDS replacement says.
+    fn orig_masked(&mut self, path: &str) -> bool {
+        self.read_raw(path, false).is_some_and(|t| t.masked)
     }
 
     /// A texture's size as the game lays it out (USize / VSize): UVs on level surfaces are in these texels even
@@ -505,6 +617,20 @@ impl TexLib {
 
     /// A texture for the GPU: DXT1 ones (the HD mod's version first) stay compressed when the device takes BC1
     /// and nothing has to see through blocks the game draws opaque; the rest decode to RGBA8 as `load_ext`.
+    /// The texture's DetailTexture (drawn over it up close by the original's renderers), as a full path.
+    pub fn detail_of(&mut self, t: &Texture, path: &str) -> Option<String> {
+        let (pkg_name, _) = path.split_once('.')?;
+        match unreal_pkg::props::find(&t.props, "DetailTexture")? {
+            unreal_pkg::props::Value::Object(i) if *i != 0 => {
+                let pkg = self.package(pkg_name)?;
+                // An export's path leaves out its own package; an import's starts with it.
+                Some(if *i > 0 { format!("{pkg_name}.{}", pkg.object_path(*i)) } else { pkg.object_path(*i) })
+            }
+            unreal_pkg::props::Value::Path(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
     pub fn load_gpu(&mut self, path: &str, force_mask: bool) -> Option<(Texture, TextureImage)> {
         if let Some(r) = self.load_dds(path, force_mask, true) {
             return Some(r);
@@ -512,9 +638,15 @@ impl TexLib {
         if bc1_supported() {
             let hd = if self.hd_scope && unreal_pkg::paths::has_hd_textures() { self.read_raw(path, true) } else { None };
             let from_hd = hd.is_some();
-            if let Some(tex) = hd.or_else(|| self.read_raw(path, false)) {
+            if let Some(mut tex) = hd.or_else(|| self.read_raw(path, false)) {
+                if from_hd && !tex.masked && self.orig_masked(path) {
+                    tex.masked = true;
+                }
                 if let Some(mips) = bc1_mips(&tex) {
-                    if tex.masked || force_mask || !bc1_has_holes(&mips[0]) {
+                    // (A masked game texture whose HD version has no holes takes them from the game's picture:
+                    // decoded below, not kept as BC1.)
+                    let holes = bc1_has_holes(&mips[0]);
+                    if (tex.masked || force_mask || !holes) && !(from_hd && tex.masked && !holes) {
                         if from_hd {
                             self.hd_used += 1;
                         }
@@ -854,6 +986,7 @@ pub fn build_level(
         })
         .collect();
     let mut zone_sky: Vec<bool> = vec![false; model.zone_actors.len().max(1)];
+    let mut sky_area = 0.0f32;
     let zone_water: Vec<Option<f32>> = model
         .zone_actors
         .iter()
@@ -873,13 +1006,67 @@ pub fn build_level(
             })
         })
         .collect();
-    let baked = lighting::bake(pkg, &model, classes);
+    // Zone ambient light (ZoneInfo AmbientBrightness / Hue / Saturation; the level's own LevelInfo for zone 0),
+    // which the engine starts every lightmap texel from.
+    let level_info = pkg.exports.iter().find(|e| pkg.class_name(e.class_index) == "LevelInfo");
+    let ambient_of = |ps: &[props::Property]| -> [f32; 3] {
+        let b = |n: &str| match props::find(ps, n) {
+            Some(Value::Byte(v)) => Some(*v),
+            _ => None,
+        };
+        let br = b("AmbientBrightness").unwrap_or(0) as f32 / 255.0;
+        let c = lighting::hsv_white(b("AmbientHue").unwrap_or(0), b("AmbientSaturation").unwrap_or(255));
+        [c[0] * br, c[1] * br, c[2] * br]
+    };
+    let level_ambient = level_info.and_then(|e| classes.actor_properties(pkg, e)).map(|ps| ambient_of(&ps)).unwrap_or([0.0; 3]);
+    let zone_ambient: Vec<[f32; 3]> = model
+        .zone_actors
+        .iter()
+        .map(|&za| {
+            if za <= 0 {
+                return level_ambient;
+            }
+            pkg.exports.get(za as usize - 1).and_then(|e| classes.actor_properties(pkg, e)).map(|ps| ambient_of(&ps)).unwrap_or(level_ambient)
+        })
+        .collect();
+    // Reverb zones (ZoneInfo bReverbZone): Delay / Gain taps, MasterGain, CutoffHz.
+    let zone_echo: Vec<Option<ZoneEcho>> = model
+        .zone_actors
+        .iter()
+        .map(|&za| {
+            let ps = if za <= 0 {
+                level_info.and_then(|e| classes.actor_properties(pkg, e))?
+            } else {
+                pkg.exports.get(za as usize - 1).and_then(|e| classes.actor_properties(pkg, e))?
+            };
+            if !matches!(props::find(&ps, "bReverbZone"), Some(Value::Bool(true))) {
+                return None;
+            }
+            let mut e = ZoneEcho { delays: [0; 6], gains: [0; 6], master: 100, cutoff_hz: 6000 };
+            for p in &ps {
+                let i = p.index as usize;
+                match (p.name.as_str(), &p.value) {
+                    ("Delay", Value::Byte(v)) if i < 6 => e.delays[i] = *v,
+                    ("Gain", Value::Byte(v)) if i < 6 => e.gains[i] = *v,
+                    ("MasterGain", Value::Byte(v)) => e.master = *v,
+                    ("CutoffHz", Value::Int(v)) => e.cutoff_hz = *v,
+                    _ => {}
+                }
+            }
+            Some(e)
+        })
+        .collect();
+    let baked = lighting::bake(pkg, &model, classes, &zone_ambient);
+    // Actors lit while this level is built start from their zone's ambient light too.
+    let bsp_collision = collision::BspCollision::new(&model);
+    actors::set_building_ambient(Some((bsp_collision.zone_tree(), zone_ambient.clone())));
     let mut stats = LevelStats { nodes: model.nodes.len(), ..Default::default() };
     let sys_dir = tex_dir.parent().map(|p| p.join("System")).unwrap_or_default();
     let mut lib = TexLib { dir: tex_dir.to_path_buf(), sys_dir, pkgs: HashMap::new(), hd_pkgs: HashMap::new(), hd_scope: false, hd_used: 0, dds_used: 0, info: HashMap::new() };
     let mut textures: Vec<TextureImage> = Vec::new();
     // material object ref -> (texture index, masked)
     let mut tex_cache: HashMap<i32, Option<(usize, bool)>> = HashMap::new();
+    let mut detail_paths: Vec<(usize, String, f32)> = Vec::new();
     // The game's texel size of each level texture (UVs use it; an HD texture has more pixels).
     let mut logical: HashMap<usize, (f32, f32)> = HashMap::new();
     lib.hd_scope = true;
@@ -984,6 +1171,15 @@ pub fn build_level(
             continue;
         }
         if surf.poly_flags & pf::FAKE_BACKDROP != 0 {
+            // How much sky the map shows (fan area of the face): a whole sky overhead outdoors, a few window panes
+            // indoors.
+            let pts: Vec<glam::Vec3> = (0..node.num_vertices as usize)
+                .filter_map(|k| model.vertices.get(node.vert_pool as usize + k).and_then(|v| model.points.get(v.vertex as usize)))
+                .map(|q| glam::Vec3::new(q[0], q[1], q[2]))
+                .collect();
+            for k in 1..pts.len().saturating_sub(1) {
+                sky_area += 0.5 * (pts[k] - pts[0]).cross(pts[k + 1] - pts[0]).length();
+            }
             for z in node.zone {
                 if z > 0 && !sky_zones.contains(&(z as usize)) {
                     if let Some(f) = zone_sky.get_mut(z as usize) {
@@ -1047,6 +1243,9 @@ pub fn build_level(
                 let idx = textures.len();
                 let (lw, lh) = TexLib::logical_size(&t);
                 logical.insert(idx, (lw as f32, lh as f32));
+                if let Some(d) = lib.detail_of(&t, &path) {
+                    detail_paths.push((idx, d, lw as f32));
+                }
                 textures.push(TextureImage { name: path.clone(), width: t.width(), height: t.height(), mips: mips.mips, bc1: mips.bc1, bc3: mips.bc3 });
                 Some((idx, t.masked))
             })
@@ -1178,6 +1377,30 @@ pub fn build_level(
             stats.triangles += 1;
         }
     }
+    // Detail textures: loaded beside the level's own; each surface texture knows its detail's index and how many of
+    // its own widths one detail tile spans (the detail repeats every its own USize texels of the surface).
+    let mut texture_detail: Vec<Option<(usize, f32)>> = Vec::new();
+    {
+        let mut loaded: HashMap<String, Option<(usize, f32)>> = HashMap::new();
+        for (idx, d, base_w) in std::mem::take(&mut detail_paths) {
+            let got = *loaded.entry(d.to_ascii_lowercase()).or_insert_with(|| {
+                let (t, mips) = lib.load_gpu(&d, false)?;
+                let di = textures.len();
+                let (dw, _) = TexLib::logical_size(&t);
+                textures.push(TextureImage { name: d.clone(), width: t.width(), height: t.height(), mips: mips.mips, bc1: mips.bc1, bc3: mips.bc3 });
+                Some((di, dw as f32))
+            });
+            if let Some((di, dw)) = got {
+                if texture_detail.len() <= idx {
+                    texture_detail.resize(idx + 1, None);
+                }
+                texture_detail[idx] = Some((di, base_w / dw.max(1.0)));
+            }
+        }
+    }
+    if std::env::var_os("DXL_DETAILLOG").is_some() {
+        eprintln!("DETAIL {} surface textures with a detail texture", texture_detail.iter().flatten().count());
+    }
     let lights = lighting::collect_lights(pkg, &model, classes);
     let (mesh_actors, actor_list) = actors::build(pkg, classes, &mut lib, &mut textures);
     let nav = nav::NavGraph::build(pkg, classes);
@@ -1251,7 +1474,11 @@ pub fn build_level(
     if lib.hd_used > 0 {
         println!("level: {} HD textures", lib.hd_used);
     }
+    actors::set_building_ambient(None);
     Ok(Level {
+        texture_detail,
+        zone_ambient,
+        zone_echo,
         nano_keys,
         name: name.to_string(),
         coronas,
@@ -1265,7 +1492,7 @@ pub fn build_level(
         batches,
         player_start,
         lightmap: Some(baked.into_atlas()),
-        collision: collision::BspCollision::new(&model),
+        collision: bsp_collision,
         blockers: actors::blockers(&actor_list),
         players_only: actors::players_only(&actor_list),
         monster_blocks: actors::monster_blocks(&actor_list),
@@ -1274,6 +1501,7 @@ pub fn build_level(
         nav,
         zone_water,
         zone_sky,
+        sky_area,
         lights,
         actors: actor_list,
         sky_origin: sky_loc.map(ue_to_bevy),

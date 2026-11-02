@@ -84,7 +84,7 @@ fn start_prefetch(root: std::path::PathBuf, map: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
     // Load by the name as written (file names are case-sensitive off Windows).
     let mut mm = map.split('#').next().unwrap_or(map).trim().to_string();
-    if !mm.to_ascii_lowercase().ends_with(".dx") {
+    if !crate::util::ends_with_ci(&mm, ".dx") {
         mm.push_str(".dx");
     }
     let _ = std::thread::Builder::new().name("level-prefetch".into()).spawn(move || {
@@ -126,7 +126,7 @@ fn prefetch_tick(world: &mut World) {
             }
         }
     }
-    if std::env::var("DXVIEW_NO_PREFETCH").is_ok() || crate::menus::intro_map() {
+    if env_on!("DXVIEW_NO_PREFETCH") || crate::menus::intro_map() {
         return;
     }
     let Some(level) = world.get_resource::<crate::LevelRes>() else { return };
@@ -172,7 +172,7 @@ fn prefetch_tick(world: &mut World) {
 /// Go to `map` (file name; ".dx" added if missing).
 pub fn request(map: &str, goal: Goal) {
     let mut m = map.to_string();
-    if !m.to_ascii_lowercase().ends_with(".dx") {
+    if !crate::util::ends_with_ci(&m, ".dx") {
         m.push_str(".dx");
     }
     println!("loader: going to {m}");
@@ -269,6 +269,8 @@ pub fn loader_system(world: &mut World) {
             *last = key;
         }
         unreal_pkg::paths::set_hd_textures_on(crate::settings::get("HDTextures") > 0.5);
+        unreal_pkg::paths::set_picks_on(crate::settings::get("ConfixFixes") > 0.5);
+        dx_level::skincolor::TR_FIXES.store(crate::transcended::fixes(), std::sync::atomic::Ordering::Relaxed);
         crate::hdtp::apply_dds_filter();
         crate::hdtp::build_layer();
         crate::visattach::apply();
@@ -290,7 +292,7 @@ pub fn loader_system(world: &mut World) {
             let r = dx_level::load_level(&root, &m).map(|l| (l, crate::player_params(&root)));
             crate::prof::hitch_note(&format!("level load {m}"), t0.elapsed().as_secs_f64() * 1000.0);
             // Developer aid: DXVIEW_LOAD_DELAY=<secs> holds the loading screen up longer (to look at it).
-            if let Some(d) = std::env::var("DXVIEW_LOAD_DELAY").ok().and_then(|v| v.parse::<f32>().ok()) {
+            if let Some(d) = env_val!("DXVIEW_LOAD_DELAY").map(str::to_owned).and_then(|v| v.parse::<f32>().ok()) {
                 std::thread::sleep(std::time::Duration::from_secs_f32(d));
             }
             let _ = tx.send(r);
@@ -353,6 +355,7 @@ fn swap(world: &mut World, map: String, goal: Goal, mut level: dx_level::Level, 
         });
     }
     let carry = matches!(goal, Goal::Travel(_)).then(|| crate::save::capture_travel(world));
+    dx_level::actors::set_zone_ambient(level.collision.zone_tree(), level.zone_ambient.clone());
     // Arriving at a tagged actor (Teleporter URL "map#tag"): it stands in for the PlayerStart.
     if let Goal::Travel(Some(tag)) = &goal {
         let hit = level.actors.iter().find(|a| {
@@ -500,11 +503,12 @@ pub fn loading_screen_system(
     mut images: ResMut<Assets<Image>>,
     mut layers: ResMut<Assets<crate::classic_hud::HudLayer>>,
     windows: Query<&Window>,
-    mut shown: Local<bool>,
+    mut shown: Local<u8>,
     mut font: Local<Option<Option<std::sync::Arc<crate::uicanvas::UiFont>>>>,
 ) {
     let _prof = crate::prof::scope("loader::loading_screen_system");
-    let want = busy();
+    // 0 = nothing, 1 = loading (the old map's last frame stays up), 2 = settling (black, the new map hidden).
+    let want: u8 = if busy() { 1 } else if settling() { 2 } else { 0 };
     if want == *shown {
         return;
     }
@@ -512,13 +516,59 @@ pub fn loading_screen_system(
     for e in &q {
         commands.entity(e).despawn();
     }
-    if !want {
+    if want == 0 {
         return;
+    }
+    if want == 2 {
+        commands.spawn((
+            Node { position_type: PositionType::Absolute, width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
+            BackgroundColor(Color::BLACK),
+            GlobalZIndex(999),
+            Pickable::IGNORE,
+            LoadingScreen,
+        ));
     }
     let Some(assets) = assets.as_mut() else { return };
     let Some(win) = windows.iter().next() else { return };
     if let Some(e) = spawn_loading_words(&mut commands, assets, &mut images, &mut layers, win, &mut *font, 1000) {
         commands.entity(e).insert(LoadingScreen);
+    }
+}
+
+/// After a map is put in place it stays behind the loading screen (black, "LOADING", game time paused, cut scenes
+/// held) until its render pipelines have compiled and its textures are up: without this the intro's first room
+/// popped in surface by surface. Ends after 6 calm frames (and at least 0.35 s), or 6 s at most.
+static SETTLE: Mutex<Option<(std::time::Instant, u32)>> = Mutex::new(None);
+
+pub fn settling() -> bool {
+    SETTLE.lock().map(|s| s.is_some()).unwrap_or(false)
+}
+
+pub fn settle_system(mut seen: Local<u64>, mut paused_by_us: Local<bool>, mut time: ResMut<Time<Virtual>>) {
+    if generation() != *seen {
+        *seen = generation();
+        if !env_on!("DXVIEW_NO_SETTLE") {
+            if let Ok(mut s) = SETTLE.lock() {
+                *s = Some((std::time::Instant::now(), 0));
+            }
+        }
+    }
+    let mut g = SETTLE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((t0, calm)) = g.as_mut() {
+        *calm = if crate::remaster::pipelines_waiting() == 0 { *calm + 1 } else { 0 };
+        let age = t0.elapsed().as_secs_f32();
+        if (*calm >= 6 && age >= 0.35) || age >= 6.0 || busy() {
+            *g = None;
+        }
+    }
+    let on = g.is_some();
+    drop(g);
+    if on && !time.is_paused() {
+        time.pause();
+        *paused_by_us = true;
+    } else if !on && *paused_by_us {
+        *paused_by_us = false;
+        time.unpause();
     }
 }
 
@@ -631,7 +681,7 @@ fn dev_goto(world: &mut World) {
         Some("event") => {
             world.resource_mut::<crate::devices::GameEvents>().0.push((map.to_string(), true));
             *SHOT_AT.lock().unwrap() = Some((now + std::time::Duration::from_secs_f32(
-                std::env::var("DXVIEW_GOTO_SHOT_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(6.0f32)), i + 1));
+                env_val!("DXVIEW_GOTO_SHOT_DELAY").map(str::to_owned).and_then(|d| d.parse().ok()).unwrap_or(6.0f32)), i + 1));
             return;
         }
         // "secs;;throwbody": the nearest living pawn dies on the spot and is thrown from the player's hands as a
@@ -658,6 +708,15 @@ fn dev_goto(world: &mut World) {
                 world.resource_mut::<crate::weapons::CorpseDrops>().0.push((e, ploc + glam::DVec3::new(15.0, 0.0, 40.0), vel));
                 *crate::actors::BODY_LOG.lock().unwrap() = Some(name.clone());
                 println!("GOTO threw {name}");
+            }
+            return;
+        }
+        // "secs;x,y,z;tp": the player is moved there (trigger tests).
+        Some("tp") => {
+            let v: Vec<f64> = map.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if v.len() == 3 {
+                world.resource_mut::<crate::Player>().body.location = glam::DVec3::new(v[0], v[1], v[2]);
+                println!("GOTO teleported to {v:?}");
             }
             return;
         }
@@ -698,7 +757,7 @@ fn dev_goto(world: &mut World) {
                 println!("GOTO frob {map} ({class})");
             }
             *SHOT_AT.lock().unwrap() = Some((now + std::time::Duration::from_secs_f32(
-                std::env::var("DXVIEW_GOTO_SHOT_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(6.0f32)), i + 1));
+                env_val!("DXVIEW_GOTO_SHOT_DELAY").map(str::to_owned).and_then(|d| d.parse().ok()).unwrap_or(6.0f32)), i + 1));
             return;
         }
         // "secs;<FlagName>;flag": set a game flag (mission script tests).
@@ -715,7 +774,7 @@ fn dev_goto(world: &mut World) {
             let root = world.resource::<crate::pickups::GameRoot>().0.clone();
             crate::save::load(&root, std::path::Path::new(map));
             *SHOT_AT.lock().unwrap() = Some((now + std::time::Duration::from_secs_f32(
-                std::env::var("DXVIEW_GOTO_SHOT_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(6.0f32)), i + 1));
+                env_val!("DXVIEW_GOTO_SHOT_DELAY").map(str::to_owned).and_then(|d| d.parse().ok()).unwrap_or(6.0f32)), i + 1));
             return;
         }
         _ => {}
@@ -728,6 +787,6 @@ fn dev_goto(world: &mut World) {
         _ => Goal::NewGame(NewGame::default()),
     };
     request(map, goal);
-    let delay = std::env::var("DXVIEW_GOTO_SHOT_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(6.0f32);
+    let delay = env_val!("DXVIEW_GOTO_SHOT_DELAY").map(str::to_owned).and_then(|d| d.parse().ok()).unwrap_or(6.0f32);
     *SHOT_AT.lock().unwrap() = Some((now + std::time::Duration::from_secs_f32(delay), i + 1));
 }

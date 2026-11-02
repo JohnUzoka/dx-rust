@@ -135,7 +135,7 @@ pub fn fixture_system(
         .map(|mut f| std::mem::take(&mut *f))
         .unwrap_or_default();
     // Developer aid: DXVIEW_DEBUG_FIXTURE="ActorName" uses that fixture once, two seconds in.
-    if let Ok(name) = std::env::var("DXVIEW_DEBUG_FIXTURE") {
+    if let Some(name) = env_val!("DXVIEW_DEBUG_FIXTURE") {
         static T: std::sync::Mutex<f32> = std::sync::Mutex::new(0.0);
         if let Ok(mut t) = T.lock() {
             let before = *t;
@@ -160,6 +160,16 @@ pub fn fixture_system(
         let a = &lvl.actors[c.actor];
         let class = a.class.as_str();
         let pos = c.center;
+        // Transcended (setting TrNoisyObjects): using it makes a noise.
+        let radius = match class {
+            "Button1" | "LightSwitch" | "Switch1" | "Switch2" | "Valve" => 152.0,
+            "Faucet" | "ShowerFaucet" | "Lamp1" | "Lamp2" | "Lamp3" | "Pinball" | "VendingMachine" | "WaterCooler" | "WaterFountain" => 384.0,
+            "Toilet" | "Toilet2" | "WHPiano" => 425.0,
+            _ => 0.0,
+        };
+        if radius > 0.0 {
+            crate::transcended::object_noise(pos, radius);
+        }
         let (r, r2, r3) = (st.rand(), st.rand(), st.rand());
         let s = st.state.entry(b).or_default();
         let mut anim = |name: &str, looping: bool| {

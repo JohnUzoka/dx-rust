@@ -605,7 +605,8 @@ struct Spec {
 }
 
 enum Screen {
-    Login { user: Edit, pass: Edit, info: String },
+    /// `noted`: an account (name, password) found in the notes, offered with Tab (Codes From Notes).
+    Login { user: Edit, pass: Edit, info: String, noted: Option<(String, String)> },
     Security(Sec),
     Email(Mail),
     Bulletins(Mail),
@@ -825,18 +826,16 @@ impl Term {
                     }
                 }
                 self.focus = Some(Wid::Edit(0));
-                let (mut user, mut pass) = (Edit::new(20), Edit::new(20));
+                let (user, pass) = (Edit::new(20), Edit::new(20));
                 // Ours (Enhancement "Codes From Notes"): an account whose name and password are both in the notes
-                // is filled in.
-                if let Some(u) = self.d(wx).users.iter().find(|u| crate::menus::in_notes(&u.name) && crate::menus::in_notes(&u.password)) {
-                    user.text = u.name.chars().collect();
-                    user.cur = user.text.len();
-                    user.anchor = user.cur;
-                    pass.text = u.password.chars().collect();
-                    pass.cur = pass.text.len();
-                    pass.anchor = pass.cur;
-                }
-                Screen::Login { user, pass, info: self.d(wx).node.desc.clone() }
+                // is offered - "Tab: log in from notes" under the fields (fill_from_notes).
+                let noted = self
+                    .d(wx)
+                    .users
+                    .iter()
+                    .find(|u| crate::menus::in_notes(&u.name) && crate::menus::in_notes(&u.password))
+                    .map(|u| (u.name.clone(), u.password.clone()));
+                Screen::Login { user, pass, info: self.d(wx).node.desc.clone(), noted }
             }
             Which::Atm => {
                 if self.hacked {
@@ -979,7 +978,7 @@ impl Term {
             self.close_screen("LOGIN", wx);
         } else {
             let msg = txt(wx.hud, wx.assets, "ComputerScreenLogin", "InvalidLoginMessage", "LOGIN ERROR - ACCESS DENIED");
-            if let Some(Screen::Login { user, pass, info }) = self.screen.as_mut() {
+            if let Some(Screen::Login { user, pass, info, .. }) = self.screen.as_mut() {
                 *info = msg;
                 user.clear();
                 pass.clear();
@@ -988,12 +987,32 @@ impl Term {
         }
     }
 
+    /// Ours (Codes From Notes): Tab / the pad's Y on an empty login with an account from the notes fills it in
+    /// (focus on the password, Enter logs in). False when there's nothing to fill.
+    fn fill_from_notes(&mut self) -> bool {
+        let Some(Screen::Login { user, pass, noted: Some((n, p)), .. }) = self.screen.as_mut() else { return false };
+        if !user.text.is_empty() || !pass.text.is_empty() {
+            return false;
+        }
+        user.text = n.chars().collect();
+        user.cur = user.text.len();
+        user.anchor = user.cur;
+        pass.text = p.chars().collect();
+        pass.cur = pass.text.len();
+        pass.anchor = pass.cur;
+        self.focus = Some(Wid::Edit(1));
+        true
+    }
+
     /// ComputerScreenATM.ProcessLogin (userIndex starts at 0, so an unknown account checks account 0's PIN).
     fn atm_login(&mut self, wx: &mut Wx) {
         let Some(Screen::Atm { acct, pin, .. }) = self.screen.as_ref() else { return };
         let (a, p) = (acct.get().to_uppercase(), pin.get().to_uppercase());
         let d = self.d(wx);
-        let idx = d.accounts.iter().position(|x| x.number.to_uppercase() == a).unwrap_or(0);
+        // ProcessLogin left userIndex at 0 for an unknown account, so account 0's PIN logged in with any number;
+        // Transcended starts it at -1.
+        let found = d.accounts.iter().position(|x| x.number.to_uppercase() == a);
+        let idx = if crate::transcended::fixes() { found.unwrap_or(usize::MAX) } else { found.unwrap_or(0) };
         let ok = d.accounts.get(idx).is_some_and(|x| x.pin.to_uppercase() == p);
         if ok {
             self.user = String::new();
@@ -1414,7 +1433,7 @@ fn draw_screen(u: &mut Ui<Wid>, t: &mut Term, wx: &Dv, g: &Geo, dx: i32, dy: i32
     let kind = t.kind;
     let actor = t.actor;
     match t.screen.as_mut() {
-        Some(Screen::Login { user, pass, info }) => {
+        Some(Screen::Login { user, pass, info, noted }) => {
             let ul = txt(u.hud, u.assets, g.class, "UserNameLabel", "User Name");
             let pl = txt(u.hud, u.assets, g.class, "PasswordLabel", "Password");
             u.text(&ft, dx + 10, dy + 22, 90, ft.height, HAlign::Left, VAlign::Top, m_col(8), &ul);
@@ -1428,6 +1447,18 @@ fn draw_screen(u: &mut Ui<Wid>, t: &mut Term, wx: &Dv, g: &Geo, dx: i32, dy: i32
                 }
             }
             u.wrapped(&fsm, dx + 10, dy + 97, 320, 25, HAlign::Left, VAlign::Center, m_col(8), info);
+            if noted.is_some() && user.text.is_empty() && pass.text.is_empty() {
+                // The prompt for a login found in the notes (Tab, or the pad's Y).
+                let y = dy + 76;
+                if crate::gamepad::pad_in_use() {
+                    let kind = crate::gamepad::glyph_kind();
+                    let gw = crate::glyphs::width_small(kind, crate::gamepad::PadBtn::North);
+                    crate::glyphs::draw_small(&mut u.c, kind, crate::gamepad::PadBtn::North, dx + 105, y);
+                    u.text(&fsm, dx + 105 + gw + 4, y, 140, 12, HAlign::Left, VAlign::Center, m_col(8), "log in from notes");
+                } else {
+                    u.text(&fsm, dx + 105, y, 160, 12, HAlign::Left, VAlign::Center, m_col(8), "Tab: log in from notes");
+                }
+            }
         }
         Some(Screen::Atm { acct, pin, err }) => {
             let al = txt(u.hud, u.assets, g.class, "AccountLabel", "Account #:");
@@ -1882,8 +1913,8 @@ fn activate(t: &mut Term, w: Wid, right: bool, wx: &mut Wx) {
             let n = if i == 3 { 4 } else { 2 };
             // ButtonActivated / ButtonActivatedRight both cycle to the next value first (the subclasses call
             // Super.ButtonActivated either way), then act.
-            let _ = right;
-            s.values[i] = (s.values[i] + 1) % n;
+            // Transcended: the turret choice's right click (ButtonActivatedRight) steps back.
+            s.values[i] = if right && i == 3 && crate::transcended::fixes() { (s.values[i] + n - 1) % n } else { (s.values[i] + 1) % n };
             let v = wx.data.get(&actor).unwrap().views[s.sel].clone();
             match i {
                 0 => {
@@ -2393,16 +2424,7 @@ pub fn computer_system(
                             if let Some(e) = e {
                                 let font = wx.hud.font(wx.assets, "FontMenuSmall");
                                 if let Some(font) = font {
-                                    let rel = mouse.0 - e.org;
-                                    let mut i = 0;
-                                    while i < e.text.len() {
-                                        let wch = font.width(&e.text[..=i].iter().collect::<String>());
-                                        let wprev = font.width(&e.text[..i].iter().collect::<String>());
-                                        if rel < (wch + wprev) / 2 {
-                                            break;
-                                        }
-                                        i += 1;
-                                    }
+                                    let i = font.caret_at(&e.text, mouse.0 - e.org);
                                     e.cur = i;
                                     if !shift {
                                         e.anchor = i;
@@ -2543,6 +2565,9 @@ pub fn computer_system(
             _ => None,
         };
         let mut handled_escape = false;
+        if crate::gamepad::PAD_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
+            t.fill_from_notes();
+        }
         for (k, text) in &typed {
             if t.screen.is_none() || t.exit {
                 break;
@@ -2571,6 +2596,7 @@ pub fn computer_system(
                         _ => {}
                     }
                 }
+                KeyCode::Tab if t.fill_from_notes() => {}
                 KeyCode::Tab => {
                     if let Some(n) = edit_focus {
                         let other = if n == 0 { 1 } else { 0 };

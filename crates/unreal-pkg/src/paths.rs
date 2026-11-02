@@ -12,6 +12,34 @@ static ADDONS: RwLock<Vec<PathBuf>> = RwLock::new(Vec::new());
 /// High-resolution texture packs (mods::ModKind::HdTextures), used texture by texture while switched on.
 static HD_TEX: RwLock<Vec<PathBuf>> = RwLock::new(Vec::new());
 static HD_TEX_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Mods used file by file (mods::ModKind::ConFiles: Confix): (folder, file-name prefixes, lower case). Their files
+/// win over the overlays and the game's while `PICKS_ON` (the ConfixFixes setting) is set.
+static PICKS: RwLock<Vec<(PathBuf, Vec<String>)>> = RwLock::new(Vec::new());
+static PICKS_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Folders whose files named with one of these prefixes replace the game's (see PICKS).
+pub fn set_picks(picks: Vec<(PathBuf, Vec<String>)>) {
+    if let Ok(mut p) = PICKS.write() {
+        *p = picks.into_iter().filter(|(d, _)| d.is_dir()).map(|(d, v)| (d, v.iter().map(|x| x.to_ascii_lowercase()).collect())).collect();
+    }
+}
+
+pub fn set_picks_on(on: bool) {
+    PICKS_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn has_picks() -> bool {
+    PICKS.read().map(|p| !p.is_empty()).unwrap_or(false)
+}
+
+fn in_picks(parent: &Path, name: &str) -> Option<PathBuf> {
+    if !PICKS_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let p = PICKS.read().ok()?;
+    let lower = name.to_ascii_lowercase();
+    p.iter().filter(|(_, pre)| pre.iter().any(|x| lower.starts_with(x.as_str()))).find_map(|(d, _)| ci_in(&d.join(parent), name))
+}
 
 /// The game folder and the overlay folders, highest priority first.
 pub fn set(game_root: &Path, overlays: Vec<PathBuf>) {
@@ -22,6 +50,9 @@ pub fn set(game_root: &Path, overlays: Vec<PathBuf>) {
 
 /// Addon folders (after the game folder) and HD texture packs.
 pub fn set_addons(addons: Vec<PathBuf>, hd_textures: Vec<PathBuf>) {
+    if let Ok(mut l) = LOOSE.write() {
+        *l = addons.iter().filter(|o| o.is_file()).cloned().collect();
+    }
     if let Ok(mut a) = ADDONS.write() {
         *a = addons.into_iter().filter(|o| o.is_dir()).collect();
     }
@@ -76,6 +107,13 @@ fn ci_in(dir: &Path, name: &str) -> Option<PathBuf> {
 pub fn resolve(path: &Path) -> PathBuf {
     let g = STATE.read();
     let Some((root, ovs)) = g.as_ref().ok().and_then(|g| g.as_ref()) else { return path.to_path_buf() };
+    if let Ok(rel) = path.strip_prefix(root) {
+        if let (Some(parent), Some(name)) = (rel.parent(), rel.file_name()) {
+            if let Some(p) = in_picks(parent, &name.to_string_lossy()) {
+                return p;
+            }
+        }
+    }
     if ovs.is_empty() {
         if path.exists() {
             return path.to_path_buf();
@@ -116,8 +154,20 @@ pub fn resolve(path: &Path) -> PathBuf {
 /// A file named `name` in an addon folder's `parent` (relative to the game folder), any case.
 fn in_addons(parent: &Path, name: &str) -> Option<PathBuf> {
     let a = ADDONS.read().ok()?;
-    a.iter().find_map(|d| ci_in(&d.join(parent), name))
+    if let Some(p) = a.iter().find_map(|d| ci_in(&d.join(parent), name)) {
+        return Some(p);
+    }
+    drop(a);
+    // An addon given as its one package file (a loose Precipitation.u in a mods folder) stands for System/<name>.
+    let is_system = parent.as_os_str().to_string_lossy().eq_ignore_ascii_case("System");
+    let l = LOOSE.read().ok()?;
+    l.iter()
+        .find(|f| is_system && f.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)))
+        .cloned()
 }
+
+/// Addon packages given as single files (mods::locate returned the file itself).
+static LOOSE: RwLock<Vec<PathBuf>> = RwLock::new(Vec::new());
 
 /// A file named `name` (any case) in the game folder `dir`, looking in the overlays first.
 pub fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {

@@ -5,7 +5,7 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
     forward_io::{VertexOutput, FragmentOutput},
-    mesh_view_bindings::view,
+    mesh_view_bindings::{view, globals},
     mesh_functions,
     view_transformations::{position_world_to_clip, depth_ndc_to_view_z},
 }
@@ -20,11 +20,42 @@ struct WaterParams {
     m: vec4<f32>,
     tint: vec4<f32>,
     moon: vec4<f32>,
+    grid: vec4<f32>,
+    mask: vec4<f32>,
+    heights: array<vec4<f32>, 4>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> water: WaterParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var reflection_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var reflection_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(103) var mask_tex: texture_2d<u32>;
+
+// The water mask (water::build_mask) at a Bevy (x, z): bit 7 = water, bits 0-4 = its height's index.
+fn mask_at(p: vec2<f32>) -> u32 {
+    let q = floor((p - water.mask.xy) / max(water.mask.z, 1e-4));
+    let dim = vec2<f32>(textureDimensions(mask_tex));
+    if (q.x < 0.0 || q.y < 0.0 || q.x >= dim.x || q.y >= dim.y) {
+        return 0u;
+    }
+    return textureLoad(mask_tex, vec2<i32>(q), 0).r;
+}
+
+// The wave grid's centre for this view: the eye, snapped to the grid's step (water::grid_mesh).
+fn grid_centre() -> vec2<f32> {
+    return floor(view.world_position.xz / water.grid.z) * water.grid.z;
+}
+
+// A water face or the open sea gives way to the wave grid inside its square, where the mask has water.
+fn under_grid(p: vec2<f32>) -> bool {
+    if (water.grid.x < 0.5 || water.grid.x > 1.5 || water.m.x < 0.5) {
+        return false;
+    }
+    let d = abs(p - grid_centre());
+    if (max(d.x, d.y) >= water.grid.y) {
+        return false;
+    }
+    return (mask_at(p) & 128u) != 0u;
+}
 
 const TAU: f32 = 6.2831853;
 
@@ -102,6 +133,7 @@ fn swell_grad_lod(p: vec2<f32>, t: f32, fp: f32) -> vec2<f32> {
     g += wave(p, t, 4.10, 1.8, 0.65, 0.18).yz / (1.0 + pow(fp * 4.0 / 1.8, 2.0));
     g += wave(p, t, 2.75, 0.95, 0.45, 0.10).yz / (1.0 + pow(fp * 4.0 / 0.95, 2.0));
     g += wave(p, t, 5.30, 0.55, 0.38, 0.06).yz / (1.0 + pow(fp * 4.0 / 0.55, 2.0));
+    g += storm_wave(p, t).yz / (1.0 + pow(fp * 4.0 / 31.0, 2.0));
     return g;
 }
 
@@ -154,45 +186,31 @@ fn rain_rings(p: vec2<f32>, t: f32, amount: f32) -> vec2<f32> {
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
-    let t = water.t.x;
+    let t = globals.time;
+    // The wave grid where there's water; the flat faces everywhere else.
+    if (water.grid.x > 1.5) {
+        if ((mask_at(in.world_position.xz) & 128u) == 0u) {
+            discard;
+        }
+    } else if (under_grid(in.world_position.xz)) {
+        discard;
+    }
     if (water.m.x > 0.5) {
         return modern_water(in, is_front, t);
     }
-    let p = in.world_position.xz;
-    let f = field(p, t);
-    // The WetTexture look: the source picture pushed about by the slope of the water.
-    var displaced = in;
-    displaced.uv = in.uv + f.yz * water.t.y;
-    var pbr_input = pbr_input_from_standard_material(displaced, is_front);
-    // A normal tilted by the slope (the surfaces are flat, facing up or down).
-    let up = select(-1.0, 1.0, pbr_input.world_normal.y >= 0.0);
-    let n = normalize(vec3<f32>(-f.y * 0.18, up, -f.z * 0.18));
-    pbr_input.N = n;
+    // Classic: the original's water - its WetTexture (animated on the CPU like the engine did: watertex.rs) drawn
+    // PF_Translucent, added onto what's below, as dark as its lit picture. No swell, rings or glints of ours.
+    var pbr_input = pbr_input_from_standard_material(in, is_front);
     var color = apply_pbr_lighting(pbr_input);
     color = main_pass_post_lighting_processing(pbr_input, color);
     let to_eye = view.world_position.xyz - in.world_position.xyz;
-    let v = normalize(to_eye);
-    let ndv = clamp(abs(dot(n, v)), 0.0, 1.0);
-    // The original draws water PF_Translucent (added onto what is below), so it is as dark as its lit texture.
-    // A faint moon glint and a little sky at grazing angles on top.
-    let l = normalize(vec3<f32>(0.35, 1.0, 0.2));
-    let h = normalize(l + v);
-    let spec = pow(max(dot(n, h), 0.0), 260.0) * water.t.w;
-    let fres = pow(1.0 - ndv, 4.0);
-    // Far water fades out, so the edge of the map's water melts into the night instead of ending in a line.
-    let fade = 1.0 - smoothstep(water.far.x, water.far.y, length(to_eye));
     var out: FragmentOutput;
     if (water.far.z > 0.5) {
         out.color = vec4<f32>(color.rgb * water.far.z + vec3<f32>(0.3, 0.0, 0.0), 1.0);
         return out;
     }
-    // Everything here is lit by the surface's lightmap (shadows of the dock and the lamp pools included): an unlit
-    // sky term on top made the whole sheet one even grey-blue, brightest at grazing angles, ending in a hard line
-    // at the dock. Grazing angles only raise the lit texture a little.
-    // A faint night-sky sheen at grazing angles keeps unlit water from reading as a hole (a quarter of what it was).
-    let lit = color.rgb * water.t.z * (1.0 + fres * 0.6);
-    let sheen = fres * vec3<f32>(0.005, 0.0075, 0.01);
-    out.color = vec4<f32>((lit + sheen + vec3<f32>(spec) * min(1.0, dot(color.rgb, vec3<f32>(4.0)))) * fade, 1.0);
+    let lit = color.rgb * water.t.z;
+    out.color = vec4<f32>(lit, 1.0);
     return out;
 }
 
@@ -213,7 +231,11 @@ fn modern_water(in: VertexOutput, is_front: bool, t: f32) -> FragmentOutput {
     // Far off, the swell's slopes only alias into dark bands (a "plaid" towards the horizon): the far water
     // calms to a smooth mirror of the sky.
     let calm = mix(0.12, 1.0, 1.0 / (1.0 + (d_eye / 40.0) * (d_eye / 40.0)));
-    let g = swell_grad_lod(p, t, fp) * 0.18 * calm + (detail_lod(p, t, fp) + rain_rings(p, t, water.m.z)) * fine;
+    // The swell's slopes at the height the vertices move by (far.w metres per unit, more in a storm, when the wind
+    // also roughens the short waves).
+    let storm = water.m.z;
+    let g = swell_grad_lod(p, t, fp) * max(water.far.w, 0.16) * 1.12 * calm
+        + (detail_lod(p, t, fp) * (1.0 + storm * 1.6) + rain_rings(p, t, water.m.z)) * fine;
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let up = select(-1.0, 1.0, pbr_input.world_normal.y >= 0.0);
     let n = normalize(vec3<f32>(-g.x, up, -g.y));
@@ -222,6 +244,10 @@ fn modern_water(in: VertexOutput, is_front: bool, t: f32) -> FragmentOutput {
     pbr_input.material.base_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     // Low roughness: the dynamic lights (lamps, muzzle flashes, the flashlight) leave sharp glints.
     pbr_input.material.perceptual_roughness = 0.06;
+    // Not the lightmap: each water surface has its own coarse lightmap block, so in the body colour their edges showed
+    // as blue-grey angular patches and seams across the harbour. The lamps still show in the reflection and as
+    // glints of the dynamic lights.
+    pbr_input.lightmap_light = vec3<f32>(0.0);
     var light = apply_pbr_lighting(pbr_input).rgb;
     let to_eye = view.world_position.xyz - in.world_position.xyz;
     let dist = length(to_eye);
@@ -263,7 +289,9 @@ fn modern_water(in: VertexOutput, is_front: bool, t: f32) -> FragmentOutput {
     let n1 = vnoise(p * 1.7 + vec2<f32>(t * 0.21, t * 0.13));
     let n2 = vnoise(p * 5.3 - vec2<f32>(t * 0.37, t * 0.29));
     let streaks = n1 * 0.65 + n2 * 0.35;
-    var foam = smoothstep(0.5, 0.9, crest + (streaks - 0.5) * 0.55) * smoothstep(0.4, 0.8, streaks);
+    // Whitecaps: a storm breaks far more of the crests.
+    let cap_lo = 0.5 - water.m.z * 0.3;
+    var foam = smoothstep(cap_lo, cap_lo + 0.4, crest + (streaks - 0.5) * 0.55) * smoothstep(0.4 - water.m.z * 0.25, 0.8, streaks);
     foam *= 1.0 / (1.0 + d_eye * d_eye * 0.0006);
     let foam_col = max(light * 0.12, vec3<f32>(0.03, 0.035, 0.04)) + vec3<f32>(0.015);
     col = mix(col, foam_col, clamp(foam, 0.0, 1.0) * 0.4);
@@ -294,7 +322,12 @@ fn modern_water(in: VertexOutput, is_front: bool, t: f32) -> FragmentOutput {
 // Only the long swell (>= water::DISPLACE_MIN_LEN) moves the vertices: the mesh is 2 m, and the 6 m and shorter
 // waves came out as facets.
 fn swell_h(p: vec2<f32>, t: f32) -> f32 {
-    return wave(p, t, 0.90, 17.0, 2.1, 0.85).x;
+    return wave(p, t, 0.90, 17.0, 2.1, 0.85).x + storm_wave(p, t).x;
+}
+
+// A storm's long swell (water::STORM_WAVE; water.m.z = how hard it rains, 0..1): rolls in with the weather.
+fn storm_wave(p: vec2<f32>, t: f32) -> vec3<f32> {
+    return wave(p, t, 0.55, 31.0, 3.4, 1.1) * water.m.z;
 }
 
 struct Vertex {
@@ -323,11 +356,31 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     var wp = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
 #ifdef VERTEX_NORMALS
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, ii);
-    if (water.far.w > 0.0 && abs(out.world_normal.y) > 0.7) {
+    if (water.grid.x > 1.5) {
+        // The wave grid: round this view's eye, at the water's height the mask gives, with the swell - fading to
+        // nothing at the square's edge, where the flat faces take over.
+        let c = grid_centre();
+        wp = vec4<f32>(vertex.position.x + c.x, 0.0, vertex.position.z + c.y, 1.0);
+        let k = mask_at(wp.xz) & 31u;
+        wp.y = water.heights[k / 4u][k % 4u];
+        let edge = max(abs(vertex.position.x), abs(vertex.position.z)) / water.grid.y;
+        // And with distance from the eye: out where a 1.5 m grid step is a good part of a wave, the crests stood up
+        // from the sea as rows of pale triangles against the flat water beyond (the shading still carries the waves
+        // there: swell_grad_lod).
+        let de = length(view.world_position.xz - wp.xz);
+        let st = water.m.z;
+        let near = 1.0 - smoothstep(35.0 + 25.0 * st, 75.0 + 35.0 * st, de);
+        let fade = (1.0 - smoothstep(0.6, 0.95, edge)) * near;
+        wp.y += swell_h(wp.xz, globals.time) * water.far.w * fade;
+        out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
+    } else if (water.far.w > 0.0 && water.grid.x < 0.5 && abs(out.world_normal.y) > 0.7) {
         // Full near the eye, flat far away (where a vertex is many waves apart and the far sea meets the map's).
         let de = length(view.world_position.xz - wp.xz);
-        let k = 1.0 - smoothstep(90.0, 220.0, de);
-        wp.y += swell_h(wp.xz, water.t.x) * water.far.w * k;
+        // In a storm the swell runs on much farther (flattened close by, the far flat sea showed in the troughs as
+        // pale triangles).
+        let st = water.m.z;
+        let k = 1.0 - smoothstep(90.0 + 400.0 * st, 220.0 + 700.0 * st, de);
+        wp.y += swell_h(wp.xz, globals.time) * water.far.w * k;
     }
 #endif
     out.world_position = wp;

@@ -49,6 +49,10 @@ pub fn request(d: Death) {
     }
 }
 
+/// Ragdolls simulating at once, and how far from the player one may start (Unreal units, ~40 m).
+const MAX_ACTIVE: usize = 6;
+const FAR_UNITS: f64 = 2100.0;
+
 /// Unreal gravity (950 units / s²) in Bevy metres.
 const GRAVITY: f32 = 950.0 / 52.5;
 /// World cells for the static colliders (metres).
@@ -70,6 +74,7 @@ impl Plugin for RagdollPlugin {
             .init_resource::<RagWorld>()
             .add_systems(Update, (player_body_system.before(start_system), start_system.after(crate::skeletal::pose_system)))
             .add_systems(PostUpdate, drive_system.before(bevy::transform::TransformSystems::Propagate))
+            .add_systems(Update, follow_movers_system)
             .add_systems(First, pause_system);
         // Avian puts dozens of small systems in FixedPostUpdate. Handed out one by one to worker threads they cost
         // close to a millisecond a frame in scheduling alone, idle or not; run in order on one thread they're
@@ -83,13 +88,22 @@ impl Plugin for RagdollPlugin {
 /// The physics clock runs only while a ragdoll is falling: with nothing to simulate Avian's step (broad phase,
 /// solver, six substeps) still cost a couple of milliseconds a frame - most of the game, and all of it with
 /// Ragdolls off. Paused, its schedule doesn't run at all.
-fn pause_system(bodies: Query<&RigidBody>, mut time: ResMut<Time<Physics>>) {
+fn pause_system(
+    bodies: Query<&RigidBody>,
+    mut time: ResMut<Time<Physics>>,
+    mut config: ResMut<avian3d::physics_transform::PhysicsTransformConfig>,
+) {
     let pending = DEATHS.lock().is_ok_and(|d| !d.is_empty());
     let live = pending || bodies.iter().any(|b| *b == RigidBody::Dynamic);
     if live && time.is_paused() {
         time.unpause();
     } else if !live && !time.is_paused() {
         time.pause();
+    }
+    // Avian propagates every transform in the world before each physics step, paused or not (half a millisecond of
+    // the main thread for nothing while no ragdoll falls).
+    if config.propagate_before_physics != live {
+        config.propagate_before_physics = live;
     }
 }
 
@@ -104,20 +118,24 @@ struct PartDef {
     /// Joint limits (radians): swing half-angle, twist either way.
     swing: f32,
     twist: f32,
+    hinge: Option<(f32, f32)>,
 }
 
+/// Hinged parts (knees, elbows): `hinge` = Some(range of the bend in radians, about the body's left-to-right axis -
+/// negative swings the part backward, as a knee bends; positive forward, as an elbow). Spherical parts use swing /
+/// twist; hinges ignore them.
 const PARTS: &[PartDef] = &[
-    PartDef { bone: "DEF-spine", tail: "DEF-spine.002", extend: 0.0, radius: 0.13, parent: None, swing: 0.0, twist: 0.0 },
-    PartDef { bone: "DEF-spine.003", tail: "DEF-spine.005", extend: 0.0, radius: 0.15, parent: Some(0), swing: 0.5, twist: 0.4 },
-    PartDef { bone: "DEF-spine.005", tail: "DEF-spine.006", extend: 1.6, radius: 0.1, parent: Some(1), swing: 0.7, twist: 0.7 },
-    PartDef { bone: "DEF-upper_arm.L", tail: "DEF-forearm.L", extend: 0.0, radius: 0.05, parent: Some(1), swing: 1.6, twist: 0.9 },
-    PartDef { bone: "DEF-forearm.L", tail: "DEF-hand.L", extend: 0.45, radius: 0.045, parent: Some(3), swing: 1.4, twist: 0.3 },
-    PartDef { bone: "DEF-upper_arm.R", tail: "DEF-forearm.R", extend: 0.0, radius: 0.05, parent: Some(1), swing: 1.6, twist: 0.9 },
-    PartDef { bone: "DEF-forearm.R", tail: "DEF-hand.R", extend: 0.45, radius: 0.045, parent: Some(5), swing: 1.4, twist: 0.3 },
-    PartDef { bone: "DEF-thigh.L", tail: "DEF-shin.L", extend: 0.0, radius: 0.075, parent: Some(0), swing: 1.2, twist: 0.4 },
-    PartDef { bone: "DEF-shin.L", tail: "DEF-foot.L", extend: 0.15, radius: 0.055, parent: Some(7), swing: 1.3, twist: 0.2 },
-    PartDef { bone: "DEF-thigh.R", tail: "DEF-shin.R", extend: 0.0, radius: 0.075, parent: Some(0), swing: 1.2, twist: 0.4 },
-    PartDef { bone: "DEF-shin.R", tail: "DEF-foot.R", extend: 0.15, radius: 0.055, parent: Some(9), swing: 1.3, twist: 0.2 },
+    PartDef { bone: "DEF-spine", tail: "DEF-spine.002", extend: 0.0, radius: 0.13, parent: None, swing: 0.0, twist: 0.0, hinge: None },
+    PartDef { bone: "DEF-spine.003", tail: "DEF-spine.005", extend: 0.0, radius: 0.15, parent: Some(0), swing: 0.45, twist: 0.3, hinge: None },
+    PartDef { bone: "DEF-spine.005", tail: "DEF-spine.006", extend: 1.6, radius: 0.1, parent: Some(1), swing: 0.6, twist: 0.5, hinge: None },
+    PartDef { bone: "DEF-upper_arm.L", tail: "DEF-forearm.L", extend: 0.0, radius: 0.05, parent: Some(1), swing: 1.4, twist: 0.5, hinge: None },
+    PartDef { bone: "DEF-forearm.L", tail: "DEF-hand.L", extend: 0.45, radius: 0.045, parent: Some(3), swing: 0.0, twist: 0.0, hinge: Some((-0.05, 2.4)) },
+    PartDef { bone: "DEF-upper_arm.R", tail: "DEF-forearm.R", extend: 0.0, radius: 0.05, parent: Some(1), swing: 1.4, twist: 0.5, hinge: None },
+    PartDef { bone: "DEF-forearm.R", tail: "DEF-hand.R", extend: 0.45, radius: 0.045, parent: Some(5), swing: 0.0, twist: 0.0, hinge: Some((-0.05, 2.4)) },
+    PartDef { bone: "DEF-thigh.L", tail: "DEF-shin.L", extend: 0.0, radius: 0.075, parent: Some(0), swing: 1.0, twist: 0.25, hinge: None },
+    PartDef { bone: "DEF-shin.L", tail: "DEF-foot.L", extend: 0.15, radius: 0.055, parent: Some(7), swing: 0.0, twist: 0.0, hinge: Some((-2.3, 0.05)) },
+    PartDef { bone: "DEF-thigh.R", tail: "DEF-shin.R", extend: 0.0, radius: 0.075, parent: Some(0), swing: 1.0, twist: 0.25, hinge: None },
+    PartDef { bone: "DEF-shin.R", tail: "DEF-foot.R", extend: 0.15, radius: 0.055, parent: Some(9), swing: 0.0, twist: 0.0, hinge: Some((-2.3, 0.05)) },
 ];
 
 /// Bones hung straight off the rig root (the export flattens Rigify's parenting) and the bone each rides with:
@@ -164,7 +182,13 @@ pub struct RagWorld {
     tris: HashMap<(i32, i32, i32), Vec<[Vec3; 3]>>,
     built: bool,
     spawned: HashMap<(i32, i32, i32), Entity>,
+    /// Decorations (by blocker) and mover pieces (by mesh entity) given a collider already.
+    extra: std::collections::HashSet<(u8, u64)>,
 }
+
+/// A collider that copies a mover piece's place each frame (doors swing; the ragdoll mustn't fall through one).
+#[derive(Component)]
+pub struct RagMover(pub Entity);
 
 fn cell_of(p: Vec3) -> (i32, i32, i32) {
     ((p.x / CELL).floor() as i32, (p.y / CELL).floor() as i32, (p.z / CELL).floor() as i32)
@@ -249,6 +273,13 @@ pub fn start_system(
     gts: Query<&GlobalTransform>,
     tfs: Query<&Transform>,
     mut map_gen: Local<u64>,
+    blockers: Res<crate::actors::Blockers>,
+    movers: Option<Res<crate::movers::Movers>>,
+    kids: Query<&Children>,
+    mover_meshes: Query<(&Mesh3d, &GlobalTransform)>,
+    mesh_assets: Res<Assets<Mesh>>,
+    active: Query<(), With<Ragdoll>>,
+    player: Option<Res<crate::Player>>,
 ) {
     if crate::loader::new_map(&mut map_gen) {
         *world = RagWorld { generation: *map_gen, ..default() };
@@ -261,7 +292,22 @@ pub fn start_system(
     if !world.built {
         world.build(&level.0);
     }
+    // At most MAX_ACTIVE bodies simulate at once, and only near the player: the mission script killing every
+    // terrorist on the island at once (Mission01 StatueMissionComplete) started ~28 ragdolls together and the game
+    // ran at 4 fps until they settled. The rest play their death animation.
+    let mut live = active.iter().count();
+    let me = player.as_ref().map(|p| p.body.location);
     for d in deaths {
+        if d.blocker != PLAYER {
+            let near = match (me, blockers.list.get(d.blocker)) {
+                (Some(p), Some(c)) => c.center.distance(p) < FAR_UNITS,
+                _ => true,
+            };
+            if !near || live >= MAX_ACTIVE {
+                continue;
+            }
+        }
+        live += 1;
         let Some((_e, _, _, mut s)) = pawns
             .iter_mut()
             .find(|(_, n, pb, _)| n.is_some_and(|n| n.blocker == d.blocker) || (pb.is_some() && d.blocker == PLAYER))
@@ -284,6 +330,9 @@ pub fn start_system(
         let hit = Vec3::from(dx_level::ue_to_bevy(d.hit.as_vec3().to_array()));
         let run = Vec3::new(d.vel.x as f32, d.vel.z as f32, d.vel.y as f32) * dx_level::METERS_PER_UNIT;
         let kick = (d.damage * 0.12).clamp(1.5, 7.0);
+        // The body's left-to-right axis (hips, else shoulders): the hinges' axis.
+        let lr = |a: &str, b: &str| Some(g[idx(b)?].w_axis.truncate() - g[idx(a)?].w_axis.truncate()).filter(|v| v.length_squared() > 1e-6);
+        let right = lr("DEF-thigh.L", "DEF-thigh.R").or_else(|| lr("DEF-upper_arm.L", "DEF-upper_arm.R")).unwrap_or(Vec3::X).normalize();
         let mut bodies: Vec<Entity> = Vec::new();
         let mut body_w: Vec<Mat4> = Vec::new();
         let mut ok = true;
@@ -312,7 +361,49 @@ pub fn start_system(
             })
             .min_by(|x, y| x.1.total_cmp(&y.1))
             .map_or(1, |x| x.0);
-        world.ensure(&mut commands, segs[0].0, 3.0);
+        world.ensure(&mut commands, segs[0].0, 6.0);
+        // Things in the world besides the map: decorations (their collision cylinders) and movers (doors, lifts:
+        // their pieces' meshes, following them as they move).
+        let c0 = segs[0].0;
+        for (bi, c) in blockers.list.iter().enumerate() {
+            if c.radius <= 2.0 || !blockers.deco.contains_key(&bi) || world.extra.contains(&(0, bi as u64)) {
+                continue;
+            }
+            let at = Vec3::from(dx_level::ue_to_bevy([c.center.x as f32, c.center.y as f32, c.center.z as f32]));
+            if at.distance(c0) > 6.0 {
+                continue;
+            }
+            world.extra.insert((0, bi as u64));
+            let m = dx_level::METERS_PER_UNIT;
+            commands.spawn((
+                RigidBody::Static,
+                Collider::cylinder(c.radius as f32 * m, c.height as f32 * 2.0 * m),
+                CollisionLayers::new(LAYER_WORLD, LAYER_RAG),
+                Friction::new(0.9),
+                Transform::from_translation(at),
+            ));
+        }
+        if let Some(mv) = movers.as_ref() {
+            for root in &mv.entities {
+                let Ok(ch) = kids.get(*root) else { continue };
+                for c in ch.iter() {
+                    let Ok((mh, gt)) = mover_meshes.get(c) else { continue };
+                    if world.extra.contains(&(1, c.to_bits())) || gt.translation().distance(c0) > 12.0 {
+                        continue;
+                    }
+                    let Some(col) = mesh_assets.get(&mh.0).and_then(mesh_trimesh) else { continue };
+                    world.extra.insert((1, c.to_bits()));
+                    commands.spawn((
+                        RigidBody::Kinematic,
+                        col,
+                        CollisionLayers::new(LAYER_WORLD, LAYER_RAG),
+                        Friction::new(0.9),
+                        gt.compute_transform(),
+                        RagMover(c),
+                    ));
+                }
+            }
+        }
         for (i, p) in PARTS.iter().enumerate() {
             let (a, b) = segs[i];
             let len = a.distance(b).max(0.02);
@@ -320,21 +411,37 @@ pub fn start_system(
             let rot = Quat::from_rotation_arc(Vec3::Y, axis);
             let mid = (a + b) * 0.5;
             let w = Mat4::from_rotation_translation(rot, mid);
-            let mut v = run;
+            // The shot carries the whole body a little, the part hit most and its neighbours more; a hit above the
+            // hips tips the body over away from the shooter (the legs get a touch the other way), a hit in the legs
+            // sweeps them out from under it.
+            let mut v = run + push_dir * kick * 0.3;
             if i == near {
-                v += push_dir * kick;
+                v += push_dir * kick * 0.8;
             } else if PARTS[near].parent == Some(i) || p.parent == Some(near) {
-                v += push_dir * kick * 0.4;
+                v += push_dir * kick * 0.45;
+            }
+            let upper_hit = near <= 6;
+            let is_leg = i >= 7;
+            if upper_hit && !is_leg && i != 0 {
+                v += push_dir * kick * 0.25;
+            } else if upper_hit && is_leg {
+                v -= push_dir * kick * 0.12;
+            } else if !upper_hit && !is_leg && i != 0 {
+                v -= push_dir * kick * 0.1;
             }
             let body = commands
                 .spawn((
                     RigidBody::Dynamic,
-                    Collider::capsule(p.radius, (len - 2.0 * p.radius).max(0.01)),
+                    // A little fatter than the bones (the clothes and flesh round them): the drawn body stays out of
+                    // walls and floors, not just its skeleton.
+                    Collider::capsule(p.radius * 1.2, (len - 2.4 * p.radius).max(0.01)),
                     CollisionLayers::new(LAYER_RAG, LAYER_WORLD),
+                    // Swept collision: a fast limb can't tunnel through a thin floor or wall between two steps.
+                    SweptCcd::default(),
                     Friction::new(0.8),
                     Restitution::new(0.0),
-                    LinearDamping(0.1),
-                    AngularDamping(1.2),
+                    LinearDamping(0.15),
+                    AngularDamping(2.2),
                     LinearVelocity(v),
                     TransformInterpolation,
                     Transform::from_translation(mid).with_rotation(rot),
@@ -350,9 +457,29 @@ pub fn start_system(
             let Some(pi) = p.parent else { continue };
             let (a, b) = segs[i];
             anchors.push((pi, i, body_w[pi].inverse().transform_point3(a), body_w[i].inverse().transform_point3(a)));
-            let rot = Quat::from_rotation_arc(Vec3::Y, (b - a).normalize_or(Vec3::Y));
-            joints.push(
-                commands
+            let child = (b - a).normalize_or(Vec3::NEG_Y);
+            let rot = Quat::from_rotation_arc(Vec3::Y, child);
+            let j = match p.hinge {
+                Some((lo, hi)) => {
+                    // A hinge about the body's left-to-right axis (the basis's Z), its limits measured from the bend
+                    // the pose already has (the joint starts at angle 0).
+                    let (pa, pb) = segs[pi];
+                    let parent_dir = (pb - pa).normalize_or(Vec3::NEG_Y);
+                    let bend = parent_dir.cross(child).dot(right).atan2(parent_dir.dot(child));
+                    let y = (child - right * child.dot(right)).normalize_or(Vec3::Y);
+                    let basis = Quat::from_mat3(&Mat3::from_cols(y.cross(right), y, right));
+                    let (min, max) = ((lo - bend).min(0.0), (hi - bend).max(0.0));
+                    commands
+                        .spawn((
+                            RevoluteJoint::new(bodies[pi], bodies[i])
+                                .with_anchor(a)
+                                .with_basis(basis)
+                                .with_angle_limits(min, max),
+                            JointCollisionDisabled,
+                        ))
+                        .id()
+                }
+                None => commands
                     .spawn((
                         SphericalJoint::new(bodies[pi], bodies[i])
                             .with_anchor(a)
@@ -362,7 +489,8 @@ pub fn start_system(
                         JointCollisionDisabled,
                     ))
                     .id(),
-            );
+            };
+            joints.push(j);
         }
         // Which bones the bodies carry, and which ride other bones.
         let count = s.rig.names.len();
@@ -394,7 +522,7 @@ pub fn start_system(
         let mut order: Vec<usize> = (0..count).filter(|n| !in_rider(*n)).collect();
         order.extend((0..count).filter(|n| in_rider(*n)));
         s.ragdoll = true;
-        if std::env::var_os("DXVIEW_RAGLOG").is_some() {
+        if env_on!("DXVIEW_RAGLOG") {
             println!("RAGDOLL start blocker {} hit part {near} kick {kick:.1} run {run:?} hips {:?}", d.blocker, segs[0].0);
         }
         commands.entity(e).insert(Ragdoll { bodies, joints, driven, blocker: d.blocker, order, anchors, life: 0.0, still: 0.0 });
@@ -446,7 +574,7 @@ pub fn drive_system(
         }
         r.life += dt;
         r.still = if fastest < STILL_SPEED { r.still + dt } else { 0.0 };
-        if std::env::var_os("DXVIEW_RAGLOG").is_some() && (r.life * 4.0).floor() != ((r.life - dt) * 4.0).floor() {
+        if env_on!("DXVIEW_RAGLOG") && (r.life * 4.0).floor() != ((r.life - dt) * 4.0).floor() {
             let sep = r
                 .anchors
                 .iter()
@@ -495,7 +623,7 @@ pub fn player_body_system(
     }
     // Developer aid: DXVIEW_DIE_AT=<secs> kills JC that long into the run (ragdoll tests).
     if !ph.dead {
-        if let Some(at) = std::env::var("DXVIEW_DIE_AT").ok().and_then(|v| v.parse::<f32>().ok()) {
+        if let Some(at) = env_val!("DXVIEW_DIE_AT").map(str::to_owned).and_then(|v| v.parse::<f32>().ok()) {
             if time.elapsed_secs() > at && time.elapsed_secs() - time.delta_secs() <= at {
                 ph.damage(1000.0, "Shot", DVec3::ZERO);
             }
@@ -562,4 +690,31 @@ pub fn player_body_system(
     commands.entity(root).insert((s, PlayerBody));
     *st = Some((root, 0, flat));
     PLAYER_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Mover pieces' colliders follow the pieces (a door swinging shut pushes a body; one opening lets it through).
+fn follow_movers_system(mut q: Query<(&RagMover, &mut Transform)>, gts: Query<&GlobalTransform, Without<RagMover>>) {
+    for (m, mut tf) in &mut q {
+        if let Ok(g) = gts.get(m.0) {
+            let want = g.compute_transform();
+            if *tf != want {
+                *tf = want;
+            }
+        }
+    }
+}
+
+/// A triangle-mesh collider from a mesh's positions and indices.
+fn mesh_trimesh(m: &Mesh) -> Option<Collider> {
+    let Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) = m.attribute(Mesh::ATTRIBUTE_POSITION) else { return None };
+    let idx: Vec<u32> = match m.indices()? {
+        bevy::mesh::Indices::U32(v) => v.clone(),
+        bevy::mesh::Indices::U16(v) => v.iter().map(|&i| i as u32).collect(),
+    };
+    if idx.len() < 3 {
+        return None;
+    }
+    let verts: Vec<Vec3> = p.iter().map(|v| Vec3::from(*v)).collect();
+    let tris: Vec<[u32; 3]> = idx.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
+    Some(Collider::trimesh(verts, tris))
 }

@@ -32,8 +32,24 @@ pub fn postfx_system(
     mut commands: Commands,
     world: Query<(Entity, Has<ScreenSpaceAmbientOcclusion>), (With<crate::FlyCam>, Without<crate::SkyCam>)>,
     mut cams: Query<
-        (Entity, &Msaa, Has<Smaa>, Has<crate::weapons::ViewModelCam>, &mut Camera, Has<VolumetricFog>),
-        Or<(With<crate::FlyCam>, With<crate::SkyCam>, With<crate::weapons::ViewModelCam>, With<crate::augdisplay::HeatCam>)>,
+        (
+            Entity,
+            &Msaa,
+            Has<Smaa>,
+            Has<crate::weapons::ViewModelCam>,
+            &mut Camera,
+            Has<VolumetricFog>,
+            Has<crate::upscale::UpscaleCam>,
+            Has<crate::FlyCam>,
+            Has<crate::SkyCam>,
+        ),
+        Or<(
+            With<crate::FlyCam>,
+            With<crate::SkyCam>,
+            With<crate::weapons::ViewModelCam>,
+            With<crate::augdisplay::HeatCam>,
+            With<crate::upscale::UpscaleCam>,
+        )>,
     >,
     mut points: Query<(&mut SpotLight, &crate::shadowlight::ShadowLight), Without<crate::dynlight::FlashCone>>,
     mut spots: Query<&mut SpotLight, (With<crate::dynlight::FlashCone>, Without<crate::shadowlight::ShadowLight>)>,
@@ -48,7 +64,7 @@ pub fn postfx_system(
             With<crate::augdisplay::AugViewCam>,
         )>,
     >,
-    mut ao_gen: Local<Option<(bool, u32)>>,
+    mut ao_gen: Local<Option<(bool, u32, bool)>>,
 ) {
     // The cameras' make-up never changes in play: the SSAO pass, the depth / normal prepasses, MSAA off with SMAA.
     // Each of those is part of every material's pipeline, so adding or removing one recompiled them all (a long
@@ -59,13 +75,15 @@ pub fn postfx_system(
     // The BSP shader's shadow strength goes with it: 0 (Lean Rendering with no shadow lights) skips its walk over
     // the lights in each fragment's cluster.
     let strength = crate::shadowlight::shadow_strength();
-    if *ao_gen != Some((ao, strength.to_bits())) {
-        *ao_gen = Some((ao, strength.to_bits()));
+    let detail = crate::settings::get("DetailTextures") > 0.5;
+    if *ao_gen != Some((ao, strength.to_bits(), detail)) {
+        *ao_gen = Some((ao, strength.to_bits(), detail));
         let ids: Vec<_> = bsp.ids().collect();
         for id in ids {
             if let Some(mut m) = bsp.get_mut(id) {
                 m.extension.params.q.x = if ao { 0.85 } else { 0.0 };
                 m.extension.params.p.x = strength;
+                m.extension.params.q.z = if detail { 1.0 } else { 0.0 };
             }
         }
     }
@@ -76,7 +94,7 @@ pub fn postfx_system(
     if wanted {
         ATTACHED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let ssao = ATTACHED.load(std::sync::atomic::Ordering::Relaxed) && std::env::var_os("DXVIEW_AO_NOSSAO").is_none();
+    let ssao = ATTACHED.load(std::sync::atomic::Ordering::Relaxed) && !env_on!("DXVIEW_AO_NOSSAO");
     for (e, has) in &world {
         if ssao && !has {
             commands.entity(e).insert(ScreenSpaceAmbientOcclusion {
@@ -87,8 +105,10 @@ pub fn postfx_system(
             commands.entity(e).remove::<ScreenSpaceAmbientOcclusion>();
         }
     }
-    // Anti-Aliasing off (perf.rs) leaves the edges alone; SSAO's SMAA still comes with Ambient Occlusion.
-    let want_msaa = if ssao || !crate::perf::msaa() { Msaa::Off } else { Msaa::Sample4 };
+    // Anti-Aliasing off (perf.rs) leaves the edges alone; SSAO's SMAA still comes with Ambient Occlusion, and
+    // Upscaling brings its own antialiasing (TAA).
+    let aa_off = ssao || crate::upscale::mode() > 0;
+    let want_msaa = if aa_off || !crate::perf::msaa() { Msaa::Off } else { Msaa::Sample4 };
     // Lean Rendering: the cameras drawing into the window share one picture, so only the last active one copies it
     // to the window (replacing what is there: the earlier copies were covered by it anyway). Nothing writes the
     // resolved picture between cameras except volumetric fog, so without it the multisampled one already holds
@@ -96,13 +116,13 @@ pub fn postfx_system(
     let lean = crate::perf::lean_rendering();
     let last = cams.iter().filter(|c| c.4.is_active).max_by_key(|c| c.4.order).map(|c| c.0);
     let fog = cams.iter().any(|c| c.5);
-    for (e, msaa, smaa, vm, mut cam, _) in &mut cams {
+    for (e, msaa, smaa, vm, mut cam, _, upscaler, fly, sky) in &mut cams {
         if *msaa != want_msaa {
             commands.entity(e).insert(want_msaa);
         }
-        if vm && ssao && !smaa {
+        if vm && aa_off && !smaa {
             commands.entity(e).insert(Smaa::default());
-        } else if smaa && !ssao {
+        } else if smaa && !aa_off {
             commands.entity(e).remove::<Smaa>();
         }
         let (output, writeback) = if !lean {
@@ -113,7 +133,10 @@ pub fn postfx_system(
         } else {
             (CameraOutputMode::Skip, if fog { MsaaWriteback::Auto } else { MsaaWriteback::Off })
         };
-        if !same_output(&cam.output_mode, &output) {
+        // upscale.rs owns the world camera's output and the upscaler's own (the world draws into the upscaler's
+        // picture, or leaves the copy to the cameras after it).
+        let owned = upscaler || (fly && !sky);
+        if !owned && !same_output(&cam.output_mode, &output) {
             cam.output_mode = output;
         }
         if cam.msaa_writeback != writeback {

@@ -178,7 +178,7 @@ pub fn attach_grenades(
         g.armed = prox;
         // Mission00.FirstFrame, 00_TRAININGCOMBAT: "fool a lam into thinking that the player set it"
         // (SetOwner(Player)) - an owned mine is set off by heavy pawns, so the patrolling bot walks into it.
-        if level.0.name.to_ascii_lowercase().starts_with("00_trainingcombat")
+        if crate::util::starts_with_ci(&level.0.name, "00_trainingcombat")
             && matches!(find(&a.props, "Tag"), Some(Value::Name(t)) if t.eq_ignore_ascii_case("Bot1LAM"))
         {
             g.placed = false;
@@ -208,8 +208,11 @@ pub fn grenade_system(
     npcs: Query<&Npc>,
     mut hud: ResMut<crate::movers::HudMessage>,
     mut gas: ResMut<crate::projectiles::GasClouds>,
+    ph: Res<crate::ai::PlayerHealth>,
 ) {
     let _prof = crate::prof::scope("grenades::grenade_system");
+    // Transcended (setting TrRadarCloak): placed mines miss a radar-cloaked player (Radar Transparency or camo).
+    let radar_cloaked = crate::transcended::radar_cloak() && (ph.camo || crate::abilities::aug("AugRadarTrans").is_some());
     let lvl = &level.0;
     // New grenades.
     for (class, pos, dir, from, wall) in throws.0.drain(..) {
@@ -420,7 +423,7 @@ pub fn grenade_system(
                 explode = true;
             }
         }
-        if std::env::var("DXVIEW_GRENLOG").is_ok() && (g.time * 2.0).floor() != ((g.time - dt) * 2.0).floor() {
+        if env_on!("DXVIEW_GRENLOG") && (g.time * 2.0).floor() != ((g.time - dt) * 2.0).floor() {
             let near = npcs
                 .iter()
                 .filter(|n| n.blocker != usize::MAX)
@@ -450,7 +453,7 @@ pub fn grenade_system(
                 let mut tripped = false;
                 if g.placed || g.from.is_none() {
                     // Owner None (placed): the player sets it off; skillTime = clamp(-20 x Demolition, 1, 10).
-                    if g.placed && player.body.location.distance(g.pos) < g.prox_radius {
+                    if g.placed && !radar_cloaked && player.body.location.distance(g.pos) < g.prox_radius {
                         g.skill_time =
                             (-20.0 * crate::abilities::skill("SkillDemolition")).clamp(1.0, 10.0);
                     }

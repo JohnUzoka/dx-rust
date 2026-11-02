@@ -31,9 +31,7 @@ pub mod slot {
     pub const MISC: u8 = 1;
     pub const PAIN: u8 = 2;
     pub const INTERACT: u8 = 3;
-    pub const AMBIENT: u8 = 4;
     pub const TALK: u8 = 5;
-    pub const INTERFACE: u8 = 6;
 }
 
 /// Owner ids for slot bookkeeping.
@@ -65,7 +63,7 @@ pub struct Req {
 
 struct Hold {
     key: u64,
-    sound: String,
+    sound: &'static str,
     pos: Option<DVec3>,
     volume: f32,
     radius: f32,
@@ -135,7 +133,7 @@ pub fn play(sound: &str, pos: DVec3, volume: f32, radius: f32, pitch: f32) {
 /// The music's gain for the Music Volume setting: a loudness curve (squared) rather than a straight line, so the
 /// low steps really are quiet (setting 1 of 10 was still loud), with the default (6) a little under the old level.
 fn music_gain() -> f32 {
-    let base = std::env::var("DXVIEW_MUSIC_VOL").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.8);
+    let base = env_val!("DXVIEW_MUSIC_VOL").map(str::to_owned).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.8);
     let v = crate::settings::music_volume().clamp(0.0, 1.0);
     base * 0.7 * (v / 0.6).powi(2)
 }
@@ -201,7 +199,8 @@ pub fn hold(key: u64, sound: &str, pos: Option<DVec3>, volume: f32, radius: f32,
     if let Ok(mut h) = HOLDS.lock() {
         h.push(Hold {
             key,
-            sound: sound.into(),
+            // Interned: held sounds are queued every frame.
+            sound: crate::util::intern(sound),
             pos,
             volume,
             radius,
@@ -579,7 +578,7 @@ pub struct SoundState {
     bank: SoundBank,
     playing: Vec<Playing>,
     slots: HashMap<(u64, u8), (VoiceId, f32)>,
-    held: HashMap<u64, (VoiceId, String)>,
+    held: HashMap<u64, (VoiceId, &'static str)>,
     song: Option<imsim_audio::Song>,
     default_section: u8,
     mode: MusicMode,
@@ -597,6 +596,8 @@ pub struct SoundState {
     occl: crate::audiofx::Occluder,
     room_t: f32,
     hq_sent: Option<bool>,
+    /// The zone echo last sent to the mixer.
+    echo_sent: Option<Option<imsim_audio::EchoParams>>,
 }
 
 /// ClientSetMusic with another song (Some(package.name)) or back to the level's song and section (None).
@@ -713,11 +714,21 @@ fn build_state(audio: Audio, level: &dx_level::Level, root: &std::path::Path) ->
         occl: Default::default(),
         room_t: 0.0,
         hq_sent: None,
+        echo_sent: None,
     }
 }
 
 fn ue(v: Vec3) -> DVec3 {
     DVec3::new(v.x as f64, v.z as f64, v.y as f64)
+}
+
+#[derive(Default)]
+pub struct SoundScratch {
+    holds: Vec<Hold>,
+    keep: std::collections::HashSet<u64>,
+    updates: Vec<(imsim_audio::VoiceId, f32, f32, f32)>,
+    fx_updates: Vec<(imsim_audio::VoiceId, f32, f32)>,
+    gone: Vec<u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -730,6 +741,7 @@ pub fn sound_system(
     cam: Single<&Transform, (With<FlyCam>, Without<SkyCam>)>,
     npcs: Query<&Npc>,
     blockers: Res<crate::actors::Blockers>,
+    mut scratch: Local<SoundScratch>,
 ) {
     let _prof = crate::prof::scope("sound::sound_system");
     // Settings > Sound volumes (live while the slider moves). Defaults 204 / 153 give the old levels.
@@ -773,6 +785,29 @@ pub fn sound_system(
         st.audio.set_quality(hq);
     }
     st.room_t -= dt;
+    // The original's reverb zones (ZoneInfo bReverbZone, Galaxy's echo): the listener's zone, unless the Modern
+    // room reverb replaces it.
+    let mut echo_live = false;
+    if !crate::audiofx::reverb_on() {
+        let z = level.0.collision.zone_at(ear).max(0) as usize;
+        if let Some(Some(e)) = level.0.zone_echo.get(z) {
+            echo_live = true;
+            let want = imsim_audio::EchoParams {
+                delays_ms: e.delays.map(|d| d as f32),
+                gains: e.gains.map(|g| g as f32 / 255.0),
+                master: e.master as f32 / 255.0,
+                cutoff_hz: e.cutoff_hz as f32,
+            };
+            if st.echo_sent != Some(Some(want)) {
+                st.echo_sent = Some(Some(want));
+                st.audio.set_echo(Some(want));
+            }
+        }
+    }
+    if !echo_live && st.echo_sent != Some(None) {
+        st.echo_sent = Some(None);
+        st.audio.set_echo(None);
+    }
     if st.room_t <= 0.0 {
         st.room_t = 0.5;
         if crate::audiofx::reverb_on() {
@@ -785,10 +820,10 @@ pub fn sound_system(
     let talking = st.slots.iter().any(|((_, sl), (id, _))| *sl == slot::TALK && st.audio.is_playing(*id));
     let duck_k = crate::audiofx::update_duck(talking, dt);
     let occl_on = crate::audiofx::occlusion_on();
-    let reverb_on = crate::audiofx::reverb_on();
+    let reverb_on = crate::audiofx::reverb_on() || echo_live;
     let lvl0 = &level.0;
     // (gain multiplier, filter, reverb send) for a voice.
-    let mut fx = |occl: &mut crate::audiofx::Occluder, pos: Option<DVec3>, talk: bool| -> (f32, f32, f32) {
+    let fx = |occl: &mut crate::audiofx::Occluder, pos: Option<DVec3>, talk: bool| -> (f32, f32, f32) {
         let duck = if talk { 1.0 } else { duck_k };
         let send = if !reverb_on { 0.0 } else if pos.is_some() { 1.0 } else { 0.35 };
         match pos {
@@ -963,15 +998,14 @@ pub fn sound_system(
     }
 
     // Looping sounds held this frame: start new ones, update the rest, stop what was let go.
-    let holds: Vec<Hold> = HOLDS
-        .lock()
-        .map(|mut q| std::mem::take(&mut *q))
-        .unwrap_or_default();
-    let mut keep: HashMap<u64, ()> = HashMap::new();
-    let mut updates = Vec::new();
-    let mut fx_updates = Vec::new();
-    for h in holds {
-        if keep.insert(h.key, ()).is_some() {
+    // (Buffers kept between frames.)
+    let SoundScratch { holds, keep, updates, fx_updates, gone } = &mut *scratch;
+    crate::queue::swap_out(&HOLDS, holds);
+    keep.clear();
+    updates.clear();
+    fx_updates.clear();
+    for h in holds.drain(..) {
+        if !keep.insert(h.key) {
             continue;
         }
         let (gain, pan) = place(h.pos, h.radius);
@@ -1006,20 +1040,16 @@ pub fn sound_system(
                             reverb,
                         },
                     );
-                    st.held.insert(h.key, (id, h.sound.clone()));
+                    st.held.insert(h.key, (id, h.sound));
                 } else {
                     st.held.remove(&h.key);
                 }
             }
         }
     }
-    let gone: Vec<u64> = st
-        .held
-        .keys()
-        .filter(|k| !keep.contains_key(k))
-        .copied()
-        .collect();
-    for k in gone {
+    gone.clear();
+    gone.extend(st.held.keys().filter(|k| !keep.contains(k)).copied());
+    for k in gone.drain(..) {
         if let Some((id, _)) = st.held.remove(&k) {
             st.audio.stop(id);
         }
@@ -1036,9 +1066,9 @@ pub fn sound_system(
         fx_updates.push((p.id, filter, reverb));
     }
     st.playing = playing;
-    st.audio.set_many(&updates);
+    st.audio.set_many(updates);
     if occl_on || reverb_on || hq {
-        st.audio.set_fx_many(&fx_updates);
+        st.audio.set_fx_many(fx_updates);
     }
     st.slots
         .retain(|_, (id, t)| now - *t < 10.0 || audio.is_playing(*id));
@@ -1098,6 +1128,7 @@ pub fn sound_system(
         .count();
     // GMDX Audio: Play Combat Music = Restricted (setting RestrictedCombatMusic): two or more attackers, so one
     // distant guard doesn't start the combat track.
+    crate::hudfade::ATTACKERS.store(attackers as u32, std::sync::atomic::Ordering::Relaxed);
     let combat = attackers >= if crate::settings::get("RestrictedCombatMusic") > 0.5 { 2 } else { 1 };
     if combat {
         st.change_timer = 0.0;
@@ -1222,17 +1253,24 @@ mod tests {
 /// pitch from mass.
 pub fn npc_footstep_system(
     level: Res<LevelRes>,
-    npcs: Query<(&Npc, &crate::actors::Animated)>,
+    npcs: Query<(&Npc, &crate::actors::Animated, Option<&crate::skeletal::SkelBody>)>,
     mut last: Local<HashMap<usize, (usize, f32)>>,
+    mut skel_steps: Local<HashMap<usize, u32>>,
 ) {
     let _prof = crate::prof::scope("sound::npc_footstep_system");
     // ScriptedPawn.PlayFootStep runs from the walk/run animations' PlayFootStep notifies, so steps keep time with
     // the legs (a big walker's slow stride, a running trooper's quick one).
     let lvl = &level.0;
-    for (n, an) in &npcs {
+    for (n, an, skel) in &npcs {
         let Some(body) = n.body.as_ref() else {
             continue;
         };
+        // A rebuilt (skeletal) body steps when its feet come down (skeletal::foot_plants), not on the original
+        // sequence's notifies (the rebuilt clips' strides fall elsewhere).
+        let skel_step = skel.filter(|s| !s.ragdoll).map(|s| {
+            let prev = skel_steps.insert(n.blocker, s.steps);
+            s.steps_live && prev.is_some_and(|p| p != s.steps)
+        });
         if n.state == NpcState::Dead
             || body.physics != imsim_core::movement::Physics::Walking
             || body.velocity.truncate().length() < 5.0
@@ -1240,30 +1278,35 @@ pub fn npc_footstep_system(
             last.remove(&n.blocker);
             continue;
         }
-        let ma = &lvl.mesh_actors[an.mesh_actor];
-        let Some(anim) = &ma.anim else { continue };
-        let (start, frames, f) = crate::actors::current_frame(an, anim);
-        let Some(seq) = anim.mesh.seqs.iter().find(|s| {
-            s.start_frame.max(0) as usize == start && s.num_frames.max(1) as usize == frames
-        }) else {
-            continue;
-        };
-        let phase = (f / frames.max(1) as f32).rem_euclid(1.0);
-        let prev = last.insert(n.blocker, (start, phase));
-        let Some((pstart, pphase)) = prev else {
-            continue;
-        };
-        if pstart != start {
-            continue;
-        }
-        let crossed = seq.notifies.iter().any(|(t, func)| {
-            func.eq_ignore_ascii_case("PlayFootStep")
-                && if phase >= pphase {
-                    *t > pphase && *t <= phase
-                } else {
-                    *t > pphase || *t <= phase
+        let crossed = match skel_step {
+            Some(stepped) => stepped,
+            None => {
+                let ma = &lvl.mesh_actors[an.mesh_actor];
+                let Some(anim) = &ma.anim else { continue };
+                let (start, frames, f) = crate::actors::current_frame(an, anim);
+                let Some(seq) = anim.mesh.seqs.iter().find(|s| {
+                    s.start_frame.max(0) as usize == start && s.num_frames.max(1) as usize == frames
+                }) else {
+                    continue;
+                };
+                let phase = (f / frames.max(1) as f32).rem_euclid(1.0);
+                let prev = last.insert(n.blocker, (start, phase));
+                let Some((pstart, pphase)) = prev else {
+                    continue;
+                };
+                if pstart != start {
+                    continue;
                 }
-        });
+                seq.notifies.iter().any(|(t, func)| {
+                    func.eq_ignore_ascii_case("PlayFootStep")
+                        && if phase >= pphase {
+                            *t > pphase && *t <= phase
+                        } else {
+                            *t > pphase || *t <= phase
+                        }
+                })
+            }
+        };
         if !crossed {
             continue;
         }

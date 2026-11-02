@@ -324,7 +324,7 @@ pub fn deco_damage_system(
         }
     }
     // Developer aid: DXVIEW_DEBUG_DECOHIT="ActorName" hits that decoration for 100 after about two seconds.
-    if let Ok(name) = std::env::var("DXVIEW_DEBUG_DECOHIT") {
+    if let Some(name) = env_val!("DXVIEW_DEBUG_DECOHIT") {
         *debug_frames += 1;
         if *debug_frames == 120 {
             if let Some((b, _)) = blockers
@@ -377,6 +377,11 @@ pub fn deco_damage_system(
             hit.damage_type,
             "TearGas" | "PoisonGas" | "Radiation" | "EMP" | "NanoVirus" | "Shocked"
         ) {
+            continue;
+        }
+        // Transcended: the riot prod's 'Stunned' doesn't break crates (except explosive ones). (Its own list
+        // drops 'Shocked', a slip in the mod; it stays ignored here.)
+        if hit.damage_type == "Stunned" && crate::transcended::fixes() && !flag(p, "bExplosive") {
             continue;
         }
         let max = fv(p, "HitPoints", 20.0).max(1.0);
@@ -989,6 +994,8 @@ pub fn flare_system(
     if *seed == 0 {
         *seed = 0xF1A2E;
     }
+    // Transcended (setting TrLongFlares): a flare burns 360 s.
+    let burn = if crate::transcended::long_flares() { 360.0 } else { 30.0 };
     for (pos, vel) in throws.0.drain(..) {
         let d = assets.classes.defaults("Flare");
         let Some(mesh) = path(&d, "Mesh") else {
@@ -1007,7 +1014,7 @@ pub fn flare_system(
             elasticity: 0.3,
             extent: DVec3::splat(3.0),
             resting: false,
-            life: Some(30.0),
+            life: Some(burn),
             parts: Vec::new(),
             lit_at: DVec3::ZERO,
         };
@@ -1044,7 +1051,7 @@ pub fn flare_system(
             Visibility::default(),
             FlareGlow {
                 flare: ent,
-                life: 30.0,
+                life: burn,
             },
         ));
     }

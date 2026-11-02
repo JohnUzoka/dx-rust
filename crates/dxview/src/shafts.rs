@@ -245,7 +245,9 @@ fn spots_of(lvl: &dx_level::Level) -> Vec<SpotDef> {
             color: Color::srgb(c[0], c[1], c[2]),
             range: r_m,
             angle: (cone * std::f32::consts::FRAC_PI_2).clamp(0.08, 1.2),
-            intensity: std::f32::consts::PI.powi(2) * r_m * r_m * k * 0.6,
+            // (Haze only. A big, bright street lamp - Battery Park's blue one by the player start - lit the air
+            // like a stage light: a third of it, and no lamp past a set brightness.)
+            intensity: (std::f32::consts::PI.powi(2) * r_m * r_m * k * 0.6).min(450.0) * 0.3,
         });
     }
     out
@@ -255,7 +257,7 @@ fn spots_of(lvl: &dx_level::Level) -> Vec<SpotDef> {
 pub fn moon_dir(lvl: &dx_level::Level) -> Option<Vec3> {
     let o = Vec3::from(lvl.sky_origin?);
     let b = lvl.batches.iter().find(|b| {
-        b.sky && b.texture.is_some_and(|t| lvl.textures[t].name.to_ascii_lowercase().contains("moon"))
+        b.sky && b.texture.is_some_and(|t| crate::util::contains_ci(&lvl.textures[t].name, "moon"))
     })?;
     let c = b.positions.iter().fold(Vec3::ZERO, |a, p| a + Vec3::from(*p)) / b.positions.len().max(1) as f32;
     (c - o).try_normalize()
@@ -295,7 +297,7 @@ pub fn shafts_system(
                 // Local fog glows dimly all over (the bars' and sewers' light, baked into the walls, isn't in the air).
                 ambient_intensity: 0.0,
                 jitter: 0.0,
-                step_count: 24,
+                step_count: 16,
             });
         } else if !any && has_fog {
             commands.entity(cam_e).remove::<VolumetricFog>();
@@ -316,7 +318,7 @@ pub fn shafts_system(
                     density_texture: Some(tex.clone()),
                     absorption: 0.01,
                     scattering: 0.6,
-                    scattering_asymmetry: 0.6,
+                    scattering_asymmetry: 0.45,
                     light_intensity: AIR_BOOST,
                     ..default()
                 },
@@ -377,7 +379,7 @@ pub fn shafts_system(
                 // (0.02 laid a grey veil over everything near, people included.)
                 ambient_intensity: 0.012,
                 jitter: 0.0,
-                step_count: 24,
+                step_count: 16,
             });
         }
         return;
@@ -458,8 +460,11 @@ pub fn shafts_system(
     // behind it, and through the double-sided wall the far side's shadows showed).
     let aug = crate::abilities::aug_active("AugLight");
     let flash = crate::dynlight::flashlight();
+    // With the Flashlight Cone the haze beam is left out: its narrower glow in the air read as a second, inner
+    // corona inside the cone's pool against far ground (playtest 2026-11-01).
+    let beam_on = aug && !crate::dynlight::flashlight_cone();
     for (mut sl, mut tf, mut vis) in &mut beam {
-        if let (true, Some((from, f, reach))) = (aug, flash) {
+        if let (true, Some((from, f, reach))) = (beam_on, flash) {
             let pos = from + f * (reach * 0.5).min(0.6);
             *tf = Transform::from_translation(pos).looking_to(f, Vec3::Y);
             sl.intensity = 14.0 / AIR_BOOST;
@@ -477,7 +482,7 @@ pub fn shafts_system(
         }
     }
     // No beam anywhere near (no flashlight, spotlight or moon through a window): the haze isn't marched at all.
-    let lit = aug || st.spots_lit > 0 || st.moon_on;
+    let lit = beam_on || st.spots_lit > 0 || st.moon_on;
     let want_v = if lit { Visibility::Inherited } else { Visibility::Hidden };
     for (_, mut v) in &mut haze {
         if *v != want_v {
@@ -547,7 +552,7 @@ fn spawn_local_fog(commands: &mut Commands, images: &mut Assets<Image>, lvl: &dx
         // About a texel every 1.2 m across (at most 40), 12 up.
         let res = UVec3::new(((size.x / 1.2) as u32).clamp(6, 40), 12, ((size.z / 1.2) as u32).clamp(6, 40));
         let tex = fog_image(images, res);
-        if std::env::var_os("DXVIEW_SHAFTLOG").is_some() {
+        if env_on!("DXVIEW_SHAFTLOG") {
             println!("SHAFTS mist at {mid:?} size {size:?}");
         }
         commands.spawn((
@@ -567,7 +572,7 @@ fn spawn_local_fog(commands: &mut Commands, images: &mut Assets<Image>, lvl: &dx
         ));
         n += 1;
     }
-    for s in lvl.ambient_sounds.iter().filter(|s| s.sound.to_ascii_lowercase().ends_with(".bar")) {
+    for s in lvl.ambient_sounds.iter().filter(|s| crate::util::ends_with_ci(&s.sound, ".bar")) {
         let p = Vec3::from(dx_level::ue_to_bevy([s.pos[0] as f32, s.pos[1] as f32, s.pos[2] as f32]));
         let r = (s.radius as f32 * 25.0 * METERS_PER_UNIT).clamp(8.0, 20.0);
         let res = UVec3::new(20, 10, 20);
@@ -589,7 +594,7 @@ fn spawn_local_fog(commands: &mut Commands, images: &mut Assets<Image>, lvl: &dx
         ));
         n += 1;
     }
-    if std::env::var_os("DXVIEW_SHAFTLOG").is_some() {
+    if env_on!("DXVIEW_SHAFTLOG") {
         println!("SHAFTS local fog volumes {n}");
     }
     n

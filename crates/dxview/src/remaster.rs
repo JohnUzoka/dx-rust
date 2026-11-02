@@ -41,6 +41,8 @@ pub const PRESET: &[(&str, f32)] = &[
     ("HurtPoses", 1.0),
     ("BodyWounds", 1.0),
     ("FlashlightCone", 1.0),
+    ("MaterialSheen", 1.0),
+    ("ModernGlass", 1.0),
     ("FogVolumes", 1.0),
     ("LightHalos", 1.0),
     ("LightShafts", 1.0),
@@ -65,6 +67,9 @@ pub const PRESET: &[(&str, f32)] = &[
     ("SmarterAI", 1.0),
     ("DiegeticScreens", 1.0),
     ("AlertIndicators", 1.0),
+    ("HudFade", 1.0),
+    ("Grass", 2.0),
+    ("Trees", 1.0),
     ("BulletPenetration", 1.0),
     ("CarryCover", 1.0),
     ("DTSEnergy", 1.0),
@@ -74,6 +79,7 @@ pub const PRESET: &[(&str, f32)] = &[
     ("Mantling", 1.0),
     ("MeleeArc", 1.0),
     ("ModernAim", 1.0),
+    ("DiegeticScope", 1.0),
     ("NPCFiniteAmmo", 1.0),
     ("NotesAutofill", 1.0),
     ("SmartBinoculars", 1.0),
@@ -103,6 +109,9 @@ pub const PRESET: &[(&str, f32)] = &[
     ("DdsItems", 1.0),
     ("DdsWorld", 0.0),
     ("VisAttach", 1.0),
+    ("ConfixFixes", 1.0),
+    // Transcended's bug fixes (its bigger changes stay as the player set them).
+    ("TranscendedFixes", 1.0),
 ];
 
 /// The visual mods' settings and the mod each needs.
@@ -114,6 +123,7 @@ const MOD_KEYS: &[(&str, &str)] = &[
     ("DdsItems", "helios"),
     ("DdsWorld", "helios"),
     ("VisAttach", "visibleattachments"),
+    ("ConfixFixes", "confix"),
 ];
 
 /// Keys that only exist with a mod installed (left alone without it).
@@ -133,6 +143,20 @@ pub fn is_modern() -> bool {
     let keys: Vec<&str> = PRESET.iter().map(|p| p.0).filter(|k| applies(k)).collect();
     let on = keys.iter().filter(|k| crate::settings::get(k) > 0.0).count();
     on * 2 > keys.len()
+}
+
+/// Playing Modern with a settings file from before a feature joined the preset: the new feature is on (in memory
+/// until a menu saves), as it would have been had the switch been made after it existed. Only keys the file doesn't
+/// mention at all - a feature the player turned off stays off.
+pub fn fill_new_modern_keys() {
+    if !crate::settings::has("ModernMode") || !is_modern() {
+        return;
+    }
+    for (k, v) in PRESET {
+        if !crate::settings::has(k) && applies(k) {
+            crate::settings::set(k, *v);
+        }
+    }
 }
 
 /// The values a switch gives: (key, value) for every covered setting, and the memory to keep ("Modern.<key>",
@@ -268,6 +292,11 @@ impl Plugin for RemasterPlugin {
 /// prepass, MSAA off, new materials). The frozen frame stays up until they're ready, so nothing pops in.
 static WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Render pipelines still compiling (last render frame).
+pub fn pipelines_waiting() -> usize {
+    WAITING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn count_waiting(cache: Res<bevy::render::render_resource::PipelineCache>) {
     WAITING.store(cache.waiting_pipelines().count(), std::sync::atomic::Ordering::Relaxed);
 }
@@ -341,7 +370,7 @@ pub fn wipe_system(
         Phase::Idle => {
             // DXVIEW_REMASTER_AT=secs: (test shots) switch once at that time.
             // DXVIEW_REMASTER_AT="secs,secs,...": (tests) switch at those game times.
-            let auto = std::env::var("DXVIEW_REMASTER_AT").ok().is_some_and(|v| {
+            let auto = env_val!("DXVIEW_REMASTER_AT").map(str::to_owned).is_some_and(|v| {
                 static DONE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                 let times: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                 let i = DONE.load(std::sync::atomic::Ordering::Relaxed);
@@ -356,7 +385,7 @@ pub fn wipe_system(
                 && !crate::inventory_screen::screen_open()
                 && !crate::computers::open()
                 && !crate::credits::open();
-            if auto && std::env::var_os("DXVIEW_REMASTER_NOWIPE").is_some() {
+            if auto && env_on!("DXVIEW_REMASTER_NOWIPE") {
                 eprintln!("REMASTER switch (no wipe)");
                 let _ = switch(!is_modern());
                 return;

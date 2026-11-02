@@ -43,6 +43,7 @@ It runs as a native Windows program and on Steam Deck / Linux, with no old engin
     Settings;
   - **Visible Attachments** (scopes, lasers and silencers drawn on the weapons);
   - **Augmentique** (outfits for JC and the people of the world, and weapon skins);
+  - **Confix** (corrected conversations and speech);
   - **GMDX: Augmented Edition** (perks bought with skill points on the Skills screen, and its fixes and
     quality-of-life options);
   - **Helios** texture packs (repainted characters, items and world);
@@ -69,7 +70,10 @@ It runs as a native Windows program and on Steam Deck / Linux, with no old engin
     under the dead, bloodier gibs), wound marks, hurt poses and limps, and coat tails that ripple as people move.
 - **Modern play (all optional):**
   - Modern Aiming: the aim sways within the accuracy cone (wide when untrained, steady when you master the
-    weapon or hold still) and the crosshair and gun follow it, with aim-down-sights on guns;
+    weapon or hold still) and the crosshair and gun follow it, with aim-down-sights on guns (lined up on the
+    original weapon models as well as HDTP's);
+  - a diegetic rifle scope: the zoomed view is a live lens with a reticle in front of the eye, the world still
+    around it, wandering under the reticle until you master the rifle;
   - a third-person camera (free orbit or over the shoulder), mantling, carried objects as cover, ladder grabbing;
   - Smarter AI (GMDX's tougher guards, sharper senses, suppressive fire, guards who call out and check on
     disturbances) with optional alert markers over their heads;
@@ -119,8 +123,10 @@ It runs as a native Windows program and on Steam Deck / Linux, with no old engin
    [HDTP](https://www.moddb.com/mods/project-hdtp),
    [New Vision](https://www.moddb.com/mods/deus-ex-new-vision),
    [Augmentique](https://www.moddb.com/mods/augmentique),
-   [GMDX](https://www.moddb.com/mods/gmdx) (Augmented Edition), Visible Attachments, Helios and Precipitation.
-2. On the launcher's **Mods** page, click a mod's button and choose its folder. Right-click it to turn it off again.
+   [GMDX](https://www.moddb.com/mods/gmdx) (Augmented Edition), [Confix](https://www.moddb.com/mods/confix),
+   Visible Attachments, Helios and Precipitation.
+2. On the launcher's **Mods** page, click *Mod Assets Folder...* and choose the folder holding them all (each mod in
+   its own folder inside it), or click a mod's own button and choose its folder. Right-click to turn one off again.
 3. For Lay D Denton, start a new game and use the portrait arrows: every other face is the female JC. Tick
    *Original Morpheus?* or *Original Interactions?* if you want the original versions of those.
 4. HDTP's models, New Vision's textures and Helios's repaints can be switched on and off in
@@ -153,18 +159,21 @@ On Windows, `BUILD_RELEASE.bat` makes a shareable `dist\` folder.
 The whole game is implemented. Before 1.0:
 - a full playthrough, with fixes for whatever it finds;
 - tuning by eye (water, a few intro effects);
-- more performance work on the render thread (Modern with every mod runs about 41 fps on an RTX 3050);
+- more performance work on the render thread (Modern with every mod runs about 70 fps on a Ryzen 5 3600 and RTX 3050);
 - Steam Deck tuning;
 - save round-trip tests on every map.
 
 Much of the v2.0 list is already in (the Classic / Modern switch, real-time shadows, weather, modern water,
 third person, Smarter AI, achievements, skeletal characters, ragdolls, fluid blood and remastered lighting with
 relief maps). Still to come: aim and head-turning layered on the skeletal bodies, and multiplayer, among others.
-Every item stays optional. A GPU pass took Modern from about 32 to 47 fps on an RTX 3050, and a CPU pass (for
-slower and many-core processors, where the game's own threads were the limit) took the default settings on a
-Ryzen 5 3600 from 72 to 98 fps, nearly halving the main thread's work. If your frame rate sits at exactly 30, the
-frame is just over VSync's 60 fps budget: try turning off *Vertical Sync* (Settings > Display). On a CPU with many
-cores, also try *Settings > Enhancements > Display: CPU Worker Threads*.
+Every item stays optional. Four performance passes so far: a GPU pass took Modern from about 32 to 47 fps on an
+RTX 3050; a CPU pass (for slower and many-core processors, where the game's own threads were the limit) took the
+default settings on a Ryzen 5 3600 from 72 to 98 fps; a GPU-driven drawing pass (bindless materials and
+multi-draw, GPU culling, rain and water moved by shaders) cut the draw calls by three quarters and took Modern with
+every mod from 41 to about 70 fps; and an allocation pass (mimalloc, per-system allocation counts, buffers reused
+instead of rebuilt every frame) cut the game's own per-frame heap allocations from thousands to a few hundred at most. If your frame rate sits at exactly 30, the frame is just over VSync's 60 fps
+budget: try turning off *Vertical Sync* (Settings > Display). On a CPU with many cores, also try
+*Settings > Enhancements > Display: CPU Worker Threads*.
 
 The full list is in [ROADMAP.md](ROADMAP.md). Bug reports from playthroughs are very welcome: say which map you
 were on and what you did.

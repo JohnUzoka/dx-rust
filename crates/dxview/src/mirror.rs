@@ -19,6 +19,20 @@ use bevy::shader::ShaderRef;
 pub const LAYER: usize = 5;
 /// Render layer of JC's own body: seen by the reflection camera only (first person has no body to see).
 pub const BODY_LAYER: usize = 6;
+/// The level's own surfaces (BSP and movers) carry this layer as well as 0: water reflections draw only these, the sky
+/// and JC - not the hundreds of decorations, pickups and people, which cost the render thread a whole second pass
+/// over every mesh for what a wavy, dark reflection hardly shows. Mirrors keep everything.
+pub const WORLD_LAYER: usize = 16;
+
+/// The layers a reflection camera draws: everything for a mirror, the level's surfaces for water.
+fn reflect_layers(water: bool) -> RenderLayers {
+    let first = if water { WORLD_LAYER } else { 0 };
+    if crate::skyfollow::enabled() {
+        RenderLayers::from_layers(&[first, BODY_LAYER, crate::skyfollow::LAYER])
+    } else {
+        RenderLayers::from_layers(&[first, BODY_LAYER])
+    }
+}
 
 pub type MirrorMaterial = ExtendedMaterial<StandardMaterial, MirrorExt>;
 
@@ -113,7 +127,6 @@ pub struct Mirrors {
 #[derive(Component)]
 pub struct MirrorCam(pub usize, pub bool);
 
-static WATER_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// The render target the reflection is drawn into (the window's size).
 pub fn make_image(images: &mut Assets<Image>, size: UVec2) -> Handle<Image> {
@@ -160,7 +173,7 @@ pub fn material(
             reflection: image,
             params: Vec4::new(
                 0.0,
-                if translucent && std::env::var("DXVIEW_MIRROR_ONLY").is_err() { 1.0 } else { 0.0 },
+                if translucent && !env_on!("DXVIEW_MIRROR_ONLY") { 1.0 } else { 0.0 },
                 0.0,
                 0.0,
             ),
@@ -270,15 +283,16 @@ pub fn spawn_camera(commands: &mut Commands, mirrors: &Mirrors) {
                 // a second set of every material's pipelines).
                 bevy::render::view::Msaa::Off,
             ));
+            // One light cluster for a reflection (a third of the window's size): clustering a whole extra view
+            // each frame cost the render thread more than the few lights it sorts.
+            e.insert(bevy::light::cluster::ClusterConfig::Single);
             if sky {
-                e.insert((RenderLayers::layer(1), bevy::light::cluster::ClusterConfig::Single));
-            } else if crate::skyfollow::enabled() {
-                // The sky room comes with the world (skyfollow.rs: the copies sit kilometres out, so the few metres
+                e.insert(RenderLayers::layer(1));
+            } else {
+                // With skyfollow the sky room comes with the world (the copies sit kilometres out, so the few metres
                 // between the eye and its reflection don't show): this camera clears and draws them, and the
                 // slot's sky camera stays off - one whole view less per reflection.
-                e.insert(RenderLayers::from_layers(&[0, BODY_LAYER, crate::skyfollow::LAYER]));
-            } else {
-                e.insert(RenderLayers::from_layers(&[0, BODY_LAYER]));
+                e.insert(reflect_layers(false));
             }
         }
     }
@@ -294,7 +308,7 @@ pub fn mirror_system(
     mut mats: ResMut<Assets<MirrorMaterial>>,
     main: Query<(&Transform, &Projection), (With<crate::FlyCam>, Without<crate::SkyCam>, Without<MirrorCam>)>,
     sky_main: Query<&Projection, (With<crate::SkyCam>, Without<MirrorCam>)>,
-    mut cams: Query<(&MirrorCam, &mut Camera, &mut Transform, &mut Projection, &mut RenderTarget)>,
+    mut cams: Query<(&MirrorCam, &mut Camera, &mut Transform, &mut Projection, &mut RenderTarget, &mut RenderLayers)>,
     mut water_mats: ResMut<Assets<crate::water::WaterMaterial>>,
 ) {
     if mirrors.planes.is_empty() {
@@ -374,8 +388,8 @@ pub fn mirror_system(
         seen_water = true;
         keep
     });
-    // DXVIEW_MIRROR_SLOTS=n: at most n reflections (performance comparisons).
-    let max = std::env::var("DXVIEW_MIRROR_SLOTS").ok().and_then(|v| v.parse().ok()).unwrap_or(SLOTS).min(SLOTS);
+    // At most two reflections at once (each is the whole scene drawn again); DXVIEW_MIRROR_SLOTS=n for comparisons.
+    let max = env_val!("DXVIEW_MIRROR_SLOTS").map(str::to_owned).and_then(|v| v.parse().ok()).unwrap_or(2).min(SLOTS);
     near.truncate(max);
     let want: Vec<usize> = near.iter().map(|x| x.0).collect();
     // DXVIEW_PROF: a line when the reflected planes change, for the pop-in check. A plane gets a reflection only within 40 m
@@ -426,12 +440,14 @@ pub fn mirror_system(
             // The nearest reflection at full resolution, the others at half (they're farther and smaller on screen).
             // Water's waves hide resolution: a third.
             let water = mirrors.slots[k].plane.is_some_and(|p| mirrors.planes[p].water);
+            // (Performance: a full-resolution second view of a busy room halved the frame rate; two thirds is
+            // hard to tell apart in a mirror, the others a third.)
             let size = if water {
                 (full / 3).max(UVec2::ONE)
             } else if mirrors.slots[k].plane.is_some() && mirrors.slots[k].plane == nearest {
-                full
+                (full * 2 / 3).max(UVec2::ONE)
             } else {
-                (full / 2).max(UVec2::ONE)
+                (full / 3).max(UVec2::ONE)
             };
             if mirrors.slots[k].plane.is_some() && mirrors.slots[k].size != size {
                 let img = make_image(&mut images, size);
@@ -474,17 +490,17 @@ pub fn mirror_system(
             }
         }
     }
-    WATER_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    for (mc, mut cam, mut tf, mut proj, mut target) in &mut cams {
+    for (mc, mut cam, mut tf, mut proj, mut target, mut layers) in &mut cams {
         let slot = &mirrors.slots[mc.0.min(SLOTS - 1)];
         let (Some(pi), Some(img)) = (slot.plane, slot.image.clone()) else {
             cam.is_active = false;
             continue;
         };
-        // Water re-renders its reflection every other frame (two extra views of the whole scene were ~3 ms of the
-        // render thread; the waves hide a frame's lag). Mirrors every frame.
-        let half_rate = mirrors.planes[pi].water && std::env::var_os("DXVIEW_WATER_FULLRATE").is_none();
-        cam.is_active = !half_rate || WATER_FRAME.load(std::sync::atomic::Ordering::Relaxed) % 2 == 0;
+        // Every frame: a camera switched off and on again loses the level's GPU-culled surfaces (gpudrive.rs), and
+        // rendering water every other frame bought nothing measurable on the PC.
+        if !cam.is_active {
+            cam.is_active = true;
+        }
         if !matches!(&*target, RenderTarget::Image(t) if t.handle == img) {
             *target = img.into();
         }
@@ -511,11 +527,15 @@ pub fn mirror_system(
             continue;
         }
         *tf = look;
+        let want = reflect_layers(p.water);
+        if *layers != want {
+            *layers = want;
+        }
         // Oblique near plane on the mirror: keep only what is on the viewer's side of it (n.x - d >= 0), written in
         // this camera's view space: (view-space n, -distance from the plane).
         let nv = (tf.rotation.inverse() * n).normalize();
         *proj = Projection::Perspective(PerspectiveProjection {
-            near_clip_plane: if std::env::var("DXVIEW_MIRROR_NOCLIP").is_ok() {
+            near_clip_plane: if env_on!("DXVIEW_MIRROR_NOCLIP") {
                 main_proj.near_clip_plane
             } else {
                 // A unit (2 cm) past the mirror, so faces lying in its plane (the floor around a mirrored patch,
@@ -523,12 +543,13 @@ pub fn mirror_system(
                 // stripes along the clip plane.
                 nv.extend(-(dist + MIRROR_CLIP_EPS))
             },
+            // A mirror shows the room it's in: nothing past 60 m behind it is drawn (water reflects the sky line,
+            // so keeps the full distance).
+            far: if p.water { main_proj.far } else { main_proj.far.min(dist + 60.0) },
             ..main_proj.clone()
         });
     }
 }
-
-pub fn reset_level() {}
 
 /// JC as the mirrors show him: GM_Trench with his skins (JCDentonMale), standing where the player is, facing the
 /// view yaw, playing BreatheLight / Walk / Run / Crouch / CrouchWalk by what the player is doing. Only the
@@ -587,7 +608,7 @@ pub fn mirror_body_system(
 ) {
     // Something else shows JC (conversation puppet, death), or no mirror reflecting: hide.
     // DXVIEW_MIRROR_BODY=1: show him under a flying camera too (screenshot tests).
-    let test = std::env::var("DXVIEW_MIRROR_BODY").is_ok();
+    let test = env_on!("DXVIEW_MIRROR_BODY");
     // Augmentique's outfits screen shows him too (outfit_view.rs).
     let outfits = crate::outfit_view::open();
     // Third person (thirdperson.rs): the main camera draws him too.
@@ -643,14 +664,14 @@ pub fn mirror_body_system(
                 });
             }
             None => {
-                if std::env::var("DXVIEW_BODYLOG").is_ok() {
+                if env_on!("DXVIEW_BODYLOG") {
                     println!("mirror body: no mesh {}", crate::travel::jc_mesh());
                 }
                 commands.entity(root).despawn();
                 return;
             }
         }
-        if std::env::var("DXVIEW_BODYLOG").is_ok() {
+        if env_on!("DXVIEW_BODYLOG") {
             println!("mirror body: built {}", crate::travel::jc_mesh());
         }
     }
@@ -662,7 +683,7 @@ pub fn mirror_body_system(
     // FlyCam yaw 0 looks along Bevy -Z (Unreal -Y): JC's Unreal yaw is the view's.
     let mut ue_yaw = -(yaw as f64) - std::f64::consts::FRAC_PI_2;
     // DXVIEW_BODY_AHEAD="units,degrees": (test shots) the body that far in front of the fly camera, turned by that.
-    let ahead = std::env::var("DXVIEW_BODY_AHEAD").ok().and_then(|v| {
+    let ahead = env_val!("DXVIEW_BODY_AHEAD").map(str::to_owned).and_then(|v| {
         let (a, b) = v.split_once(',')?;
         Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))
     });
@@ -763,14 +784,14 @@ pub fn mirror_body_system(
         ("BreatheLight", true, 1.0)
     };
     // DXVIEW_BODY_SEQ=<sequence>: loop that one (screenshots of the third-person body).
-    let forced = std::env::var("DXVIEW_BODY_SEQ").ok();
+    let forced = env_val!("DXVIEW_BODY_SEQ").map(str::to_owned);
     let (want, looped, rate_k) = match forced.as_deref() {
         Some(f) => (f, true, 1.0),
         None => (want, looped, rate_k),
     };
     // Aim pose: frame 0 of Shoot / CrouchShoot held while aiming and not firing.
     let aim_pose = aiming && !firing && (!moving || player.crouched) && !falling && !player.swimming;
-    if std::env::var_os("DXVIEW_BODYLOG").is_some() {
+    if env_on!("DXVIEW_BODYLOG") {
         static T: std::sync::Mutex<f32> = std::sync::Mutex::new(0.0);
         if let Ok(mut t) = T.lock() {
             *t += time.delta_secs();

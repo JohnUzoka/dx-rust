@@ -345,7 +345,7 @@ pub struct Link {
 pub struct ConState {
     /// The next conversation started is a forced (cut scene) one.
     force_next: bool,
-    db: ConDb,
+    db: std::sync::Arc<ConDb>,
     sys_dir: PathBuf,
     pub mission: i32,
     pub location: String,
@@ -433,6 +433,59 @@ pub fn conversing(blocker: usize) -> Option<Option<DVec3>> {
         s.actors.get(&Who::Player).map(|a| a.pos)
     };
     Some(look)
+}
+
+/// Where each pawn in the conversation playing turns its head (ours, for the rebuilt bodies; blocker -> eye point,
+/// Unreal): the one speaking looks at whoever it speaks to, everyone else at the one speaking (the player's
+/// lines included).
+pub fn look_targets(out: &mut Vec<(usize, DVec3)>) {
+    out.clear();
+    let g = lock();
+    let Some(s) = g.as_ref() else { return };
+    let Some(p) = s.play.as_ref() else { return };
+    let eye = |w: Who| s.actors.get(&w).map(|a| a.pos + DVec3::Z * a.eye);
+    let speaker = p.speaker;
+    for (w, a) in &s.actors {
+        let Who::Actor(b) = *w else { continue };
+        if !a.pawn {
+            continue;
+        }
+        let involved = p.invoke == *w || speaker == Some(*w) || p.speaking_to == Some(*w) || s.speaks_in(p.con, *w);
+        if !involved {
+            continue;
+        }
+        let at = if speaker == Some(*w) {
+            p.speaking_to.and_then(eye).or_else(|| eye(Who::Player))
+        } else {
+            speaker.and_then(eye).or_else(|| eye(Who::Player))
+        };
+        if let Some(t) = at {
+            out.push((b, t));
+        }
+    }
+}
+
+/// The conversation database, parsed once per session (every map used to parse all of DeusExConText.u again:
+/// 100-180 ms on each arrival). Keyed by the file found (Confix's own when Confix Fixes is on).
+/// Parses the conversations on a thread of their own at start-up (100-180 ms on the first map otherwise).
+pub fn warm_db(sys: PathBuf) {
+    std::thread::spawn(move || {
+        let _ = cached_db(&sys);
+    });
+}
+
+fn cached_db(sys: &std::path::Path) -> Option<std::sync::Arc<ConDb>> {
+    static DB: Mutex<Option<(PathBuf, std::sync::Arc<ConDb>)>> = Mutex::new(None);
+    let path = unreal_pkg::paths::find_ci(sys, "DeusExConText.u")?;
+    let mut g = DB.lock().ok()?;
+    if let Some((p, db)) = g.as_ref() {
+        if *p == path {
+            return Some(db.clone());
+        }
+    }
+    let db = std::sync::Arc::new(ConDb::load(sys)?);
+    *g = Some((path, db.clone()));
+    Some(db)
 }
 
 /// EBarkModes.
@@ -993,12 +1046,13 @@ impl Link {
 
 impl ConState {
     fn new(
-        db: ConDb,
+        db: impl Into<std::sync::Arc<ConDb>>,
         sys_dir: PathBuf,
         mission: i32,
         location: String,
         classes: &mut unreal_pkg::classes::ClassDb,
     ) -> ConState {
+        let db: Arc<ConDb> = db.into();
         let mut owners: HashMap<String, Vec<usize>> = HashMap::new();
         for &i in db.missions.get(&mission).into_iter().flatten() {
             owners
@@ -1485,6 +1539,18 @@ impl ConState {
 
     /// DataLinkPlay.AbortAndSaveHistory: run the rest silently.
     fn abort_link_saving_history(&mut self, flags: &mut FlagBase) {
+        self.abort_one_link(flags);
+        // Transcended: the queued infolinks' events run too (flags, triggers, transfers) instead of waiting.
+        if crate::transcended::fixes() {
+            let mut guard = 0;
+            while self.link.is_some() && guard < 16 {
+                guard += 1;
+                self.abort_one_link(flags);
+            }
+        }
+    }
+
+    fn abort_one_link(&mut self, flags: &mut FlagBase) {
         let Some(l) = self.link.as_mut() else { return };
         l.silent = true;
         crate::sound::stop(crate::sound::PLAYER, crate::sound::slot::TALK);
@@ -1918,9 +1984,12 @@ impl ConState {
                             512.0 + p.initial_radius as f32
                         };
                         let mut at = if sw == Some(Who::Player) { None } else { pos };
-                        // bForcePlay: heard through the player when the speaker is over 400 units away.
+                        // bForcePlay: heard through the player when the speaker is over 400 units away. Ours: always
+                        // through the player in a cut scene - from the speaker, Sound Occlusion muffled Bob Page's
+                        // line behind the clone tank's glass in the intro.
                         let mut owner = owner;
-                        if p.forced && at.is_some_and(|q| q.distance(player_pos) > 400.0) {
+                        let _ = player_pos;
+                        if p.forced && at.is_some() {
                             at = None;
                             owner = crate::sound::PLAYER;
                         }
@@ -2367,11 +2436,11 @@ fn wav_seconds(b: &[u8]) -> Option<f32> {
     }
     None
 }
-
 /// Actors the player can see this frame (CanActorSeePlayer), filled by the update.
 static SIGHT: Mutex<Vec<Who>> = Mutex::new(Vec::new());
 /// Inventory classes the player carries (for CheckObject), refreshed each frame.
 static HAS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static HAS_SIG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Credits added by conversations, applied to the inventory by the update.
 static CREDITS: Mutex<i32> = Mutex::new(0);
 /// Infolinks finished this frame (their _Played flag is set by the update, which holds the flags).
@@ -2529,7 +2598,7 @@ pub fn consys_system(
         let location = info
             .map(|a| sv(&a.props, "MissionLocation"))
             .unwrap_or_default();
-        match ConDb::load(&sys) {
+        match cached_db(&sys) {
             Some(db) => {
                 println!(
                     "consys: {} conversations, mission {} lists {}",
@@ -2655,7 +2724,17 @@ pub fn consys_system(
                 && !n.knocked_out
                 && blockers.list.get(n.blocker).is_some_and(|c| c.radius > 0.0);
             a.hostile = n.hates("Player");
-            a.busy = !matches!(n.state, NpcState::Idle) || n.on_fire.is_some();
+            // ScriptedPawn.CanConverse / CanConverseWithPlayer: every state takes a conversation except the ones
+            // that clear bInterruptState (TakingHit, Stunned, RubbingEyes, Dying) and Fleeing from a live enemy that
+            // isn't the player (the cowering subway hostages are Fleeing, and talk once the terrorists are dead).
+            let fleeing_other = n.state == NpcState::Fleeing
+                && matches!(n.target, Some(crate::ai::Target::Pawn(t))
+                    if t != n.blocker && blockers.list.get(t).is_some_and(|c| c.radius > 0.0));
+            a.busy = matches!(
+                n.state,
+                NpcState::TakingHit(_) | NpcState::Stunned(_) | NpcState::RubbingEyes(_) | NpcState::Dead
+            ) || fleeing_other
+                || n.on_fire.is_some();
             a.yaw = n.yaw;
             if a.base_eye != 0.0 {
                 a.eye = if n.sitting { a.base_eye + a.ass * 0.5 } else { a.base_eye };
@@ -2663,8 +2742,8 @@ pub fn consys_system(
         }
     }
     // Line of sight from the eye to each actor with conversations near enough to matter.
-    {
-        let mut seen = Vec::new();
+    if let Ok(mut seen) = SIGHT.lock() {
+        seen.clear();
         for (w, a) in &st.actors {
             if *w == Who::Player || a.pos.distance(eye_pos) > 1200.0 {
                 continue;
@@ -2673,15 +2752,27 @@ pub fn consys_system(
                 seen.push(*w);
             }
         }
-        *SIGHT.lock().unwrap() = seen;
     }
-    *HAS.lock().unwrap() = inv
-        .0
-        .items
-        .iter()
-        .map(|i| i.def.class.clone())
-        .chain(inv.0.ammo.iter().filter(|a| a.1 > 0).map(|a| a.0.clone()))
-        .collect();
+    // What the player carries (conditions on items): rebuilt only when that changed (a hash of it, no copies).
+    let has_sig = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for i in &inv.0.items {
+            i.def.class.hash(&mut h);
+        }
+        for a in inv.0.ammo.iter().filter(|a| a.1 > 0) {
+            a.0.hash(&mut h);
+        }
+        h.finish()
+    };
+    if HAS_SIG.swap(has_sig, std::sync::atomic::Ordering::Relaxed) != has_sig {
+        if let Ok(mut has) = HAS.lock() {
+            has.clear();
+            has.extend(
+                inv.0.items.iter().map(|i| i.def.class.clone()).chain(inv.0.ammo.iter().filter(|a| a.1 > 0).map(|a| a.0.clone())),
+            );
+        }
+    }
 
     let fl = &mut flags.0;
 
@@ -2700,6 +2791,15 @@ pub fn consys_system(
         .map(|mut q| std::mem::take(&mut *q))
         .unwrap_or_default()
     {
+        // Transcended: no bark with the head under water (scuba divers excepted).
+        if crate::transcended::fixes() {
+            if let Some(a) = st.actors.get(&Who::Actor(b)) {
+                let head = a.pos + DVec3::Z * a.eye;
+                if !fold(&a.bind).contains("scuba") && crate::actors::water_at(lvl, head).is_some() {
+                    continue;
+                }
+            }
+        }
         st.start_bark(
             fl,
             &|a, b| lvl.collision.trace(a, b, DVec3::ZERO).fraction >= 1.0,
@@ -2718,7 +2818,7 @@ pub fn consys_system(
             .filter(|(w, a)| {
                 **w != Who::Player
                     && a.alive
-                    && st.owners.contains_key(&fold(&a.bind))
+                    && crate::util::with_lower(&a.bind, |k| st.owners.contains_key(k))
                     && a.pos.distance(me) < 600.0
             })
             .map(|(w, _)| *w)
@@ -3293,7 +3393,7 @@ mod tests {
     use super::*;
 
     fn state() -> Option<ConState> {
-        let root = std::env::var("CON_GAME").ok()?;
+        let root = env_val!("CON_GAME").map(str::to_owned)?;
         let sys = std::path::Path::new(&root).join("System");
         let db = ConDb::load(&sys)?;
         let mut classes = unreal_pkg::classes::ClassDb::open(&sys);
@@ -3507,6 +3607,7 @@ pub fn reset_level() {
     if let Ok(mut v) = HAS.lock() {
         v.clear();
     }
+    HAS_SIG.store(0, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut v) = PLAYED.lock() {
         v.clear();
     }

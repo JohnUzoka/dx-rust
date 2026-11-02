@@ -44,7 +44,7 @@ pub fn emissive_on() -> bool {
 }
 
 /// The settings that are built into the level's materials (a change reloads the map when switched in play).
-pub const RELOAD_KEYS: &[&str] = &["RemasteredLighting", "ReliefMaps", "MaterialSpecular", "EmissiveSurfaces"];
+pub const RELOAD_KEYS: &[&str] = &["RemasteredLighting", "ReliefMaps", "MaterialSpecular", "EmissiveSurfaces", "ModernGlass"];
 
 /// What a surface is made of, by its texture's name ("Package.Group.Name").
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -142,19 +142,54 @@ fn mip_image(w: u32, h: u32, mips: &[Vec<u8>]) -> Image {
 
 /// Put a level texture's relief maps on its material (normal map; with parallax, the depth map). Returns whether
 /// it got a normal map (its meshes then need tangents).
+/// How deep relief maps look (Unreal units).
+const RELIEF_DEPTH: f32 = 2.5;
+
 pub fn apply_relief(m: &mut StandardMaterial, t: &dx_level::TextureImage, images: &mut Assets<Image>) -> bool {
+    if relief_level() == 0 {
+        return false;
+    }
+    apply_relief_maps(m, t, dx_level::relief::maps_for(t, true), images)
+}
+
+/// The relief maps of many textures at once, on every core (reading / generating them one by one took seconds
+/// of each map's load with HD textures). None when relief maps are off.
+pub fn relief_maps_parallel(textures: &[dx_level::TextureImage], wanted: &[usize]) -> std::collections::HashMap<usize, dx_level::relief::Relief> {
+    let mut out = std::collections::HashMap::new();
+    if relief_level() == 0 || wanted.is_empty() {
+        return out;
+    }
+    let n = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 12);
+    let chunk = wanted.len().div_ceil(n).max(1);
+    std::thread::scope(|sc| {
+        let jobs: Vec<_> = wanted
+            .chunks(chunk)
+            .map(|c| sc.spawn(move || c.iter().filter_map(|&i| dx_level::relief::maps_for(&textures[i], true).map(|r| (i, r))).collect::<Vec<_>>()))
+            .collect();
+        for j in jobs {
+            out.extend(j.join().unwrap_or_default());
+        }
+    });
+    out
+}
+
+/// `apply_relief` with the maps already made.
+pub fn apply_relief_maps(m: &mut StandardMaterial, t: &dx_level::TextureImage, r: Option<dx_level::relief::Relief>, images: &mut Assets<Image>) -> bool {
     let lvl = relief_level();
     if lvl == 0 {
         return false;
     }
-    let Some(r) = dx_level::relief::maps_for(t, true) else { return false };
+    let Some(r) = r else { return false };
     m.normal_map_texture = Some(images.add(mip_image(r.width, r.height, &r.normal)));
     if lvl >= 2 {
         if let Some(d) = r.depth.as_ref() {
             m.depth_map = Some(images.add(mip_image(r.width, r.height, d)));
-            m.parallax_depth_scale = 0.035;
-            m.max_parallax_layer_count = 16.0;
-            m.parallax_mapping_method = bevy::pbr::ParallaxMappingMethod::Relief { max_steps: 4 };
+            // Bevy's depth is in texture coordinates, and a BSP texture repeats once per its size in Unreal units
+            // (a texel a unit): a fixed 0.035 was 9 units deep on a 256 wall and 36 on a 1024 one - the bricks slid
+            // and smeared as you moved. RELIEF_DEPTH units deep on every texture, as the addon's renderer shows it.
+            m.parallax_depth_scale = (RELIEF_DEPTH / t.width.max(16) as f32).clamp(0.001, 0.02);
+            m.max_parallax_layer_count = 24.0;
+            m.parallax_mapping_method = bevy::pbr::ParallaxMappingMethod::Relief { max_steps: 5 };
         }
     }
     true

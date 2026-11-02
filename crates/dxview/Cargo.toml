@@ -15,6 +15,7 @@ dx-level = { path = "../dx-level" }
 imsim-core = { path = "../imsim-core" }
 unreal-pkg = { path = "../unreal-pkg" }
 imsim-audio = { path = "../imsim-audio" }
+imsim-plants = { path = "../imsim-plants" }
 glam = "0.32"
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
@@ -41,6 +42,8 @@ raw-window-handle = "0.6"
 # stands in (src/horizon.rs). bevy stays in [dependencies] too: Bevy's derive macros look for it only there.
 [target.'cfg(not(target_os = "horizon"))'.dependencies]
 bevy = { version = "0.19.1", default-features = false, features = ["3d", "ui", "experimental_pbr_pcss"] }
+# The heap (alloc.rs): faster than the system allocators for many small allocations. On the Switch, bevy-horizon's.
+mimalloc = { version = "0.1", default-features = false }
 
 # Nintendo Switch: bevy-horizon checked out next to this repository; switch/build.sh builds the NRO.
 [target.'cfg(target_os = "horizon")'.dependencies]

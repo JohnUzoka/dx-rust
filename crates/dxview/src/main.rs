@@ -13,11 +13,16 @@ use bevy::{
     render::view::screenshot::{save_to_disk, Screenshot},
     window::{CursorGrabMode, CursorOptions},
 };
+#[macro_use]
+mod env;
+mod queue;
+mod util;
 mod abilities;
 mod weather;
 mod shadowlight;
 mod relight;
 mod threads;
+mod alloc;
 mod skyfollow;
 mod glow;
 mod vision;
@@ -127,10 +132,20 @@ mod skeletal;
 mod ragdoll;
 mod gore;
 mod bodyfx;
+mod healui;
+mod transcended;
 mod alertui;
+mod hudfade;
+mod upscale;
+mod grass;
+mod trees;
 mod uicanvas;
 mod weapons;
 mod wisp;
+mod gpudrive;
+mod scope;
+mod seethrough;
+mod glass;
 
 use actors::{Blockers, Deco, World};
 use dx_level::{bevy_to_ue, ue_to_bevy, Level, SurfaceClass};
@@ -232,7 +247,7 @@ struct ShotCfg {
 }
 
 fn shot_cfg() -> Option<ShotCfg> {
-    let v = std::env::var("DXVIEW_SHOT").ok()?;
+    let v = env_val!("DXVIEW_SHOT").map(str::to_owned)?;
     let mut views = Vec::new();
     for one in v.split('|') {
         let p: Vec<&str> = one.split(';').collect();
@@ -267,7 +282,7 @@ pub struct WalkTest {
 }
 
 fn walk_test_cfg() -> Option<WalkTest> {
-    let v = std::env::var("DXVIEW_WALKTEST").ok()?;
+    let v = env_val!("DXVIEW_WALKTEST").map(str::to_owned)?;
     let p: Vec<&str> = v.split(';').collect();
     let f = |i: usize| p.get(i).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
     Some(WalkTest {
@@ -369,7 +384,7 @@ pub struct DoorTest {
 }
 
 fn door_test_cfg() -> Option<DoorTest> {
-    let v = std::env::var("DXVIEW_DOORTEST").ok()?;
+    let v = env_val!("DXVIEW_DOORTEST").map(str::to_owned)?;
     let p: Vec<&str> = v.split(';').collect();
     let f = |i: usize| p.get(i).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
     Some(DoorTest {
@@ -480,7 +495,7 @@ fn timed_shot_system(
     mut exit: MessageWriter<AppExit>,
 ) {
     let cfg = cfg.get_or_insert_with(|| {
-        let v = std::env::var("DXVIEW_SHOT_TIMES").ok()?;
+        let v = env_val!("DXVIEW_SHOT_TIMES").map(str::to_owned)?;
         let (dir, ts) = v.split_once(';')?;
         Some((dir.to_string(), ts.split(',').filter_map(|t| t.trim().parse().ok()).collect()))
     });
@@ -565,7 +580,7 @@ fn main() {
     prof::init();
     // DXT1 textures go to the GPU compressed (desktop GPUs and the Steam Deck take BC formats; checked again once
     // the render device exists). DXVIEW_NO_BC1 decodes them as before.
-    dx_level::set_bc1_supported(std::env::var_os("DXVIEW_NO_BC1").is_none());
+    dx_level::set_bc1_supported(!env_on!("DXVIEW_NO_BC1"));
     let args: Vec<String> = std::env::args().collect();
     // The game folder: the first argument, else the launcher's choice (launcher.txt beside the exe), else the default.
     let root = args
@@ -588,10 +603,13 @@ fn main() {
     // Denton's older LDDPPath= still counts). Overlays (Lay D Denton) are laid over the game folder, addons searched
     // after it, HD texture packs used texture by texture. DXVIEW_MOD (';'-separated folders) adds overlays for tests.
     let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())).unwrap_or_default();
-    let mod_settings = unreal_pkg::mods::from_lines(&unreal_pkg::mods::read_launcher_txt(&exe_dir.join("launcher.txt")));
+    let launcher_lines = unreal_pkg::mods::read_launcher_txt(&exe_dir.join("launcher.txt"));
+    let mut mod_settings = unreal_pkg::mods::from_lines(&launcher_lines);
+    // ModAssets=<folder>: one folder holding every mod (the launcher's Mod Assets row).
+    unreal_pkg::mods::add_assets(&launcher_lines, &mut mod_settings);
     let mut enabled = unreal_pkg::mods::enabled(&mod_settings);
     // DXVIEW_NO_MODS=1: the launcher's mods are left out (profile runs of the plain game).
-    if std::env::var_os("DXVIEW_NO_MODS").is_some() {
+    if env_on!("DXVIEW_NO_MODS") {
         enabled.clear();
     }
     // DXVIEW_MODS="id=folder;id=folder": mods for test runs.
@@ -629,6 +647,7 @@ fn main() {
     }
     unreal_pkg::paths::set(&PathBuf::from(&root), mods);
     unreal_pkg::mods::activate(&enabled);
+    remaster::fill_new_modern_keys();
     // Relief maps (remastered lighting): the Parallax Maps mod's folder, the copy shipped beside the exe
     // (relief/), and packs installed in the game's Textures folder the DX11 renderer's way.
     {
@@ -649,8 +668,29 @@ fn main() {
         if n > 0 {
             println!("dxview: relief maps for {n} textures");
         }
+        // SecondRevision's height maps for New Vision's textures: only while New Vision's textures are on (they are
+        // made from them; SecondRevision's terms). Looked for where SecondRevision installs them and beside the exe.
+        if let Some(nv) = unreal_pkg::mods::active("newvision").filter(|_| settings::get("HDTextures") > 0.5) {
+            let game = PathBuf::from(&root);
+            let mut hdirs = vec![
+                game.join("Revision").join("NewVision").join("Textures"),
+                game.join("SecondRevision").join("heightmaps").join("NewVision"),
+                nv.join("Textures"),
+                nv.clone(),
+            ];
+            if let Some(exe) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("heightmaps").join("NewVision"))) {
+                hdirs.push(exe);
+            }
+            let n = dx_level::relief::set_heightmap_archives(&hdirs);
+            if n > 0 {
+                println!("dxview: SecondRevision height maps for {n} New Vision textures");
+            }
+        }
     }
     unreal_pkg::paths::set_hd_textures_on(settings::get("HDTextures") > 0.5);
+    unreal_pkg::paths::set_picks_on(settings::get("ConfixFixes") > 0.5);
+    consys::warm_db(PathBuf::from(&root).join("System"));
+    dx_level::skincolor::TR_FIXES.store(crate::transcended::fixes(), std::sync::atomic::Ordering::Relaxed);
     hdtp::apply_dds_filter();
     travel::init_lddp();
     hdtp::init(&PathBuf::from(&root));
@@ -664,7 +704,7 @@ fn main() {
         .unwrap_or_else(|| {
             // No map named: boot to the logo map and its main menu, like the original (DXVIEW_SKIP_MENU=1 goes
             // straight to Liberty Island as before).
-            if std::env::var("DXVIEW_SKIP_MENU").is_ok() || travel::session().is_some() {
+            if env_on!("DXVIEW_SKIP_MENU") || travel::session().is_some() {
                 "01_NYC_UNATCOIsland.dx".to_string()
             } else {
                 "DX.dx".to_string()
@@ -714,7 +754,7 @@ fn main() {
                     .copied()
                     .unwrap_or((1600, 900))
                     .into(),
-                mode: menus::window_mode(settings::get("DisplayMode")),
+                mode: menus::start_window_mode(settings::get("DisplayMode")),
                 present_mode: menus::present_mode(settings::get("VSync")),
                 ..default()
             }),
@@ -740,7 +780,10 @@ fn main() {
         .add_plugins(prof::ProfPhasePlugin)
         .insert_resource(make_player(&level, player_params(&PathBuf::from(&root))))
         .insert_resource(pickups::GameRoot(PathBuf::from(&root)))
-        .insert_resource(LevelRes(level))
+        .insert_resource({
+            dx_level::actors::set_zone_ambient(level.collision.zone_tree(), level.zone_ambient.clone());
+            LevelRes(level)
+        })
         .add_systems(PreStartup, |mut c: Commands| {
             if let Some(cfg) = shot_cfg() {
                 c.insert_resource(cfg);
@@ -759,7 +802,7 @@ fn main() {
         .add_systems(loader::LevelSetup, setup)
         .add_systems(Startup, (detect_bc1, loader::first_level_setup).chain())
         .add_systems(First, loader::loader_system.before(save::save_first_system))
-        .add_systems(Update, loader::loading_screen_system)
+        .add_systems(Update, (loader::settle_system, loader::loading_screen_system).chain())
         .add_systems(Startup, fps::spawn_fps_text)
         .add_systems(Update, fps::fps_system)
         .add_systems(
@@ -791,6 +834,7 @@ fn main() {
             Update,
             (
                 ai::attach_npcs,
+                ai::afflictions_system.after(ai::attach_npcs).before(ai::npc_system),
                 ai::npc_system.after(fly).after(ai::attach_npcs),
                 ai::player_health_ui,
                 ai::npc_weapon_models
@@ -879,7 +923,7 @@ fn main() {
         .add_systems(Startup, sound::setup_sound)
         .init_resource::<keybinds::Bindings>()
         .add_systems(Startup, (gamepad::setup, || dualsense::setup(), || haptics::setup()))
-        .add_systems(Update, (augwheel::augwheel_system, dualsense::dualsense_system, gamepad::rumble_system, prompts::prompts_system, winicon::window_icon_system))
+        .add_systems(Update, (augwheel::augwheel_system, dualsense::dualsense_system, gamepad::rumble_system, prompts::prompts_system, winicon::window_icon_system, menus::fullscreen_when_ready_system))
         .init_resource::<inventory_screen::InvScreen>()
         .init_resource::<destruct::ItemThrows>()
         .add_systems(
@@ -903,7 +947,7 @@ fn main() {
         )
         .add_systems(Update, keybinds::bind_menu_system.before(cursor_grab))
         .add_systems(Last, drop_texture_pixels.run_if(texture_pixels_due))
-        .add_systems(Last, (prof::prof_report_system, prof::scene_stats_system, prof::prof_ab_system, prof::prof_features_system, prof::mesh_owner_system, prof::camera_report_system, prof::bounds_report_system))
+        .add_systems(Last, (prof::prof_report_system, prof::scene_stats_system, prof::prof_ab_system, prof::prof_features_system, prof::mesh_owner_system, prof::camera_report_system, prof::bounds_report_system, prof::census_system))
         .init_resource::<consys::ConSetup>()
         .init_resource::<triggers::Triggers>()
         .init_resource::<logic::LogicActors>()
@@ -923,13 +967,19 @@ fn main() {
         .add_systems(Update, (augdisplay::augdisplay_system, augdisplay::vision_system, augdisplay::aug_text_system))
         .init_resource::<particles::Particles>()
         .add_systems(Update, particles::particle_system.after(devices::device_system).after(fixtures::fixture_system))
+        .add_systems(Update, particles::barrel_fire_system.before(particles::particle_system))
         .add_systems(Update, weather::weather_system.after(fly))
-        .add_systems(Update, (shadowlight::shadow_light_system.after(fly), shadowlight::tag_casters_system, shadowlight::no_transparent_shadows_system))
+        .add_systems(Update, (shadowlight::shadow_light_system.after(fly), shadowlight::tag_casters_system, shadowlight::assign_system.after(shadowlight::shadow_light_system).after(shadowlight::tag_casters_system), shadowlight::no_transparent_shadows_system))
         .add_systems(Update, fx::fx_system.after(fly))
         .add_systems(Update, thirdperson::toggle_system)
         .add_systems(Update, audiofx::soundscape_system)
         .add_systems(Update, (atmosphere::fog_system, atmosphere::halo_system.after(fly), skyline::skyline_system, clouds::clouds_system, clouds::lightning_sky_system.after(clouds::clouds_system), wisp::wisp_system.after(fly)))
         .add_systems(Update, alertui::alert_ui_system.after(ai::npc_system))
+        .add_systems(Update, hudfade::hud_fade_system)
+        .add_plugins(upscale::UpscalePlugin)
+        .add_plugins(grass::GrassPlugin)
+        .add_plugins(trees::TreesPlugin)
+        .add_systems(PostUpdate, upscale::upscale_system.before(bevy::camera::CameraUpdateSystems))
         .add_systems(Update, achievements::achievements_system.after(ai::npc_system))
         .add_systems(First, (diegetic::restore_system, thirdperson::restore_system).chain())
         .add_systems(PostUpdate, (thirdperson::place_system, diegetic::place_system).chain().before(bevy::transform::TransformSystems::Propagate).before(bevy::camera::CameraUpdateSystems))
@@ -937,8 +987,13 @@ fn main() {
         // the reflection was made from the eyes while the view was from the orbit: it dragged across the water).
         .add_systems(PostUpdate, mirror::mirror_system.after(diegetic::place_system).before(bevy::transform::TransformSystems::Propagate).before(bevy::camera::CameraUpdateSystems))
         .add_systems(Update, skyfollow::init_system)
+        .add_systems(Update, gpudrive::gpu_cull_system)
+        .add_systems(PostUpdate, weapons::view_glass_system.after(scope::scope_system).before(bevy::transform::TransformSystems::Propagate))
+        .add_systems(PostUpdate, scope::scope_system.after(mirror::mirror_system).before(gpudrive::refile_system).before(bevy::transform::TransformSystems::Propagate))
+        .add_systems(PostUpdate, gpudrive::refile_system.after(skyfollow::follow_system).after(mirror::mirror_system).before(bevy::camera::visibility::VisibilitySystems::CheckVisibility))
         .add_systems(PostUpdate, skyfollow::follow_system.after(mirror::mirror_system).before(bevy::transform::TransformSystems::Propagate).before(bevy::camera::CameraUpdateSystems))
         .add_systems(Update, diegetic::diegetic_system.after(computers::computer_system).after(menus::menu_system))
+        .add_systems(Update, diegetic::hide_glass_system.after(diegetic::diegetic_system))
         .add_systems(Update, (elements::shock_system.before(ai::npc_system), elements::fire_system.after(ai::npc_system)))
         .add_systems(Update, aimmode::aim_mode_system.after(hud::aim_system).before(weapons::weapon_system).before(hud::crosshair_system))
         .add_systems(Update, (eggs::matrix_system, eggs::warren_system))
@@ -987,6 +1042,9 @@ fn main() {
                 bodyfx::fp_body_system.after(skeletal::mirror_skel_system),
                 bodyfx::glow_system.after(bodyfx::fp_body_system),
                 bodyfx::heal_label_system,
+                healui::heal_ui_system.before(weapons::weapon_system),
+                transcended::weapon_pointing_system.before(ai::npc_system),
+                transcended::unconscious_death_system.after(explosion::explosion_system),
                 bodyfx::wounds_system.after(ai::npc_system),
             ),
         )
@@ -998,6 +1056,7 @@ fn main() {
         .add_plugins(bevy::pbr::MaterialPlugin::<shadowlight::BspMaterial>::default())
         .add_plugins(bevy::pbr::MaterialPlugin::<skeletal::ActorMaterial>::default())
         .add_plugins(bevy::pbr::MaterialPlugin::<weather::RainMaterial>::default())
+        .add_plugins(bevy::pbr::MaterialPlugin::<scope::GlassMaterial>::default())
         .init_resource::<water::WaterMats>()
         .init_resource::<gpuanim::GpuAnim>()
         .add_systems(Startup, (gpuanim::setup_anim_shader, mirror::setup_mirror_shader, water::setup_water_shader, clouds::setup_cloud_shader, shadowlight::setup_bsp_shader, skeletal::setup_shader, weather::setup_rain_shader, install_crash_log))
@@ -1033,6 +1092,7 @@ fn main() {
             (
                 dynlight::aug_light_system.after(fly),
                 dynlight::brightness_key_system,
+                dynlight::glow_lights_system.before(dynlight::dynlight_system),
                 dynlight::dynlight_system
                     .after(dynlight::aug_light_system)
                     .after(projectiles::projectile_system)
@@ -1278,6 +1338,7 @@ fn setup(
     let _prof = crate::prof::scope("main::setup");
     let mut water_list = water::WaterMats::default();
     let mut backing_mat: Option<Handle<StandardMaterial>> = None;
+    prof::load_mark("start");
     // The tessellated water sheets' vertices (the open sea's first band meets them vertex to vertex).
     let mut sheet_pts: Vec<[f32; 3]> = Vec::new();
     // Lean Rendering (perf.rs): Modern Water's fine sheets, dark backings and open sea are built only when Modern
@@ -1306,11 +1367,18 @@ fn setup(
         });
         images.add(img)
     });
-    let handles: Vec<Handle<Image>> = level
-        .textures
-        .iter()
-        .map(|t| images.add(make_image(t)))
-        .collect();
+    // The textures' GPU images, made on several threads (copying / decoding hundreds of mip chains was a good part
+    // of each map's load).
+    let made: Vec<Image> = {
+        let n = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8);
+        let chunk = level.textures.len().div_ceil(n).max(1);
+        std::thread::scope(|sc| {
+            let jobs: Vec<_> = level.textures.chunks(chunk).map(|c| sc.spawn(move || c.iter().map(make_image).collect::<Vec<Image>>())).collect();
+            jobs.into_iter().flat_map(|j| j.join().unwrap_or_default()).collect()
+        })
+    };
+    let handles: Vec<Handle<Image>> = made.into_iter().map(|i| images.add(i)).collect();
+    prof::load_mark("water list");
     // Remastered lighting (relight.rs): the bake's per-texel reach of each surface's three strongest lights, and
     // the light table.
     let relight_imgs: Option<(Handle<Image>, Handle<Image>)> = level
@@ -1318,6 +1386,7 @@ fn setup(
         .as_ref()
         .filter(|a| !a.mask.is_empty())
         .map(|a| (images.add(relight::mask_image(a)), images.add(relight::light_image(&a.lights))));
+    grass::build(&mut commands, level, lightmap_handle.clone());
     let mut relief_mats: std::collections::HashSet<AssetId<StandardMaterial>> = Default::default();
     let relief_t0 = std::time::Instant::now();
     let mut cache: std::collections::HashMap<
@@ -1326,6 +1395,36 @@ fn setup(
     > = Default::default();
     let mut scrollers = UvScroll::default();
 
+    prof::load_mark("relight bake tables");
+    // The water sheets, split fine enough to move with the swell (Modern Water's waves), with T-junctions mended
+    // across all of them (water::tessellate_sheets).
+    // (Flat: Modern Water's swell is carried by the wave grid, water::grid_mesh.)
+    let mask_ph = water::mask_placeholder(&mut images);
+    // Relief maps for every texture that can get one, made on all cores before the batches use them.
+    let relief_maps = {
+        let mut want: Vec<usize> = level
+            .batches
+            .iter()
+            .filter(|b| !b.sky && b.mirror.is_none() && matches!(b.class, SurfaceClass::Opaque | SurfaceClass::Masked))
+            .filter_map(|b| b.texture)
+            .collect();
+        want.sort_unstable();
+        want.dedup();
+        relight::relief_maps_parallel(&level.textures, &want)
+    };
+    // Modern Glass (glass.rs): frosted copies of the glass textures on translucent level and mover faces.
+    let glass_imgs = glass::images(
+        level,
+        level
+            .batches
+            .iter()
+            .filter(|b| b.class == SurfaceClass::Translucent && !b.sky && b.mirror.is_none())
+            .filter_map(|b| b.texture)
+            .chain(level.movers.iter().flat_map(|m| m.parts.iter()).filter(|p| p.class == SurfaceClass::Translucent).filter_map(|p| p.texture)),
+        &mut images,
+        &handles,
+    );
+    let mut glass_mats: std::collections::HashMap<usize, Handle<StandardMaterial>> = Default::default();
     for b in &level.batches {
         let mat = cache
             .entry((
@@ -1362,7 +1461,8 @@ fn setup(
                 if !b.sky && b.mirror.is_none() && matches!(b.class, SurfaceClass::Opaque | SurfaceClass::Masked) {
                     if let Some(t) = b.texture.map(|i| &level.textures[i]) {
                         if let Some(mut m) = materials.get_mut(&h) {
-                            if relight::apply_relief(&mut m, t, &mut images) {
+                            let r = b.texture.and_then(|i| relief_maps.get(&i).cloned());
+                            if relight::apply_relief_maps(&mut m, t, r, &mut images) {
                                 relief_mats.insert(h.id());
                             }
                         }
@@ -1381,15 +1481,13 @@ fn setup(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
         );
-        if b.class == SurfaceClass::Water && !b.sky && modern_water {
-            // Fine enough for the surface to move with the swell (Modern Water's waves).
-            let (p, n, u, u1, i) = water::tessellate(&b.positions, &b.normals, &b.uvs, &b.uvs1, &b.indices, 2.0);
-            sheet_pts.extend_from_slice(&p);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, p);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, n);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, u);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, u1);
-            mesh.insert_indices(Indices::U32(i));
+        if b.class == SurfaceClass::Water && !b.sky {
+            sheet_pts.extend_from_slice(&b.positions);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, b.positions.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, b.normals.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, b.uvs.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, b.uvs1.clone());
+            mesh.insert_indices(Indices::U32(b.indices.clone()));
         } else {
             // The open sea meets a Classic sheet at its own vertices (Open Sea, water.rs).
             if b.class == SurfaceClass::Water && !b.sky {
@@ -1413,13 +1511,22 @@ fn setup(
         // the mesh changed): water's materials and the scrolling textures' change every frame, so it walked every
         // vertex of those meshes every frame (1.6 million with the open sea - 3 ms of the main thread). Their
         // bounds are worked out once here instead (water with room for its waves).
-        let fixed_bounds = static_bounds(&mesh, if b.class == SurfaceClass::Water { 1.5 } else { 0.0 });
+        let fixed_bounds = static_bounds(&mesh, if b.class == SurfaceClass::Water { 2.5 } else { 0.0 });
+        let glass_img = (b.class == SurfaceClass::Translucent && !b.sky && b.mirror.is_none())
+            .then(|| b.texture.and_then(|i| glass_imgs.get(&i).map(|h| (i, h.clone()))))
+            .flatten();
         let mut e = match b.mirror {
+            // Modern Glass: a frosted pane.
+            _ if glass_img.is_some() => {
+                let (i, img) = glass_img.unwrap();
+                let gm = glass_mats.entry(i).or_insert_with(|| glass::material(&mut materials, img)).clone();
+                commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(gm), bevy::light::NotShadowCaster))
+            }
             // Water: the WetTexture source picture rippled by the water shader (water.rs).
             _ if b.class == SurfaceClass::Water && !b.sky => {
                 let base = materials.get(&mat).cloned().unwrap_or_default();
                 let ph = mirror::placeholder(&mut mirrors, &mut images);
-                let wm = water_mats.add(water::material(base, b.water_opaque, ph));
+                let wm = water_mats.add(water::material(base, b.water_opaque, ph, mask_ph.clone()));
                 water_list.mats.push(wm.clone());
                 water_list.opaque.push(b.water_opaque);
                 mirror::add_water(&mut mirrors, &wm, &b.positions);
@@ -1462,18 +1569,24 @@ fn setup(
                             bm.base.fog_enabled = false;
                         }
                         relight::params(b.texture.map(|i| level.textures[i].name.as_str()), &mut bm.extension.params);
+                        // DetailTexture (the Detail Textures setting switches it in the shader, q.z).
+                        if let Some(Some((d, scale))) = b.texture.and_then(|i| level.texture_detail.get(i)) {
+                            bm.extension.detail = Some(handles[*d].clone());
+                            bm.extension.params.q.y = *scale;
+                            bm.extension.params.q.z = if settings::get("DetailTextures") > 0.5 { 1.0 } else { 0.0 };
+                        }
                         if let Some((mask, lights)) = relight_imgs.as_ref() {
                             bm.extension.mask = Some(mask.clone());
                             bm.extension.lights = Some(lights.clone());
                         }
-                        let h = bsp_mats.add(bm);
+                        // Panning surfaces scroll in the shader (BspShadowParams.u), so the material never changes.
                         if let Some((_, speed, _)) = scrollers.0.iter().find(|(m, _, w)| m.id() == mat.id() && !*w) {
-                            scrollers.1.push((h.clone(), *speed));
+                            bm.extension.params.u = Vec4::new(speed.x, speed.y, 0.0, 0.0);
                         }
-                        h
+                        bsp_mats.add(bm)
                     })
                     .clone();
-                commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(bm)))
+                commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(bm), RenderLayers::from_layers(&[0, mirror::WORLD_LAYER])))
             }
         };
         if let Some(a) = fixed_bounds {
@@ -1490,7 +1603,7 @@ fn setup(
                 e.insert(skyline::SkyPanel);
             }
         }
-        if let Some(h) = lightmap_handle.as_ref().filter(|_| std::env::var_os("DXVIEW_NO_LIGHTMAP").is_none()) {
+        if let Some(h) = lightmap_handle.as_ref().filter(|_| !env_on!("DXVIEW_NO_LIGHTMAP")) {
             e.insert(Lightmap {
                 image: h.clone(),
                 uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -1502,9 +1615,21 @@ fn setup(
     if relight::relief_level() > 0 {
         println!("relight: {} textures with relief maps ({} ms)", relief_mats.len(), relief_t0.elapsed().as_millis());
     }
+    prof::load_mark("batches + relief + water");
+    // The map's edge walls in Bevy space: where the open sea may run on.
+    let edge_walls: Vec<[Vec3; 3]> = level
+        .batches
+        .iter()
+        .filter(|b| !b.sky && b.texture.is_some_and(|t| level.textures[t].name.eq_ignore_ascii_case("CoreTexMisc.Marker_sky")))
+        .flat_map(|b| b.indices.chunks_exact(3).map(move |t| [t[0], t[1], t[2]].map(|i| Vec3::from(b.positions[i as usize]))))
+        .collect();
+    let mut ocean_geom: Option<(Vec<[f32; 3]>, Vec<u32>)> = None;
+    let mut ring_mat: Option<Handle<water::WaterMaterial>> = None;
     let open_sea = modern_water || water::open_sea();
-    if let Some((mesh, mat)) = open_sea.then(|| water::ocean_ring(&mirrors, &level.batches, &sheet_pts)).flatten() {
+    if let Some((mesh, mat)) = open_sea.then(|| water::ocean_ring(&mirrors, &level.batches, &sheet_pts, &edge_walls)).flatten() {
+        ring_mat = Some(mat.clone());
         if let (Some(bevy::mesh::VertexAttributeValues::Float32x3(p)), Some(Indices::U32(i))) = (mesh.attribute(Mesh::ATTRIBUTE_POSITION), mesh.indices()) {
+            ocean_geom = Some((p.clone(), i.clone()));
             let y = p.first().map_or(0.0, |v| v[1]);
             let back = backing_mat.get_or_insert_with(|| materials.add(water::backing_material())).clone();
             let back_mesh = water::backing_mesh(p, i);
@@ -1522,7 +1647,7 @@ fn setup(
                 be.insert(a);
             }
         }
-        let ocean_bounds = static_bounds(&mesh, 1.5);
+        let ocean_bounds = static_bounds(&mesh, 2.5);
         let mut e = commands.spawn((
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(mat),
@@ -1532,25 +1657,87 @@ fn setup(
             bevy::light::NotShadowReceiver,
             bevy::light::NotShadowCaster,
         ));
-        if let Some(h) = lightmap_handle.as_ref().filter(|_| std::env::var_os("DXVIEW_NO_LIGHTMAP").is_none()) {
+        if let Some(h) = lightmap_handle.as_ref().filter(|_| !env_on!("DXVIEW_NO_LIGHTMAP")) {
             e.insert(Lightmap { image: h.clone(), uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0), bicubic_sampling: false });
         }
         if let Some(a) = ocean_bounds {
             e.insert(a);
         }
     }
+    // Modern Water's wave grid over the map's water (water::grid_mesh), cut to it by the mask.
+    {
+        let sheets: Vec<(&[[f32; 3]], &[u32])> = level
+            .batches
+            .iter()
+            .filter(|b| b.class == SurfaceClass::Water && !b.sky)
+            .map(|b| (&b.positions[..], &b.indices[..]))
+            .collect();
+        let ring = ocean_geom.as_ref().map(|(p, i)| (&p[..], &i[..]));
+        if let Some((img, rect, heights)) = water::build_mask(&sheets, ring) {
+            let mask = images.add(img);
+            // The biggest flat water plane's material is the grid's (its reflection slot, its settings).
+            let plane = mirrors
+                .planes
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.water && !p.water_mats.is_empty())
+                .max_by(|a, b| {
+                    let ar = |p: &mirror::Plane| (p.max.x - p.min.x) * (p.max.z - p.min.z);
+                    ar(a.1).total_cmp(&ar(b.1))
+                })
+                .map(|(i, _)| i);
+            let grid = Vec4::new(1.0, water::GRID_R, water::GRID_STEP, 0.0);
+            // The open sea too: left with its own vertex swell it opened pale triangles against the flat sheets
+            // (the "triangles at the crests").
+            for h in water_list.mats.iter().chain(ring_mat.iter()) {
+                if let Some(mut m) = water_mats.get_mut(h) {
+                    m.extension.mask = mask.clone();
+                    m.extension.params.grid = grid;
+                    m.extension.params.mask = rect;
+                    m.extension.params.heights = heights;
+                }
+            }
+            if let Some(pi) = plane {
+                let src = mirrors.planes[pi].water_mats[0].clone();
+                if let Some(mut gm) = water_mats.get(&src).cloned() {
+                    gm.extension.params.grid.x = 2.0;
+                    // Never solid: it's the moving surface over every water face, translucent ones included.
+                    let gh = water_mats.add(gm);
+                    water_list.mats.push(gh.clone());
+                    water_list.opaque.push(false);
+                    mirrors.planes[pi].water_mats.push(gh.clone());
+                    commands.spawn((
+                        Mesh3d(meshes.add(water::grid_mesh())),
+                        MeshMaterial3d(gh),
+                        Transform::IDENTITY,
+                        Visibility::Hidden,
+                        water::WaterGrid,
+                        RenderLayers::layer(mirror::LAYER),
+                        bevy::light::NotShadowReceiver,
+                        bevy::light::NotShadowCaster,
+                        // The shader puts it round each camera: never culled.
+                        bevy::camera::visibility::NoFrustumCulling,
+                        bevy::camera::primitives::Aabb::from_min_max(Vec3::splat(-1.0e5), Vec3::splat(1.0e5)),
+                        bevy::camera::visibility::NoAutoAabb,
+                    ));
+                }
+            }
+        }
+    }
     mirror::spawn_camera(&mut commands, &mirrors);
     commands.insert_resource(mirrors);
     commands.insert_resource(mirror::MirrorBodyRes::default());
     commands.insert_resource(water_list);
+    prof::load_mark("edge walls / grass");
     // Mesh actors (decorations, pickups, characters) with live decoration physics.
     let blockers =
         actors::spawn_mesh_actors(&mut commands, level, &mut meshes, &mut materials, &handles);
     commands.insert_resource(blockers);
-    let mv = movers::spawn_movers(&mut commands, level, &mut meshes, &mut materials, &handles);
+    let mv = movers::spawn_movers(&mut commands, level, &mut meshes, &mut materials, &handles, &glass_imgs);
     commands.insert_resource(mv);
     commands.insert_resource(movers::HudMessage::default());
     commands.insert_resource(pickups::FrobRequest::default());
+    prof::load_mark("mesh actors");
     // DeusExPlayer.ResetPlayer: a new game starts with a pistol, a riot prod and a medkit on the belt.
     commands.insert_resource(pickups::starting_inventory(&root_dir.0));
     pickups::spawn_belt_ui(&mut commands);
@@ -1591,6 +1778,7 @@ fn setup(
         &mut materials,
     );
     drug::spawn_drug_overlay(&mut commands, &mut runtime_assets, &mut images);
+    prof::load_mark("start kit");
     // AnimNext loops (screens, monitors, TV noise) on the level's surfaces and meshes.
     anim_tex::reset();
     for (i, t) in level.textures.iter().enumerate() {
@@ -1598,6 +1786,7 @@ fn setup(
         let masked = t.has_alpha_holes();
         anim_tex::register(&mut runtime_assets.lib, &t.name, &handles[i], masked, true);
     }
+    prof::load_mark("anim textures");
     // Procedural textures on the level's meshes and surfaces (the augmentation canister's blue Nano_SFX_A glow):
     // the level loader only has their static first frame, so they animate through the fire texture system.
     for (i, t) in level.textures.iter().enumerate() {
@@ -1674,6 +1863,7 @@ fn setup(
     ));
     commands.insert_resource(scrollers);
 
+    prof::load_mark("fire textures / HUD");
     // Lighting comes entirely from the rebuilt original lightmaps.
     commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
@@ -1694,7 +1884,7 @@ fn setup(
         Tonemapping::None,
         Exposure { ev100: -0.263 },
         Camera {
-            order: 0,
+            order: -4,
             // Its picture stays in the window's shared textures for the world camera to draw over; only the last
             // camera (the view model's, never switched off) copies the result to the screen.
             output_mode: bevy::camera::CameraOutputMode::Skip,
@@ -1719,7 +1909,8 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         Camera {
-            order: 1,
+            // Before the upscale (1), heat (2) and view-model (3) cameras; after reflections and camera feeds.
+            order: -3,
             clear_color: ClearColorConfig::None,
             output_mode: bevy::camera::CameraOutputMode::Skip,
             ..default()
@@ -1758,6 +1949,8 @@ fn setup(
         },
         Overlay,
     ));
+    prof::load_mark("cameras");
+    prof::load_report();
 }
 
 /// Bounds for a mesh that never changes shape, worked out once (`grow` metres of slack up and down for a surface the
@@ -1877,7 +2070,7 @@ fn fly(
             cam.yaw = (-wt.yaw_deg - 90.0).to_radians();
             cam.pitch = wt.pitch_deg.to_radians();
             // DXVIEW_WALKTEST_SELECT=<belt slot>: hold that belt item during the test.
-            if let Some(slot) = std::env::var("DXVIEW_WALKTEST_SELECT").ok().and_then(|v| v.parse().ok()) {
+            if let Some(slot) = env_val!("DXVIEW_WALKTEST_SELECT").map(str::to_owned).and_then(|v| v.parse().ok()) {
                 scripted.select = Some(slot);
             }
         }
@@ -1901,7 +2094,8 @@ fn fly(
     }
     let free_cam = thirdperson::free();
     let mut looked = false;
-    if cursor.grab_mode == CursorGrabMode::Locked {
+    // While the Diegetic Healing overlay is up, the mouse / right stick move its medkit cursor instead.
+    if cursor.grab_mode == CursorGrabMode::Locked && !healui::active() {
         // MouseSensitivity (default 3) scales the look; Invert Mouse flips the pitch.
         let k = 0.0022 * crate::settings::mouse_sensitivity() / 3.0;
         let inv = if crate::settings::invert_mouse() { -1.0 } else { 1.0 };
@@ -2078,7 +2272,7 @@ fn fly(
                         (c.x * b.normal[0] + c.y * b.normal[1] + c.z * b.normal[2] - b.dist).abs();
                     db.partial_cmp(&da).unwrap()
                 });
-            if std::env::var("DXVIEW_LADDERLOG").is_ok() {
+            if env_on!("DXVIEW_LADDERLOG") {
                 println!(
                     "LADDER touch={} phys={:?} loc={:.1?} wish={:.2?}",
                     ladder.is_some(),
@@ -2687,7 +2881,7 @@ fn overlay_update(
         *on = !*on;
     }
     // The corner readout is a Debug Mode feature (Settings > Enhancements).
-    let debug = crate::settings::debug_mode() || std::env::var("DXVIEW_SHOT").is_ok();
+    let debug = crate::settings::debug_mode() || env_on!("DXVIEW_SHOT");
     let vis = if *on && debug && !inventory_screen::screen_open() && !consys::third_person() && !cinematic::active() {
         Visibility::Inherited
     } else {
@@ -2738,19 +2932,25 @@ fn uv_scroll(
     time: Res<Time>,
     scroll: Res<UvScroll>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut bsp_mats: ResMut<Assets<shadowlight::BspMaterial>>,
+    bsp_mats: ResMut<Assets<shadowlight::BspMaterial>>,
+    used: Query<&MeshMaterial3d<StandardMaterial>>,
+    mut in_use: Local<(u64, std::collections::HashSet<AssetId<StandardMaterial>>, u32)>,
 ) {
     let _prof = crate::prof::scope("main::uv_scroll");
+    let _ = bsp_mats;
     let t = time.elapsed_secs();
-    for (h, speed) in &scroll.1 {
-        if let Some(mut m) = bsp_mats.get_mut(h) {
-            let off = *speed * t;
-            m.base.uv_transform = bevy::math::Affine2::from_translation(Vec2::new(off.x.fract(), off.y.fract()));
-        }
+    // The level's own surfaces pan in their shader (BspShadowParams.u). These are the plain materials they were
+    // made from: only the ones something still draws are moved (changing a material every frame costs the render
+    // thread a re-prepare of it), looked up again now and then.
+    if loader::new_map(&mut in_use.0) || in_use.2 == 0 {
+        in_use.1 = used.iter().map(|m| m.0.id()).collect();
+        in_use.2 = 120;
     }
-    // These StandardMaterials are only the templates the level's water, mirror and BSP materials were copied from
-    // (setup): no entity draws them, so Lean Updates leaves them alone.
-    for (h, speed, water) in scroll.0.iter().filter(|_| !perf::lean_updates()) {
+    in_use.2 -= 1;
+    for (h, speed, water) in &scroll.0 {
+        if !in_use.1.contains(&h.id()) {
+            continue;
+        }
         if let Some(mut m) = materials.get_mut(h) {
             let mut off = *speed * t;
             if *water {

@@ -94,8 +94,10 @@ pub fn spawn_movers(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     handles: &[Handle<Image>],
+    glass: &HashMap<usize, Handle<Image>>,
 ) -> Movers {
     let mut cache = HashMap::new();
+    let mut glass_mats: HashMap<usize, Handle<StandardMaterial>> = HashMap::new();
     let mut out = Movers {
         rt: Vec::new(),
         entities: Vec::new(),
@@ -151,15 +153,16 @@ pub fn spawn_movers(
                 continue;
             }
             let h = meshes.add(part_mesh(info, pi, info.location, info.rotation, level));
-            let mat = crate::actors::material_for(
-                materials,
-                &mut cache,
-                handles,
-                part.texture,
-                part.class,
-            );
+            let frosted = (part.class == dx_level::SurfaceClass::Translucent)
+                .then(|| part.texture.and_then(|t| glass.get(&t).map(|h| (t, h.clone()))))
+                .flatten();
+            let mat = match frosted {
+                // Modern Glass (glass.rs).
+                Some((t, img)) => glass_mats.entry(t).or_insert_with(|| crate::glass::material(materials, img)).clone(),
+                None => crate::actors::material_for(materials, &mut cache, handles, part.texture, part.class),
+            };
             let child = commands
-                .spawn((Mesh3d(h.clone()), MeshMaterial3d(mat)))
+                .spawn((Mesh3d(h.clone()), MeshMaterial3d(mat), bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::mirror::WORLD_LAYER])))
                 .id();
             commands.entity(parent).add_child(child);
             parts.push((h, pi));
@@ -491,7 +494,7 @@ pub fn tick_movers(
                 tf.rotation = bevy_rotation(rt.rotation);
             }
         }
-        if let Ok(f) = std::env::var("DXVIEW_MOVERLOG") {
+        if let Some(f) = env_val!("DXVIEW_MOVERLOG") {
             if info.tag.eq_ignore_ascii_case(&f) || info.name.eq_ignore_ascii_case(&f) || level.actors[info.actor].class.eq_ignore_ascii_case(&f) {
                 let l = movers.rt[i].location;
                 println!("MOVER {} {:.0},{:.0},{:.0} key {} interp {}", info.name, l.x, l.y, l.z, movers.rt[i].key_num, movers.rt[i].interpolating);
@@ -777,10 +780,6 @@ pub fn hit_line(start: DVec3, end: DVec3, damage: f32, damage_type: &'static str
             q.push((start, end, damage, damage_type));
         }
     }
-}
-
-pub fn blast(pos: DVec3, radius: f64, damage: f32, damage_type: &'static str) {
-    blast_ring(pos, radius, damage, damage_type, 0.0);
 }
 
 /// One ring of a staggered blast whose whole Damage is `full` (GMDX's HurtRadiusGMDX mover fix uses it).

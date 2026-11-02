@@ -35,6 +35,13 @@ pub struct WaterParams {
     pub tint: Vec4,
     /// Direction to the moon (xyz, Bevy) and the glint's strength (w).
     pub moon: Vec4,
+    /// The wave grid (see `grid_mesh`): x 0 = none, 1 = a sheet / the open sea (gives way to the grid inside its
+    /// square), 2 = the grid itself; y the grid's half size (m), z its step (m).
+    pub grid: Vec4,
+    /// The water mask: its corner (Bevy x, z), texel size (m), and its size in texels (w = width).
+    pub mask: Vec4,
+    /// Water heights (Bevy y) by the mask's plane index (16).
+    pub heights: [Vec4; 4],
 }
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
@@ -45,6 +52,10 @@ pub struct WaterExt {
     #[texture(101)]
     #[sampler(102)]
     pub reflection: Handle<Image>,
+    /// The water mask (R8Uint): bit 7 = water here, bits 0-4 = which height (`heights`); dry texels next to the
+    /// water carry its height too so the grid's edge triangles stay level.
+    #[texture(103, sample_type = "u_int")]
+    pub mask: Handle<Image>,
 }
 
 impl MaterialExtension for WaterExt {
@@ -85,7 +96,10 @@ pub fn swell(x: f32, z: f32, t: f32) -> (f32, f32, f32) {
     let (mut h, mut gx, mut gz) = (0.0, 0.0, 0.0);
     // Only waves the 2 m mesh can carry smoothly move the surface (and what floats on it): the shorter ones are
     // shading only (they made facets at three vertices per wavelength).
-    for (ang, len, speed, amp) in WAVES.iter().copied().filter(|w| w.1 >= DISPLACE_MIN_LEN) {
+    let storm = storm();
+    let waves = WAVES.iter().copied().filter(|w| w.1 >= DISPLACE_MIN_LEN);
+    let storm_w = (STORM_WAVE.0, STORM_WAVE.1, STORM_WAVE.2, STORM_WAVE.3 * storm);
+    for (ang, len, speed, amp) in waves.chain(std::iter::once(storm_w)) {
         let (dx, dz) = (ang.cos(), ang.sin());
         let k = std::f32::consts::TAU / len;
         let ph = (dx * x + dz * z) * k - t * speed * k;
@@ -100,16 +114,35 @@ pub fn swell(x: f32, z: f32, t: f32) -> (f32, f32, f32) {
 /// Water the surface itself moves by WAVE_M metres per unit of swell and floating things ride it).
 const BOB: f64 = 3.0;
 pub const WAVE_M: f32 = 0.16;
+/// A storm's long swell (as WAVES; its amplitude x storm()). Keep in step with water.wgsl storm_wave.
+const STORM_WAVE: (f32, f32, f32, f32) = (0.55, 31.0, 3.4, 1.1);
+
+/// How stormy it is, 0..1: the rain (weather.rs), in the steps the water materials are updated in.
+pub fn storm() -> f32 {
+    if let Some(v) = env_val!("DXVIEW_STORM").and_then(|v| v.parse::<f32>().ok()) {
+        return v.clamp(0.0, 1.0);
+    }
+    ((crate::weather::density() / 14.0).clamp(0.0, 1.0) * 50.0).round() / 50.0
+}
+
+/// Metres the surface moves per unit of swell: the calm harbour's WAVE_M, up to 3.5 times that in a storm.
+pub fn wave_m() -> f32 {
+    WAVE_M * (1.0 + 2.5 * storm())
+}
 /// Waves shorter than this (m) don't displace vertices (see `swell` / water.wgsl swell_h).
 pub const DISPLACE_MIN_LEN: f32 = 12.0;
 
 fn bob_units() -> f64 {
-    if modern() { WAVE_M as f64 / dx_level::METERS_PER_UNIT as f64 } else { BOB }
+    if modern() { wave_m() as f64 / dx_level::METERS_PER_UNIT as f64 } else { BOB }
 }
 
 /// Vertical offset (Unreal units) and tilt (pitch, roll in Unreal rotator units) for something floating at an
 /// Unreal-space spot.
 pub fn bob(at: DVec3, t: f64) -> (f64, i32, i32) {
+    // Classic water has no swell of ours: only DeusExDecoration's own rocking moves floating things.
+    if !modern() {
+        return (0.0, 0, 0);
+    }
     let p = dx_level::ue_to_bevy([at.x as f32, at.y as f32, at.z as f32]);
     let (h, gx, gz) = swell(p[0], p[2], t as f32);
     // Slope in Unreal X (Bevy x) and Unreal Y (Bevy z), scaled down to a gentle tilt.
@@ -134,6 +167,8 @@ pub struct WaterMats {
     rings: [Vec4; RINGS],
     next: usize,
     modern: Option<bool>,
+    /// The global parameters last written (modern, rain, moon, open sea).
+    last: Option<[f32; 6]>,
 }
 
 /// Enhancement "Modern Water" (setting ModernWater): reflections, a body colour and see-through depth, detailed
@@ -157,7 +192,11 @@ pub fn water_system(
     level: Res<crate::LevelRes>,
     mut moon: Local<(u64, Vec3)>,
 ) {
-    let t = time.elapsed_secs();
+    // The waves run on the GPU's own clock (Bevy's globals.time, which wraps every hour like this one): the
+    // materials only change when a ring starts or ends or a setting moves, not every frame (each change re-prepares
+    // every water material on the render thread).
+    let t = time.elapsed_secs_wrapped();
+    let mut changed = false;
     if crate::loader::new_map(&mut moon.0) {
         moon.1 = crate::shafts::moon_dir(&level.0).filter(|d| d.y > 0.05).unwrap_or(Vec3::new(0.3, 0.8, 0.5).normalize());
     }
@@ -168,18 +207,28 @@ pub fn water_system(
         let i = wm.next % RINGS;
         wm.rings[i] = Vec4::new(p[0], p[2], t, s);
         wm.next += 1;
+        changed = true;
     }
     for r in wm.rings.iter_mut() {
-        if r.w > 0.0 && t - r.z > 4.0 {
+        if r.w > 0.0 && (t - r.z > 4.0 || t < r.z) {
             r.w = 0.0;
+            changed = true;
         }
     }
     let rings = wm.rings;
     let modern = modern();
     let switched = wm.modern != Some(modern);
     wm.modern = Some(modern);
-    let rain = (crate::weather::density() / 14.0).clamp(0.0, 1.0);
     let open_sea = open_sea();
+    let key = [if modern { 1.0 } else { 0.0 }, storm(), moon_dir.x, moon_dir.y, moon_dir.z, if open_sea { 1.0 } else { 0.0 }];
+    if wm.last != Some(key) {
+        wm.last = Some(key);
+        changed = true;
+    }
+    if !changed && !switched {
+        return;
+    }
+    let rain = key[1];
     for (i, h) in wm.mats.iter().enumerate() {
         if let Some(mut m) = mats.get_mut(h) {
             m.extension.params.t.x = t;
@@ -187,7 +236,7 @@ pub fn water_system(
             m.extension.params.m.x = if modern { 1.0 } else { 0.0 };
             m.extension.params.m.z = rain;
             m.extension.params.moon = moon_dir.extend(1.0);
-            m.extension.params.far.w = if modern { WAVE_M } else { 0.0 };
+            m.extension.params.far.w = if modern { wave_m() } else { 0.0 };
             // Classic water fades out between far.x and far.y metres from the eye; the open sea goes to the horizon.
             let (near, far) = if open_sea { (1.0e6, 2.0e6) } else { (30.0, 120.0) };
             if m.extension.params.far.x != near {
@@ -210,7 +259,7 @@ pub fn water_system(
 
 /// The water material for a level batch (its source picture, translucent). `placeholder` stands in for the
 /// reflection until a mirror slot holds this plane.
-pub fn material(base: StandardMaterial, opaque: bool, placeholder: Handle<Image>) -> WaterMaterial {
+pub fn material(base: StandardMaterial, opaque: bool, placeholder: Handle<Image>, mask: Handle<Image>) -> WaterMaterial {
     WaterMaterial {
         base: StandardMaterial {
             base_color: Color::WHITE,
@@ -226,19 +275,238 @@ pub fn material(base: StandardMaterial, opaque: bool, placeholder: Handle<Image>
                 t: Vec4::new(
                     0.0,
                     0.035,
-                    std::env::var("DXVIEW_WATER_GAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
+                    env_val!("DXVIEW_WATER_GAIN").map(str::to_owned).and_then(|v| v.parse().ok()).unwrap_or(1.0),
                     0.03,
                 ),
-                far: Vec4::new(30.0, 120.0, std::env::var("DXVIEW_WATER_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), 0.0),
+                far: Vec4::new(30.0, 120.0, env_val!("DXVIEW_WATER_DEBUG").map(str::to_owned).and_then(|v| v.parse().ok()).unwrap_or(0.0), 0.0),
                 rings: [Vec4::ZERO; RINGS],
-                m: Vec4::new(0.0, 0.0, 0.0, std::env::var("DXVIEW_WATER_BEND").ok().and_then(|v| v.parse().ok()).unwrap_or(0.03)),
+                m: Vec4::new(0.0, 0.0, 0.0, env_val!("DXVIEW_WATER_BEND").map(str::to_owned).and_then(|v| v.parse().ok()).unwrap_or(0.03)),
                 // Night harbour water: dark blue-green, a fair way see-through looking straight down.
                 tint: Vec4::new(0.006, 0.026, 0.040, 0.45),
                 moon: Vec4::new(0.3, 0.8, 0.5, 1.0),
+                grid: Vec4::ZERO,
+                mask: Vec4::ZERO,
+                heights: [Vec4::ZERO; 4],
             },
             reflection: placeholder,
+            mask,
         },
     }
+}
+
+// ------------------------------------------------------------------------------------------------ the wave grid
+//
+// Modern Water's waves no longer move the map's own water faces: those are a few huge triangles (split finely
+// they were still too coarse in places, and every seam between differently split sheets showed as triangles at the
+// wave crests, however the T-junctions were mended). Instead one even grid follows the eye - GRID_R round it, a
+// vertex every GRID_STEP - and carries the swell; a mask of where the map has water (its water faces and the open
+// sea, rasterised once per map) cuts the grid to the water's shape and gives each vertex its water's height. The
+// map's water faces and the open sea stay flat and give way to the grid inside its square, beyond which the swell
+// has died away. One level, one step: nothing to stitch, so nothing to crack.
+
+pub const GRID_R: f32 = 150.0;
+pub const GRID_STEP: f32 = 1.5;
+/// Mask texels (m).
+const MASK_TEXEL: f32 = 0.25;
+
+#[derive(Component)]
+pub struct WaterGrid;
+
+/// The grid mesh, centred on (0, 0) (the vertex shader moves it to the eye, snapped to GRID_STEP).
+pub fn grid_mesh() -> Mesh {
+    let n = (2.0 * GRID_R / GRID_STEP).round() as u32;
+    let mut pos = Vec::with_capacity(((n + 1) * (n + 1)) as usize);
+    for j in 0..=n {
+        for i in 0..=n {
+            pos.push([-GRID_R + i as f32 * GRID_STEP, 0.0, -GRID_R + j as f32 * GRID_STEP]);
+        }
+    }
+    let count = pos.len();
+    let mut idx = Vec::with_capacity((n * n * 6) as usize);
+    for j in 0..n {
+        for i in 0..n {
+            let a = j * (n + 1) + i;
+            idx.extend_from_slice(&[a, a + n + 1, a + 1, a + 1, a + n + 1, a + n + 2]);
+        }
+    }
+    let mut m = Mesh::new(bevy::mesh::PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::RENDER_WORLD);
+    m.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; count]);
+    m.insert_indices(bevy::mesh::Indices::U32(idx));
+    m
+}
+
+/// A 1 x 1 empty mask (no grid).
+pub fn mask_placeholder(images: &mut Assets<Image>) -> Handle<Image> {
+    images.add(Image::new(
+        bevy::render::render_resource::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        bevy::render::render_resource::TextureDimension::D2,
+        vec![0u8],
+        bevy::render::render_resource::TextureFormat::R8Uint,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    ))
+}
+
+/// The water mask over the map's flat water faces and the open sea's triangles (Bevy space): the image, its
+/// corner + texel + width (WaterParams.mask) and the heights. None when the map has no flat water.
+pub fn build_mask(sheets: &[(&[[f32; 3]], &[u32])], ring: Option<(&[[f32; 3]], &[u32])>) -> Option<(Image, Vec4, [Vec4; 4])> {
+    let mut heights: Vec<f32> = Vec::new();
+    let mut lo = Vec2::splat(f32::MAX);
+    let mut hi = Vec2::splat(f32::MIN);
+    let mut tris: Vec<([Vec2; 3], u8)> = Vec::new();
+    for (pos, idx) in sheets {
+        for t in idx.chunks_exact(3) {
+            let p = [pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]];
+            // Flat faces only (the grid is level water).
+            if (p[0][1] - p[1][1]).abs() > 0.05 || (p[0][1] - p[2][1]).abs() > 0.05 {
+                continue;
+            }
+            let y = p[0][1];
+            let k = match heights.iter().position(|h| (h - y).abs() < 0.1) {
+                Some(k) => k,
+                None if heights.len() < 16 => {
+                    heights.push(y);
+                    heights.len() - 1
+                }
+                None => continue,
+            };
+            let v = p.map(|q| Vec2::new(q[0], q[2]));
+            for q in v {
+                lo = lo.min(q);
+                hi = hi.max(q);
+            }
+            tris.push((v, k as u8 + 1));
+        }
+    }
+    if tris.is_empty() {
+        return None;
+    }
+    // The open sea runs out for kilometres: the mask needs only what the grid can reach from anywhere the player
+    // can stand - the map's own water plus a grid's width round it.
+    if let Some((pos, idx)) = ring {
+        let (rlo, rhi) = (lo - Vec2::splat(GRID_R + 8.0), hi + Vec2::splat(GRID_R + 8.0));
+        for t in idx.chunks_exact(3) {
+            let p = [pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]];
+            let y = p[0][1];
+            let Some(k) = heights.iter().position(|h| (h - y).abs() < 0.1) else { continue };
+            let v = p.map(|q| Vec2::new(q[0], q[2]));
+            if v.iter().all(|q| q.x < rlo.x) || v.iter().all(|q| q.x > rhi.x) || v.iter().all(|q| q.y < rlo.y) || v.iter().all(|q| q.y > rhi.y) {
+                continue;
+            }
+            tris.push((v, k as u8 + 1));
+        }
+        lo = rlo;
+        hi = rhi;
+    }
+    let size = hi - lo;
+    // At most 4096 texels a side (coarser on a huge map).
+    let texel = MASK_TEXEL.max(size.x.max(size.y) / 4096.0);
+    let (w, h) = (((size.x / texel).ceil() as usize + 2).max(1), ((size.y / texel).ceil() as usize + 2).max(1));
+    let origin = lo - Vec2::splat(texel);
+    let mut m = vec![0u8; w * h];
+    // Scanline fill: each row's span of the triangle at the texel centres.
+    for (v, k) in &tris {
+        let q = v.map(|p| (p - origin) / texel);
+        let ymin = q[0].y.min(q[1].y).min(q[2].y);
+        let ymax = q[0].y.max(q[1].y).max(q[2].y);
+        if ymax < 0.0 || ymin > h as f32 {
+            continue;
+        }
+        let (r0, r1) = ((ymin - 0.5).ceil().max(0.0) as usize, ((ymax - 0.5).floor().max(-1.0) as i64).min(h as i64 - 1));
+        if r1 < 0 {
+            continue;
+        }
+        for y in r0..=(r1 as usize) {
+            let cy = y as f32 + 0.5;
+            let (mut xa, mut xb) = (f32::MAX, f32::MIN);
+            for e in 0..3 {
+                let (a, b) = (q[e], q[(e + 1) % 3]);
+                if (a.y - cy) * (b.y - cy) > 0.0 || (a.y - b.y).abs() < 1e-9 {
+                    if (a.y - cy).abs() < 1e-9 {
+                        xa = xa.min(a.x);
+                        xb = xb.max(a.x);
+                    }
+                    continue;
+                }
+                let t = (cy - a.y) / (b.y - a.y);
+                let x = a.x + (b.x - a.x) * t;
+                xa = xa.min(x);
+                xb = xb.max(x);
+            }
+            if xa > xb {
+                continue;
+            }
+            let (c0, c1) = ((xa - 0.5).ceil().max(0.0) as usize, ((xb - 0.5).floor() as i64).min(w as i64 - 1));
+            if c1 < c0 as i64 {
+                continue;
+            }
+            for x in c0..=(c1 as usize) {
+                m[y * w + x] = 0x80 | k;
+            }
+        }
+    }
+    // Dry texels next to the water take its height (8 texels out = 2 m, more than a grid step), so a grid triangle
+    // across the shore line stays level instead of dropping to the floor of the world.
+    // Grown ring by ring from the shore (a frontier, not whole-image passes: the mask can be 4096 square).
+    let steps = ((GRID_STEP * 1.5 / texel).ceil() as usize).max(2);
+    let mut front: Vec<u32> = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            if m[y * w + x] == 0 {
+                continue;
+            }
+            let edge = (x > 0 && m[y * w + x - 1] == 0)
+                || (x + 1 < w && m[y * w + x + 1] == 0)
+                || (y > 0 && m[(y - 1) * w + x] == 0)
+                || (y + 1 < h && m[(y + 1) * w + x] == 0);
+            if edge {
+                front.push((y * w + x) as u32);
+            }
+        }
+    }
+    let mut next: Vec<u32> = Vec::new();
+    for _ in 0..steps {
+        next.clear();
+        for &i in &front {
+            let i = i as usize;
+            let (x, y) = (i % w, i / w);
+            let v = m[i] & 0x1F;
+            let mut try_set = |j: usize, m: &mut Vec<u8>| {
+                if m[j] == 0 {
+                    m[j] = v;
+                    next.push(j as u32);
+                }
+            };
+            if x > 0 {
+                try_set(i - 1, &mut m);
+            }
+            if x + 1 < w {
+                try_set(i + 1, &mut m);
+            }
+            if y > 0 {
+                try_set(i - w, &mut m);
+            }
+            if y + 1 < h {
+                try_set(i + w, &mut m);
+            }
+        }
+        std::mem::swap(&mut front, &mut next);
+        if front.is_empty() {
+            break;
+        }
+    }
+    let mut hs = [Vec4::ZERO; 4];
+    for (k, y) in heights.iter().enumerate() {
+        hs[(k + 1) / 4][(k + 1) % 4] = *y;
+    }
+    let img = Image::new(
+        bevy::render::render_resource::Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 },
+        bevy::render::render_resource::TextureDimension::D2,
+        m,
+        bevy::render::render_resource::TextureFormat::R8Uint,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    );
+    Some((img, Vec4::new(origin.x, origin.y, texel, w as f32), hs))
 }
 
 #[cfg(test)]
@@ -267,9 +535,21 @@ pub fn tessellate(
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<u32>) {
     let (mut p, mut n, mut u, mut u1) = (pos.to_vec(), nrm.to_vec(), uv.to_vec(), uv1.to_vec());
     let mut out = Vec::new();
+    // Every triangle split the same way: a sheet too big for the vertex budget at `max` gets a coarser `max` for all
+    // of it (stopping half way left whole stretches as big flat triangles that the storm swell's troughs dipped under:
+    // flat grey slivers across the sea). Halving splits leave triangles about max^2 / 4.
+    let area: f32 = idx
+        .chunks_exact(3)
+        .map(|t| {
+            let (a, b, c) = (Vec3::from(pos[t[0] as usize]), Vec3::from(pos[t[1] as usize]), Vec3::from(pos[t[2] as usize]));
+            (b - a).cross(c - a).length() * 0.5
+        })
+        .sum();
+    const TRI_BUDGET: f32 = 700_000.0;
+    let max = max.max((area * 4.0 / TRI_BUDGET).sqrt());
     let mut mids: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
     let mut stack: Vec<[u32; 3]> = idx.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
-    let budget = 400_000usize;
+    let budget = 2_000_000usize;
     while let Some(t) = stack.pop() {
         let d = |a: u32, b: u32, p: &Vec<[f32; 3]>| Vec3::from(p[a as usize]).distance(Vec3::from(p[b as usize]));
         let e = [d(t[0], t[1], &p), d(t[1], t[2], &p), d(t[2], t[0], &p)];
@@ -294,26 +574,48 @@ pub fn tessellate(
         stack.push([a, m, c]);
         stack.push([m, b, c]);
     }
-    let out = fix_tjunctions(&mut p, &mut n, &mut u, &mut u1, &out);
     (p, n, u, u1, out)
+}
+
+/// A tessellated water sheet: positions, normals, UVs, lightmap UVs, indices.
+pub type Sheet = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<u32>);
+
+/// Every water sheet of the map split to `max` metres (see `tessellate`), then T-junctions mended across all of
+/// them: where one sheet's vertex lies on another sheet's edge (the map's water is many faces in several batches,
+/// one per material), that edge gets the vertex too, so neither opens a crack when the waves move them.
+pub fn tessellate_sheets(batches: &[&dx_level::Batch], max: f32) -> Vec<Sheet> {
+    let mut sheets: Vec<Sheet> = batches.iter().map(|b| tessellate(&b.positions, &b.normals, &b.uvs, &b.uvs1, &b.indices, max)).collect();
+    let all: Vec<(usize, [f32; 3])> = sheets.iter().enumerate().flat_map(|(k, s)| s.0.iter().map(move |p| (k, *p))).collect();
+    for (k, s) in sheets.iter_mut().enumerate() {
+        let (lo, hi) = s.0.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p[1]), a.1.max(p[1])));
+        let others: Vec<[f32; 3]> = all.iter().filter(|(j, p)| *j != k && p[1] >= lo - 0.05 && p[1] <= hi + 0.05).map(|(_, p)| *p).collect();
+        let idx = std::mem::take(&mut s.4);
+        s.4 = fix_tjunctions(&mut s.0, &mut s.1, &mut s.2, &mut s.3, &idx, &others);
+    }
+    sheets
 }
 
 /// Where a vertex of one triangle lies on the middle of another's edge (the map's water faces meet that way, and the
 /// splitting above makes many more), the moving surface would open a crack along that edge: such triangles become a
 /// fan round their centre through every vertex on their edges, so both sides move together.
 #[allow(clippy::type_complexity)]
-fn fix_tjunctions(p: &mut Vec<[f32; 3]>, n: &mut Vec<[f32; 3]>, u: &mut Vec<[f32; 2]>, u1: &mut Vec<[f32; 2]>, idx: &[u32]) -> Vec<u32> {
+fn fix_tjunctions(p: &mut Vec<[f32; 3]>, n: &mut Vec<[f32; 3]>, u: &mut Vec<[f32; 2]>, u1: &mut Vec<[f32; 2]>, idx: &[u32], others: &[[f32; 3]]) -> Vec<u32> {
     const CELL: f32 = 2.0;
+    // Vertices of other sheets are numbered from EXT up.
+    const EXT: u32 = 1 << 30;
     let key = |v: [f32; 3]| ((v[0] / CELL).floor() as i32, (v[2] / CELL).floor() as i32);
     // Distinct positions, bucketed (the first vertex at each position stands for it).
     let mut grid: std::collections::HashMap<(i32, i32), Vec<u32>> = std::collections::HashMap::new();
     let mut seen: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
-    for (i, v) in p.iter().enumerate() {
+    let own = p.len();
+    for (i, v) in p.iter().chain(others.iter()).enumerate() {
         let q = ((v[0] * 1000.0).round() as i32, (v[1] * 1000.0).round() as i32, (v[2] * 1000.0).round() as i32);
         if seen.insert(q) {
-            grid.entry(key(*v)).or_default().push(i as u32);
+            let id = if i < own { i as u32 } else { EXT + (i - own) as u32 };
+            grid.entry(key(*v)).or_default().push(id);
         }
     }
+    let pos = |p: &Vec<[f32; 3]>, w: u32| if w >= EXT { others[(w - EXT) as usize] } else { p[w as usize] };
     let mut out = Vec::with_capacity(idx.len());
     for t in idx.chunks_exact(3) {
         let c = [t[0], t[1], t[2]];
@@ -336,7 +638,7 @@ fn fix_tjunctions(p: &mut Vec<[f32; 3]>, n: &mut Vec<[f32; 3]>, u: &mut Vec<[f32
                 for gz in k0.1..=k1.1 {
                     let Some(list) = grid.get(&(gx, gz)) else { continue };
                     for &w in list {
-                        let pw = Vec3::from(p[w as usize]);
+                        let pw = Vec3::from(pos(p, w));
                         let s = (pw - pa).dot(d) / len2;
                         if s <= 1e-4 || s >= 1.0 - 1e-4 {
                             continue;
@@ -367,7 +669,8 @@ fn fix_tjunctions(p: &mut Vec<[f32; 3]>, n: &mut Vec<[f32; 3]>, u: &mut Vec<[f32
                 ids.push(*w);
                 continue;
             }
-            p.push(p[*w as usize]);
+            let pw = pos(p, *w);
+            p.push(pw);
             n.push(n[c[0] as usize]);
             u.push(*uv);
             if !u1.is_empty() {
@@ -416,6 +719,7 @@ pub fn ocean_ring(
     mirrors: &crate::mirror::Mirrors,
     batches: &[dx_level::Batch],
     sheet_pts: &[[f32; 3]],
+    edge_walls: &[[Vec3; 3]],
 ) -> Option<(Mesh, Handle<WaterMaterial>)> {
     // The biggest flat water plane, if it's sea-sized (indoor pools and fountains get none).
     let plane = mirrors
@@ -431,6 +735,13 @@ pub fn ocean_ring(
         return None;
     }
     let y = plane.d;
+    // Which sides of the sheet run out to the map's edge: the edge walls (sky-marker faces outside the sky room)
+    // standing in the water along that side. Only those sides get open sea; a map with none (indoor pools, harbours
+    // walled in by land) gets no ring at all.
+    let open = open_sides(plane.min, plane.max, y, edge_walls);
+    if !open.iter().any(|o| *o) {
+        return None;
+    }
     // The sheet's texture mapping, continued: uv = A (x, z) + c from one of its triangles.
     let mut map: Option<[f32; 6]> = None;
     'find: for b in batches.iter().filter(|b| b.class == dx_level::SurfaceClass::Water && !b.sky) {
@@ -538,7 +849,8 @@ pub fn ocean_ring(
             filled.push(t[k]);
             if let Some(&next) = t.get(k + 1) {
                 let gap = (next - t[k]) * side_len[side];
-                let n = (gap / 2.5).ceil() as usize;
+                // (Flat now - the wave grid carries the swell - so long pieces are fine.)
+                let n = (gap / 40.0).ceil() as usize;
                 for j in 1..n {
                     filled.push(t[k] + (next - t[k]) * j as f32 / n as f32);
                 }
@@ -552,7 +864,7 @@ pub fn ocean_ring(
         // Corners of the inner and outer rectangles, counter-clockwise: (x0,z0) (x1,z0) (x1,z1) (x0,z1).
         let corners = |r: (Vec2, Vec2)| [Vec2::new(r.0.x, r.0.y), Vec2::new(r.1.x, r.0.y), Vec2::new(r.1.x, r.1.y), Vec2::new(r.0.x, r.1.y)];
         let (ci, co) = (corners(ia), corners(ib));
-        for side in 0..4 {
+        for side in (0..4).filter(|&k| open[k]) {
             let (a0, a1) = (ci[side], ci[(side + 1) % 4]);
             let (b0, b1) = (co[side], co[(side + 1) % 4]);
             let t = &ts[side];
@@ -580,12 +892,41 @@ pub fn ocean_ring(
     Some((mesh, plane.water_mats[0].clone()))
 }
 
+/// The sides of a water sheet's bounds (0: -z, 1: +x, 2: +z, 3: -x; as `ocean_ring` walks them) that end at the map's
+/// edge walls: a wall triangle reaching the water's height within 30 m of the side, lying along it.
+fn open_sides(min: Vec3, max: Vec3, y: f32, walls: &[[Vec3; 3]]) -> [bool; 4] {
+    const NEAR: f32 = 30.0;
+    let mut open = [false; 4];
+    for t in walls {
+        let (lo_y, hi_y) = (t[0].y.min(t[1].y).min(t[2].y), t[0].y.max(t[1].y).max(t[2].y));
+        if lo_y > y + 1.0 || hi_y < y - 1.0 {
+            continue;
+        }
+        let c = (t[0] + t[1] + t[2]) / 3.0;
+        let along_x = c.x > min.x - NEAR && c.x < max.x + NEAR;
+        let along_z = c.z > min.z - NEAR && c.z < max.z + NEAR;
+        if along_x && (c.z - min.z).abs() < NEAR {
+            open[0] = true;
+        }
+        if along_z && (c.x - max.x).abs() < NEAR {
+            open[1] = true;
+        }
+        if along_x && (c.z - max.z).abs() < NEAR {
+            open[2] = true;
+        }
+        if along_z && (c.x - min.x).abs() < NEAR {
+            open[3] = true;
+        }
+    }
+    open
+}
+
 /// The map's edge walls (BSP faces with the sky marker texture outside the sky room: drawn black at the water's
 /// edge). Hidden while the open sea shows, which would otherwise end at them.
 #[derive(Component)]
 pub struct EdgeWall;
 
-/// A flat, dark copy of a water sheet (or of the open sea) half a metre under it (Modern Water): where the moving
+/// A flat, dark copy of a water sheet (or of the open sea) BACKING_DROP under it (below a storm's troughs) (Modern Water): where the moving
 /// surface's triangles part at a T-junction of the map's water faces, the gap shows dark water instead of the black
 /// sky behind. Hidden with the eye under the surface. `y` = the water's height (Bevy).
 #[derive(Component)]
@@ -593,7 +934,7 @@ pub struct WaterBacking {
     pub y: f32,
 }
 
-pub const BACKING_DROP: f32 = 0.5;
+pub const BACKING_DROP: f32 = 1.4;
 
 /// The backing's mesh: `positions` lowered, with normals; the material is dark and unlit.
 pub fn backing_mesh(positions: &[[f32; 3]], indices: &[u32]) -> Mesh {
@@ -606,7 +947,7 @@ pub fn backing_mesh(positions: &[[f32; 3]], indices: &[u32]) -> Mesh {
 
 pub fn backing_material() -> StandardMaterial {
     StandardMaterial {
-        base_color: Color::linear_rgb(0.004, 0.012, 0.018),
+        base_color: if env_on!("DXVIEW_BACKING_DEBUG") { Color::linear_rgb(1.0, 0.0, 1.0) } else { Color::linear_rgb(0.004, 0.012, 0.018) },
         unlit: true,
         double_sided: true,
         cull_mode: None,
@@ -618,9 +959,10 @@ pub fn backing_material() -> StandardMaterial {
 #[allow(clippy::type_complexity)]
 pub fn ocean_system(
     mut commands: Commands,
-    mut q: Query<&mut Visibility, (With<OceanRing>, Without<EdgeWall>, Without<WaterBacking>)>,
-    mut walls: Query<&mut Visibility, (With<EdgeWall>, Without<OceanRing>, Without<WaterBacking>)>,
-    mut backs: Query<(&WaterBacking, &mut Visibility), (Without<OceanRing>, Without<EdgeWall>)>,
+    mut q: Query<&mut Visibility, (With<OceanRing>, Without<EdgeWall>, Without<WaterBacking>, Without<WaterGrid>)>,
+    mut walls: Query<&mut Visibility, (With<EdgeWall>, Without<OceanRing>, Without<WaterBacking>, Without<WaterGrid>)>,
+    mut backs: Query<(&WaterBacking, &mut Visibility), (Without<OceanRing>, Without<EdgeWall>, Without<WaterGrid>)>,
+    mut grids: Query<&mut Visibility, (With<WaterGrid>, Without<OceanRing>, Without<EdgeWall>, Without<WaterBacking>)>,
     cam: Query<(Entity, &Transform, Has<bevy::core_pipeline::prepass::DepthPrepass>), (With<crate::FlyCam>, Without<crate::SkyCam>)>,
 ) {
     let eye_y = cam.iter().next().map_or(f32::MAX, |t| t.1.translation.y);
@@ -639,11 +981,17 @@ pub fn ocean_system(
         }
     }
     // The dark backings catch cracks left where the moving surface's pieces part (DXVIEW_WATER_BACKING=0 hides them).
-    let backing = std::env::var("DXVIEW_WATER_BACKING").map_or(true, |v| v != "0");
+    let backing = env_val!("DXVIEW_WATER_BACKING") != Some("0");
     for (b, mut v) in &mut backs {
         let want = if backing && modern() && eye_y > b.y { Visibility::Inherited } else { Visibility::Hidden };
         if *v != want {
             *v = want;
+        }
+    }
+    let gwant = if modern() { Visibility::Inherited } else { Visibility::Hidden };
+    for mut v in &mut grids {
+        if *v != gwant {
+            *v = gwant;
         }
     }
     let on = (modern() || open_sea()) && !q.is_empty();

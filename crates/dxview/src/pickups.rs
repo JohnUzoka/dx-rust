@@ -219,7 +219,7 @@ pub fn frob_system(
         Query<&mut Visibility, With<crate::ai::Npc>>,
         ResMut<movers::Picking>,
     ),
-    (blockers, mut hacking, mut events, mut info, root_dir, mut ph): (
+    (blockers, mut hacking, mut events, mut info, root_dir, _ph): (
         Res<crate::actors::Blockers>,
         ResMut<crate::devices::Hacking>,
         ResMut<crate::devices::GameEvents>,
@@ -523,6 +523,10 @@ pub fn frob_system(
                 hud.text = "It's already unlocked".into();
                 hud.time_left = 2.0;
                 return;
+            }
+            // Transcended (setting TrNoisyObjects): a door with sounds makes a noise when used.
+            if unreal_pkg::props::find(&level.actors[level.movers[idx].actor].props, "OpeningSound").is_some() {
+                crate::transcended::object_noise(mv.rt[idx].location, 128.0);
             }
             if let Some(msg) =
                 movers::frob(level, &mut mv, idx, player.body.location, player.unlock_all)

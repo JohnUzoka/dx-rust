@@ -18,6 +18,10 @@ use bevy::shader::ShaderRef;
 
 pub const CLOUD_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("3c7e1d52-9a4b-4f60-8d2e-b51a07c4e9f3");
 
+/// Sky faces (Unreal units squared) a map needs before it gets clouds: about 5,000 m2 (the training course's
+/// skylights are ~1,000 m2, Liberty Island ~400,000).
+const MIN_SKY_AREA: f32 = 1.4e7;
+
 pub fn on() -> bool {
     crate::settings::get("Clouds") > 0.5
 }
@@ -340,7 +344,8 @@ pub fn clouds_system(
     for (e, _, _) in &mut lights {
         commands.entity(e).despawn();
     }
-    if !want || !crate::skyline::cloudy(&lvl.name) || !lvl.zone_sky.iter().any(|s| *s) {
+    // Maps open to the sky only through windows and skylights (the sky faces cover a few rooms' worth) get none.
+    if !want || !crate::skyline::cloudy(&lvl.name) || !lvl.zone_sky.iter().any(|s| *s) || lvl.sky_area < MIN_SKY_AREA {
         return;
     }
     let (bmin, bmax) = (Vec3::from(lvl.bounds_min), Vec3::from(lvl.bounds_max));
@@ -382,7 +387,7 @@ pub fn clouds_system(
         .map(|b| b.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max))
         .fold(f32::MIN, f32::max)
         .max(bmin.y);
-    st.next_strike = if std::env::var_os("DXVIEW_BOLT").is_some() { 1.0 } else { 8.0 };
+    st.next_strike = if env_on!("DXVIEW_BOLT") { 1.0 } else { 8.0 };
     commands.spawn((
         DirectionalLight { illuminance: 0.0, shadow_maps_enabled: false, color: Color::srgb(0.8, 0.86, 1.0), ..default() },
         Transform::default().looking_to(Vec3::new(0.2, -1.0, 0.1), Vec3::Z),
@@ -433,7 +438,7 @@ fn update(
     let (eye, fwd) = cam.iter().next().map_or((Vec3::ZERO, Vec3::NEG_Z), |t| (t.translation, t.forward().as_vec3()));
     // Lightning: a strike every 6..30 s in heavy rain, rarer in light rain, none when dry.
     // DXVIEW_BOLT=1: a ground strike straight ahead every 3 s (screenshots).
-    let forced = std::env::var_os("DXVIEW_BOLT").is_some();
+    let forced = env_on!("DXVIEW_BOLT");
     let mut flash = Vec4::ZERO;
     let mut light = 0.0;
     if r > 0.3 || forced {
@@ -500,7 +505,7 @@ fn update(
     if let Some(s) = st.strike.as_mut() {
         s.t += dt;
         // DXVIEW_FLASH_HOLD=1: (test shots) the flash held at full for the strike's 2 s.
-        let lv = if std::env::var_os("DXVIEW_FLASH_HOLD").is_some() { 1.0 } else { strike_level(s) };
+        let lv = if env_on!("DXVIEW_FLASH_HOLD") { 1.0 } else { strike_level(s) };
         flash = Vec4::new(s.at.x, 650.0, s.at.z, lv * 6.0);
         light = if s.bolt.is_some() { lv * 1.5 } else { lv };
         if let Some((_, mat)) = s.bolt.as_ref() {
@@ -539,12 +544,21 @@ fn update(
             *tf = Transform::default().looking_to(Vec3::new(h.x, -0.45, h.z), Vec3::Y);
         }
     }
+    // Overcast: more cover, thinner gaps, smoother (less fluffy) edges, much darker, faster.
+    let slab_w = dry.slab.w + (0.7 - dry.slab.w) * r;
+    let shape = Vec4::new(dry.shape.x * (1.0 - 0.7 * r), dry.shape.y * (1.0 - 0.7 * r), r, 0.0);
+    let wind = Vec4::new(dry.wind.x * (1.0 + r), dry.wind.y * (1.0 + r), dry.wind.z * (1.0 + r), 1.0 + 0.4 * r);
+    // Only when something moved (a changed material is re-prepared on the render thread).
+    let Some(cur) = mats.get(&h) else { return };
+    let p = &cur.params;
+    if (p.slab.w - slab_w).abs() < 1e-4 && (p.shape - shape).abs().max_element() < 1e-4 && (p.wind - wind).abs().max_element() < 1e-5 && p.flash == flash {
+        return;
+    }
     let Some(mut m) = mats.get_mut(&h) else { return };
     let p = &mut m.params;
-    // Overcast: more cover, thinner gaps, smoother (less fluffy) edges, much darker, faster.
-    p.slab.w = dry.slab.w + (0.7 - dry.slab.w) * r;
-    p.shape = Vec4::new(dry.shape.x * (1.0 - 0.7 * r), dry.shape.y * (1.0 - 0.7 * r), r, 0.0);
-    p.wind = Vec4::new(dry.wind.x * (1.0 + r), dry.wind.y * (1.0 + r), dry.wind.z * (1.0 + r), 1.0 + 0.4 * r);
+    p.slab.w = slab_w;
+    p.shape = shape;
+    p.wind = wind;
     p.flash = flash;
 }
 

@@ -2,6 +2,183 @@
 
 ## Unreleased
 
+### Faster loading and frame rate, water crests, glass, hostages (November 2, afternoon)
+- Frame rate: water reflections draw the level, the sky and JC but not every decoration and person (the biggest single
+  cost of the Modern look); reflections and the light shafts are cheaper; ragdolls are capped at six at once near you,
+  so finishing Liberty Island (every terrorist goes down at once) no longer drops to a few frames a second; mirrors
+  render at a lower resolution.
+- Loading: textures and relief maps are prepared on all CPU cores, grass is laid out in the background and the
+  conversations are read once while the menu is up instead of on every map. With New Vision, Battery Park's relief
+  maps alone took seconds.
+- Water: the waves are one smooth surface round you instead of many separate water faces, so no seams open between
+  them; out at a distance the swell eases off so wave crests no longer stand up as rows of pale triangles.
+- UNATCO HQ doors have their glass windows again (a solid face was drawn over each pane), and Modern Glass
+  (Settings > Enhancements > Visuals, on in Modern) shows panes as frosted glass instead of a faint smear.
+- Battery Park subway: the rescued hostages can be talked to (cowering people could never start a conversation).
+- Third person: JC's glasses stay on his face. First person: the coat keeps out of your legs.
+- Diegetic Scope: the rifle's own lens no longer cuts in front of the scope picture.
+- Diegetic ATMs show their screen only in the machine's screen; diegetic computers hide their see-through panels so
+  the screen is readable.
+- New Vision textures keep their see-through parts: ladders and vent grates are no longer filled in black, and guards
+  can see you through chain-link vents.
+- Battery Park: the blue light at the start is no longer blinding. Burning barrels have flames, sparks and a smoke
+  column (Enhanced Effects).
+- Achievements: Rescue the Lady unlocks as soon as the statue is cleared; unlock notices wait until a map has loaded.
+- Out-of-ammo troops with knives who can't reach their target stop standing there and take cover.
+
+### Bone bodies, trees, glowing weapons, far grass (November 2)
+- Skeletal people: the arms and chest take an aimed pose over the legs while running or walking in a fight and turn
+  toward the target; heads turn to whoever is speaking in a conversation; strafing to the right plays a right
+  strafe (it was always the left one); footsteps come when a foot actually comes down; a melee blow lands at the
+  fastest point of the swing.
+- Coats no longer shake or jerk (the coat fought the legs where the animation itself puts it inside them, and high
+  frame rates skipped simulation steps), in first and third person.
+- Trees: trunks bend, flare at the foot and are knobbly instead of straight poles; crowns are a few clumps of leaves
+  instead of one ball, smaller leaf clusters; each tree is drawn in where a wall, pole or lamp stands close so it no
+  longer cuts into what's round it.
+- Grass: a second, sparse layer of wider grass carries on beyond the full grass (out to 58 m on High, 34 m on Low)
+  and fades in as the near blades thin out, so the lawn no longer ends in a line you can see.
+- Glowing weapons and items: with Glow And Bloom, the Dragon's Tooth blade, the riot prod's and EMP grenade's arcs,
+  the plasma rifle's coils and the ambrosia vial glow; the Dragon's Tooth lights its surroundings while in hand, as in
+  the original.
+- Material Properties (Settings > Enhancements > Visuals, on in Modern): the weapon or item in your hands catches the
+  light by its material - gun metal shines, plastic less, gloves hardly.
+- Diegetic Scope: HDTP's rifle no longer draws its blue lens cap over the live scope picture.
+- First-person body: no blob shadow under JC while it's on.
+- Enhancements menu: a description too long for its box scrolls slowly to the end and starts over.
+- Controller: D-pad snap-to works on the Achievements screen.
+- Linux: starting in fullscreen no longer crashes when the window opens before the monitor is known (it opens
+  windowed and switches to fullscreen a moment later).
+
+### Mods folder, Confix and Transcended, healing by body part (November 2)
+- One folder for all your mods: on the launcher's Mods page, Mod Assets Folder... takes a folder holding each mod in
+  its own folder (Lay D Denton, HDTP, New Vision, Helios, the Parallax Occlusion addon, Augmentique, Visible
+  Attachments, GMDX: Augmented Edition (and its Precipitation), Confix and Transcended) and sets them all up.
+- Confix support: with Confix installed, Confix Conversation Fixes (Settings > Enhancements, on in Modern) uses its
+  corrected conversations and speech - typos, wrong flags, broken item transfers and missing lines fixed.
+- Transcended Fixes (Fixes, on in Modern): bugs fixed the way the Transcended mod fixes them - misnamed mission flags
+  (the Hong Kong ROM, the ship breach, the Vandenberg hazlab troops, Aimee's goal, the Karkian tank, Jock in Area 51),
+  the ATM accepting any account number with the first account's PIN, EMP'd robots still attacked, bot screens
+  staying open after the bot is destroyed, the laser left on in conversations, the riot prod breaking crates, people
+  set alight dying "unconscious", barks under water, leather chair and couch colours, and more.
+- Transcended's bigger changes as separate options (all off): Unconscious Bodies Can Die, Using Things Makes Noise,
+  People Mind A Pointed Gun, Thermoptic Camo Fools Machines, Wounded Legs Slow People, Stronger Gunther And Simons,
+  Long-Burning Flares.
+- Diegetic Healing: with a medkit in hand, hold Alt (controller: LT) to bring up your body; move the little medkit
+  over a part and click (A) to treat it - one medkit per use, without opening the inventory.
+- Aug glows: each running augmentation glows in its own colour; vision augs shine from the eyes. Healing sends green
+  leaves drifting up from the treated part.
+- Third person: weapons stay the right way up while aiming and moving; leaning bends the body instead of sliding it.
+- The rifle's diegetic scope follows the gun (recoil, sway, idle animations) and fits its eyepiece, HDTP's too.
+- Storm water no longer tears open into flat triangles; coats swing more naturally; ragdolls can't pass through
+  walls, doors or furniture.
+
+### Upscaling, shadows, grass and trees (November 2)
+- Upscaling (Settings > Enhancements > Display): Off, Native AA (temporal antialiasing at full resolution plus a light
+  sharpen), and Quality / Balanced / Performance / Ultra Performance, which draw the world at 1/1.5, 1/1.7, 1/2 or
+  1/3 the window's size, antialias it temporally and upscale it with AMD FidelityFX Super Resolution 1's
+  edge-adaptive filter (EASU, ported to WGSL) and RCAS sharpening. The weapon, HUD and menus stay at full resolution.
+- Real-time shadows reworked: shadow lights are chosen from all around you (not just ahead), lights on your own
+  floor count most, a light already shown holds its place, and each fades in and out by its rank instead of popping.
+  Every model casts from one light only (the one that lights it most), so people no longer drag three shadows. A
+  shadow only takes away light the map's own lighting gave that spot, and overlapping lights share it out, so
+  shadows are never darker than the light they block. People now receive shadows too (from other people and
+  objects, and their own arms).
+- The flashlight cone is a plain cone worked out in the shaders - a hot spot with a dim spill round it - with no
+  shadow map (no acne on walls beside you, one less shadow pass).
+- 3D Grass (Visuals: Off / Low / High): blades grow out of the lawns on the GPU, lit by the ground's own light map,
+  swaying in travelling gusts and pushed aside by whoever walks through. Grass grows on the textures
+  SecondRevision chose (the clean, light and dark green lawns and the natural grass).
+- Grown Trees (Visuals): the parks' flat card trees and bushes are replaced with grown ones - space-colonisation
+  branches, bark, clusters of leaves - four variants of each kind per map, at the original's size and place, lit by
+  the map's lights, swaying in the wind and casting shadows. The original's collision is kept.
+- Glowing Surfaces now also light their surroundings: augmentation canisters, bio cells, computer and ATM screens
+  and keypads give off a small light of their own colour.
+- With Glow And Bloom, coronas feed the bloom (a hot core at each lamp that the bloom spreads).
+- Combat HUD (Interface): out of combat the crosshair and the status displays fade away; they return at once in a
+  fight, when aiming down the sights or at an enemy, firing, hurt, badly hurt or changing weapons.
+- With New Vision's textures on, SecondRevision's height maps for them (if installed) give their walls relief.
+- Classic mode: detail textures (Display: the original renderers' close-up detail pass); zone reverb (the zones'
+  own echo settings, when the modern reverb is off); zone ambient light on walls and people; animated water, wave
+  and ice textures (WetTexture / WaveTexture drop simulations) instead of our swell and ripples on classic water.
+- Fish swim the way they face again, and the crosshair turns green over birds and fish.
+
+### Playtest fixes (November 1, night)
+- Maps no longer pop in surface by surface: after a load the screen stays black with "LOADING" (game time and cut
+  scenes held) until the new map's shaders have compiled, at most 6 seconds. The intro's first room appears whole.
+- Cut scenes take no game input: the pad's flashlight, belt and weapon buttons did things during the intro. The
+  intro's end now says "Press A, Menu or RT to continue" with a pad (the pad's own names) and "Press Enter or Fire
+  to continue" otherwise, and follows whichever was used last.
+- Bob Page's line over JC in the clone tank is no longer near silent: cut scene speech always plays through the
+  player (Sound Occlusion muffled it behind the tank's glass).
+- No more free copy of an item: whatever is in hand must still be in the inventory, so using up a stack from the
+  inventory screen, or the training course taking your things away, also takes it out of your hand.
+- Flashlight cone: the narrower haze beam inside it (a second, inner corona against far ground) is gone; the cone
+  alone lights the way.
+- Security bots stay near where a fight starts (within their home extent) instead of chasing across the island;
+  pawns with bDefendHome keep every combat move at home, as the original does.
+- Smarter AI: an enemy glimpsed and lost for a moment no longer restarts the pawn's reaction time, which could leave
+  it staring at you without ever firing.
+- Wounds sit on the body: they're placed where the shot's line meets the limb (it was the collision cylinder, up to
+  a foot out).
+- Coats: no cloth on seated people (it fought the chair); otherwise the coat runs on a softer spring in fixed small
+  steps, trails the body's motion and settles back, with a soft limit instead of a hard stop and a light breeze -
+  it flows instead of jerking.
+- Ragdolls: knees and elbows are hinges that bend only the way they should, twists are tighter and the body is
+  damped more, so limbs no longer twist into broken shapes; the shot carries the whole body, hits above the hips
+  topple it away from the shooter and leg hits sweep the legs.
+- Modern Water: the water's colour no longer uses the lightmap, whose per-surface blocks showed as blue-grey angular
+  patches and seams; lamps still show in the reflection and as glints.
+- Codes From Notes: a keypad used in the world shows "Tab: code from notes" (pad: Y) at the bottom of the screen;
+  computer logins found in the notes are now offered the same way ("Tab: log in from notes" under the fields)
+  instead of being filled in silently.
+- Diegetic Scope: the sniper rifle stays in view and you look through its own scope - the lens sits in the
+  eyepiece found on the model (original and HDTP), with a glass sheen, a cool tint and a colour fringe at its edge.
+
+### Playtest fixes (November 1, evening)
+- First-person body: it now stands back as far as the pose needs, so the cut chest is never in view, looking straight
+  down or walking, running and aiming (those poses lean the chest forward); looking down you see your legs and feet.
+- Weapons held by the rebuilt characters sit right again: their weapon triangle is turned against the original
+  mesh's (JC and many NPCs held their guns upside down or sideways).
+- Blinking slides the eyelid's picture up to the crease instead of stretching what's under it (Paul's eyeball
+  stretched over his eye).
+- Relief maps: parallax depth now matches each texture's size (a fixed depth was up to 36 units deep on large
+  textures, so bricks slid and smeared); more layers.
+- The flashlight no longer puts two orange balls in front of you: the aug glows only go on the parts of a body that
+  are drawn (the first-person body has no head), and each body's glows only show with that body.
+- Third person: aiming while looking down no longer drops the camera onto JC's head.
+- Code: the player's shots, melee blows, lock-on and view-model posing / lighting are separate functions now
+  (weapon_system 1,300 -> under 900 lines); text fields place the caret without building strings.
+
+### Playtest fixes (November 1)
+- Paul runs to you on the dock again: when re-planning his way he kept picking the nearest path point even when it
+  was behind him, so he ran back and forth; and a straight line through the dock's row of BlockMonsters (which stop
+  every pawn but the player) counted as clear, so he ran on the spot against it. Pawns now take the path point that
+  leads toward where they're going, and never plan a straight line through a BlockMonsters.
+- Water reflections no longer show trees and people through walls: a reflection camera switched off and on again
+  lost the level's walls (they're culled on the GPU and Bevy only hands them to a camera once). The level's surfaces
+  are now handed to every camera again whenever one comes on, and water reflects every frame.
+- Stormy water: in rain the sea gets a long storm swell, rougher short waves and whitecaps, and the surface moves up
+  to three and a half times as far; water sheets no longer open cracks where two of the map's water surfaces meet
+  (seams are mended across all of them, and the dark backing sits deeper, under a storm's troughs).
+- The open sea only goes where the map's edge is open water, and only on maps that have sea; the 3D skyline is only
+  built from the map's own skyline photos (no stand-in towers elsewhere); maps that only see the sky through windows
+  get no volumetric clouds.
+- First-person body: stands further back and higher, keeps the chest, and is drawn from the outside only, so the
+  opening at the cut is out of view when you look down.
+- Aim down the sights now lines up on the original weapon models too (the barrel's tip is put under the crosshair);
+  HDTP models keep their own alignment.
+- Diegetic Scope (Settings > Enhancements, on in Modern): looking through a rifle scope is a live lens in front of
+  the eye with a reticle and the scope's tube, the world still around it, instead of a black screen.
+- Smoother animation: the first-person weapon eases into each new animation (a swing, a shot, a fidget) instead of
+  snapping to it, and the rebuilt characters blend between moves over a quarter of a second.
+- Rain no longer hitches when you walk into new ground or climb into a new height band: where drops land is worked
+  out a few hundred spots at a time.
+- A frame-time log for hitches: frames much slower than the running average are written to hitch.log with the
+  slowest parts of that frame.
+- The AI code: a pawn's shot is now a few plain functions (start, ammo, one traced slug), and door handling, orders
+  and animal startles left the per-pawn loop.
+
 ### Remastered lighting (enhancements, on in Modern)
 - Remastered Lighting: every wall and floor relit per pixel by its strongest lamps, with real falloff and shape,
   keeping the original's baked shadows.
@@ -33,6 +210,44 @@
     worker pool.
   - Bevy features the game doesn't use (its gamepad polling, animation and picking systems) are switched off.
   - The release build is optimised as one whole program.
+- A GPU-driven drawing pass, so the processor hands the graphics card whole batches instead of one draw at a time.
+  Modern with every option and mod on a Ryzen 5 3600 + RTX 3050: about 1,000 draw calls a frame down to about 250,
+  and 24 ms (41 fps) down to about 14 ms (70 fps); Classic from about 12 ms (82 fps) to 11 ms (92 fps).
+  - The world's surfaces and the rebuilt characters' materials are bindless: hundreds of textures share a few bind
+    groups, so the GPU draws them in a handful of multi-draw calls (it was one draw call per texture, per camera).
+  - The level's surfaces are culled by the GPU (it tests each one against the view before drawing) instead of on the
+    main thread, and stay filed in the render thread's draw lists instead of being re-filed as the camera turns.
+  - Rain falls on the GPU: each drop and splash is written once, and the shader moves it on the GPU's own clock.
+    The CPU spawns a batch five times a second instead of moving 11,000 drops and uploading them every frame.
+  - Water waves and panning textures run on the GPU's clock too; their materials no longer change every frame (each
+    change made the render thread prepare the material again). Character lighting, the clouds and the skyline's
+    beacons only touch their materials when something actually changed.
+  - All the blob shadows under people are one mesh (they were fifty-odd separate transparent draws per camera).
+  - Only the head of a rebuilt character carries its face shapes.
+  - Avian no longer re-propagates every transform in the world before each physics step while no ragdoll is
+    falling, and the first-person body takes its pose from JC's mirror body instead of sampling it a second time.
+
+- A code-health and allocation pass. The game now uses mimalloc (a fast multi-threaded allocator) and profile
+  runs count heap allocations per frame and per system. The game's own systems made about 6,000 allocations a frame
+  with HDTP installed (a few hundred without); the worst offenders were real waste and are gone:
+  - JC's body mesh was worked out every frame by the mirror and first-person bodies, each time copying HDTP's whole
+    class-override list (thousands of entries) - about 5,400 allocations and a lot of copying a frame. It's now
+    cached and looked up in place.
+  - The NPC update rebuilt its snapshot of every pawn (names, alliances) every frame: it's now one buffer kept
+    between frames and updated in place; IsA class checks, actor tags, the session (difficulty, skin) and lowercase
+    name tests no longer make copies of strings.
+  - Triggers, the HUD (it hashed formatted text of the whole item belt every frame), achievements, sound (held
+    loops), dynamic lights, fire textures, conversations, impacts and blood no longer rebuild lists, hash sets or
+    class defaults every frame; cross-system queues reuse their buffers.
+  - Character animation looks up its clip only when the sequence changes (it built two or three strings per body
+    per frame), and the weapon frame and coat cloth reuse their bone matrices and cached bone indices.
+  - Poison and bleeding moved out of the NPC update into their own component and system (with tests), a first step
+    in splitting up the NPC component.
+  - The NPC update is broken up: it was one function of about 3,200 lines nested up to 16 levels deep; damage
+    handling (with dying and being hurt apart), sight, hearing, first-frame setup and the Attacking, firing, Fleeing, Alerting and Burning states are
+    now their own functions with explicit inputs (the update itself is about 1,500 lines, nested at most 8 deep).
+    Line-of-sight and alliance checks are one shared `Senses` type instead of closures repeated in each part.
+  - Unused code removed and compiler warnings down from 65 to 19.
 
 ### Launcher
 - Mods page: a Parallax Maps row to point the game at the Parallax Occlusion Mapping addon's folder (turn it on or

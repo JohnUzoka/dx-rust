@@ -3,7 +3,9 @@
 //! SendMessage: this system runs on a worker thread while the window's thread waits for the frame, so a SendMessage
 //! (which waits for the window thread to answer) deadlocks the game at startup.
 
+#[cfg(windows)]
 use bevy::prelude::*;
+#[cfg(windows)]
 use bevy::window::{PrimaryWindow, RawHandleWrapper};
 
 #[cfg(windows)]

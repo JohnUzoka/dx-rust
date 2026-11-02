@@ -82,12 +82,6 @@ pub fn set_filter(images: &mut Assets<Image>, img: &Handle<Image>, render: i32, 
     }
 }
 
-pub fn screen_scale(win: &Window, w: i32, h: i32) -> i32 {
-    let (pw, ph) = (win.physical_width() as i32, win.physical_height() as i32);
-    let fit = (pw / w).min(ph / h).max(1);
-    (fit + crate::settings::hud_scale_step()).clamp(1, fit)
-}
-
 #[derive(Component)]
 pub struct Bracket {
     index: usize,
@@ -284,11 +278,16 @@ pub fn crosshair_system(
             rt.breakable.unwrap_or(matches!(find(p, "bBreakable"), Some(unreal_pkg::props::Value::Bool(true))))
         }
     });
-    if std::env::var("DXVIEW_AIMLOG").is_ok() {
+    if env_on!("DXVIEW_AIMLOG") {
         let any = crate::movers::mover_on_line(&level.0, &mv.rt, eye, eye + dir * 8000.0);
         println!("AIM hit {:.1} actor {:?} mover {:?} target {:?}", hit.fraction * 8000.0, hit.actor, any.map(|(i, f)| (i, f * 8000.0)), mover_target.map(|m| m.0));
     }
-    if let Some((_, f)) = mover_target {
+    // Birds and fish are pawns in the original (Animal): the crosshair turns green and the brackets show on them.
+    let critter = crate::critters::trace_birds(eye, eye + dir * 8000.0).filter(|&(_, f)| f <= hit.fraction && mover_target.is_none_or(|m| f < m.1));
+    if let Some((_, f)) = critter {
+        target_dist = Some(8000.0 * f);
+        color = Color::srgb(0.0, 1.0, 0.0);
+    } else if let Some((_, f)) = mover_target {
         target_dist = Some(8000.0 * f);
     } else if let Some(b) = hit.actor {
         target_dist = Some(8000.0 * hit.fraction);
@@ -316,7 +315,7 @@ pub fn crosshair_system(
         } else {
             Visibility::Inherited
         };
-        img.color = color;
+        img.color = color.with_alpha(color.alpha() * crate::hudfade::alpha());
         let (cw, ch) = (size.0 * px, size.1 * px);
         node.width = Val::Px(cw);
         node.height = Val::Px(ch);
@@ -327,6 +326,7 @@ pub fn crosshair_system(
     // Brackets only for ranged weapons with a target in range. Looking through a rifle scope they always show,
     // sized by the accuracy that drives the scope's sway, so they close in as the aim steadies.
     let scoped = zoomed
+        && !crate::scope::diegetic()
         && weapons.held.as_ref().map_or(false, |h| {
             h.stats.has_scope && h.stats.class != "Binoculars"
         });
@@ -378,9 +378,8 @@ pub fn crosshair_system(
         node.top = Val::Px((t + o) * px);
         node.width = Val::Px(bw * px);
         node.height = Val::Px(bh * px);
-        if !br.shadow {
-            bg.0 = color;
-        }
+        let fade = crate::hudfade::alpha();
+        bg.0 = if br.shadow { Color::BLACK.with_alpha(fade) } else { color.with_alpha(color.alpha() * fade) };
     }
 }
 
@@ -525,7 +524,7 @@ pub fn scope_overlay_system(
     };
     let held = weapons.held.as_ref();
     let binocs = zoom.0.is_some() && held.map_or(false, |h| h.stats.class == "Binoculars");
-    let scope = zoom.0.is_some() && !binocs && held.map_or(false, |h| h.stats.has_scope);
+    let scope = zoom.0.is_some() && !binocs && held.map_or(false, |h| h.stats.has_scope) && !crate::scope::diegetic();
     let s = ui_scale(win);
     let px = s / win.scale_factor();
     let (w, h) = (
