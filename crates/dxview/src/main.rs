@@ -740,7 +740,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(bevy::log::LogPlugin {
             custom_layer: prof::span_layer,
             ..default()
-        }).set(threads::task_pools())
+        }).set(threads::task_pools()).set(horizon::render_plugin())
         // Not used: gamepads are read by our own gilrs / HID code (gamepad.rs), characters are animated by our own
         // systems (actors.rs, gpuanim.rs, skeletal.rs). Bevy's would poll and tick for nothing every frame.
         .disable::<bevy::gilrs::GilrsPlugin>()

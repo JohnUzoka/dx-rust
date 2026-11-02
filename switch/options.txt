@@ -24,6 +24,11 @@ env BEVY_HORIZON_CPU_PROFILE=1
 # env BH_ROBUST_BUFFER_ACCESS=0
 # env DXVIEW_MIRROR_SLOTS=0    # no reflections: mirrored floors and glass show their own picture
 
+# Upstream's GPU-driven drawing (run 8 lost about 30 ms of GPU time a frame with it): one per run.
+# no_bindless                  # no binding arrays: every material and lightmap binds on its own
+# env DXVIEW_CPU_CULL=1        # the level's surfaces keep CPU culling
+# (no_gpu_culling, below, also takes out the multi-draw indirect calls)
+
 # Missing geometry on the console only (the intro's red wall panels, the Liberty Island dock): one per run, then
 # watch the intro's red room. log.txt's [Draw check] lines say which level surfaces never got ready.
 # no_zcull                     # the GPU's coarse depth test off

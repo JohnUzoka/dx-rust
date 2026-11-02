@@ -25,6 +25,13 @@
 //!   - `draw_empty`: NVK sets up every indirect draw instead of skipping the ones it reads as empty.
 //!   `[Draw check]` lines, 6 s and 20 s after each map arrives, list the level surfaces whose material, texture or
 //!   mesh the renderer still hasn't got; none listed with a surface missing on screen points at the GPU side.
+//! - Upstream's GPU-driven drawing (bindless materials and multi-draw indirect calls, GPU culling of the level's
+//!   surfaces; run 8 lost about 30 ms of GPU time a frame with it), one switch per run:
+//!   - `no_gpu_culling` (above) also takes out the multi-draw indirect calls;
+//!   - `no_bindless`: Bevy's render plugin without the binding-array features (`render_plugin`), so every material
+//!     and lightmap binds on its own, as the level's and the characters' materials did before upstream made them
+//!     bindless;
+//!   - `env DXVIEW_CPU_CULL=1` (gpudrive.rs): the level's surfaces keep CPU culling.
 //!
 //! The settings the Switch starts with (`switch_settings`), unless settings.txt already has a value: Anti-Aliasing and
 //! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), and Open Sea on (water.rs). They are on the
@@ -58,6 +65,24 @@ fn option(name: &str) -> bool {
 #[cfg(target_os = "horizon")]
 fn value(name: &str) -> Option<&'static str> {
     OPTIONS.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix('=')).map(str::trim)
+}
+
+/// Bevy's render plugin: its default, except with options.txt `no_bindless` on the Switch (the module notes).
+pub fn render_plugin() -> bevy::render::RenderPlugin {
+    #[cfg(target_os = "horizon")]
+    if option("no_bindless") {
+        use bevy::render::settings::{WgpuFeatures, WgpuSettings};
+        eprintln!("[DX RUST] options.txt no_bindless: no binding arrays; every material and lightmap binds on its own");
+        return bevy::render::RenderPlugin {
+            render_creation: WgpuSettings {
+                disabled_features: Some(WgpuFeatures::TEXTURE_BINDING_ARRAY | WgpuFeatures::BUFFER_BINDING_ARRAY),
+                ..default()
+            }
+            .into(),
+            ..default()
+        };
+    }
+    bevy::render::RenderPlugin::default()
 }
 
 /// First thing in `main`: the Switch's log (stdout and stderr go to log.txt beside the NRO, a panic to panic.txt),
