@@ -15,10 +15,11 @@
 //!   to release the swapchain image.
 //!
 //! Both are read back a frame or two late, into `DiagnosticsStore`, and `prof.rs` prints their averages with the other
-//! `render/` timers. Run 6 printed neither on the console, and nothing in the log said why. So this version creates its
-//! query resources on the first `Begin` (no `RenderStartup` hook), polls the device so mapped readbacks are seen, and
-//! reports each step it reaches as one `[GPU frame]` line (`report_once`). The lines are queued by the render world and
-//! printed by the main world, whose output the log keeps, and the main world also says if the `Begin` set never runs.
+//! `render/` timers. Run 6's log had neither, and nothing in it said why; that console run turned out to have used run
+//! 5's NRO, which has no timer. This version still creates its query resources on the first `Begin` (no `RenderStartup`
+//! hook), polls the device so mapped readbacks are seen, and reports each step it reaches as one `[GPU frame]` line
+//! (`report_once`). The lines are queued by the render world and printed by the main world, whose output the log keeps,
+//! and the main world also says if the `Begin` set never runs.
 
 use std::sync::{
     Arc, Mutex,
