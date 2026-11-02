@@ -13,6 +13,9 @@
 //! - `render/dx_frame/wait_gpu`: from the previous frame's last command to this frame's first. Idle time, plus what
 //!   runs between two frames' graphs: the uploads, the screenshot and readback copies, and any wait for the compositor
 //!   to release the swapchain image.
+//! - `render/dx_frame/passes_gpu`: every pass span of the newest frame added up (`frame_sums`). Bevy makes each span
+//!   its own measurement, so a pass that two cameras run prints as the mean of their spans; `busy_gpu` less this is
+//!   the work no pass timer covers, and `render/dx_frame/frame/<pass>` is such a pass's sum over the frame.
 //!
 //! Both are read back a frame or two late, into `DiagnosticsStore`, and `prof.rs` prints their averages with the other
 //! `render/` timers. Run 6's log had neither, and nothing in it said why; that console run turned out to have used run
@@ -38,6 +41,7 @@ use bevy::{
 
 pub(crate) const BUSY: DiagnosticPath = DiagnosticPath::const_new("render/dx_frame/busy_gpu");
 pub(crate) const WAIT: DiagnosticPath = DiagnosticPath::const_new("render/dx_frame/wait_gpu");
+pub(crate) const PASSES: DiagnosticPath = DiagnosticPath::const_new("render/dx_frame/passes_gpu");
 
 /// Frames whose timestamps can be on their way back at once. A frame's read-back completes a frame or two after its
 /// submit; a frame that finds every slot taken goes untimed.
@@ -74,7 +78,7 @@ pub struct GpuFrameTimePlugin;
 impl Plugin for GpuFrameTimePlugin {
     fn build(&self, app: &mut App) {
         let latest = Latest::default();
-        app.insert_resource(latest.clone()).add_systems(PreUpdate, publish);
+        app.insert_resource(latest.clone()).add_systems(PreUpdate, publish).add_systems(Update, frame_sums);
         if let Some(render) = app.get_sub_app_mut(RenderApp) {
             render.insert_resource(latest).add_systems(
                 RenderGraph,
@@ -286,12 +290,53 @@ fn publish(latest: Res<Latest>, store: Option<ResMut<DiagnosticsStore>>) {
     let Some(frame) = latest.0.lock().ok().and_then(|mut latest| latest.take()) else { return };
     let time = Instant::now();
     for (path, value) in [(&BUSY, Some(frame.busy)), (&WAIT, frame.wait)] {
-        let Some(value) = value else { continue };
-        if store.get(path).is_none() {
-            store.add(Diagnostic::new(path.clone()).with_suffix("ms"));
+        if let Some(value) = value {
+            measure(&mut store, path, time, value);
         }
-        if let Some(diagnostic) = store.get_mut(path) {
-            diagnostic.add_measurement(DiagnosticMeasurement { time, value });
+    }
+}
+
+/// Main world, after Bevy's `sync_diagnostics` (PreUpdate). Bevy makes every span of a pass its own measurement, so a
+/// pass that two cameras run, the world's and the weapon's, prints as the mean of their spans. This adds up the newest
+/// frame's spans: `render/dx_frame/passes_gpu`, all of them, so that `busy_gpu` less it is the work no pass timer
+/// covers, and `render/dx_frame/frame/<pass>` for each pass with more than one span.
+fn frame_sums(store: Option<ResMut<DiagnosticsStore>>, mut done: Local<Option<Instant>>) {
+    let Some(mut store) = store else { return };
+    let is_pass = |d: &&Diagnostic| d.path().as_str().ends_with("/elapsed_gpu");
+    // sync_diagnostics stamps every measurement of one frame with the same instant.
+    let Some(newest) = store.iter().filter(is_pass).filter_map(|d| d.measurement().map(|m| m.time)).max() else {
+        return;
+    };
+    if *done == Some(newest) {
+        return;
+    }
+    *done = Some(newest);
+    let mut all = 0.0;
+    let mut shared = Vec::new();
+    for diagnostic in store.iter().filter(is_pass) {
+        let (sum, spans) = diagnostic
+            .measurements()
+            .filter(|m| m.time == newest)
+            .fold((0.0, 0), |(sum, spans), m| (sum + m.value, spans + 1));
+        all += sum;
+        if spans > 1 {
+            let pass = diagnostic.path().as_str().trim_start_matches("render/").trim_end_matches("/elapsed_gpu");
+            let pass = pass.replace('/', " ");
+            shared.push((DiagnosticPath::from_components(["render", "dx_frame", "frame", pass.as_str()]), sum));
         }
+    }
+    measure(&mut store, &PASSES, newest, all);
+    for (path, sum) in &shared {
+        measure(&mut store, path, newest, *sum);
+    }
+}
+
+/// Adds a measurement to the diagnostic at `path`, making the diagnostic first if it is new.
+fn measure(store: &mut DiagnosticsStore, path: &DiagnosticPath, time: Instant, value: f64) {
+    if store.get(path).is_none() {
+        store.add(Diagnostic::new(path.clone()).with_suffix("ms"));
+    }
+    if let Some(diagnostic) = store.get_mut(path) {
+        diagnostic.add_measurement(DiagnosticMeasurement { time, value });
     }
 }
