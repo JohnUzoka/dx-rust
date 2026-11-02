@@ -1,26 +1,28 @@
 //! The GPU's time for a whole frame, beside the per-pass times of `RenderDiagnosticsPlugin`. On with the profiler
-//! (`env DXVIEW_PROF=1`), where the device has timestamp queries inside encoders (NVK and lavapipe do; the game
-//! logs a line when it doesn't). Ported from Skate 3 Rust Engine's `gpu_frame_time.rs` (Bevy 0.18, render graph
-//! nodes). Bevy 0.19 has no render graph nodes: the camera passes run in the `RenderGraph` schedule between its
-//! `Begin` and `Finish` sets, so the first timestamp is written by a `Begin` system and the last by a `Finish` system,
-//! each in its own command buffer. The queue runs command buffers in submission order, so they bracket the frame's
-//! passes and submits the same way.
+//! (`env DXVIEW_PROF=1`), where the device has timestamp queries inside encoders. Ported from Skate 3 Rust Engine's
+//! `gpu_frame_time.rs` (Bevy 0.18, render graph nodes). Bevy 0.19 has no render graph nodes: the camera passes run in
+//! the `RenderGraph` schedule between its `Begin` and `Finish` sets, so the first timestamp is written by a `Begin`
+//! system and the last by a `Finish` system, each in its own command buffer. The queue runs command buffers in
+//! submission order, so they bracket the frame's passes and submits the same way.
 //!
-//! The pass timers cover only their passes, and on the Switch they summed to less than the frame. Two timestamps
-//! around the whole graph tell the rest apart:
+//! The pass timers cover only their passes, and on the Switch they summed to less than the frame. Two timestamps around
+//! the whole graph tell the rest apart:
 //!
 //! - `render/dx_frame/busy_gpu`: from the frame's first command to its last. Less the sum of the pass times, it is the
 //!   work inside the frame that no pass timer covers.
 //! - `render/dx_frame/wait_gpu`: from the previous frame's last command to this frame's first. Idle time, plus what
-//!   runs between two frames' graphs: the uploads, the screenshot and readback copies, and any wait for the
-//!   compositor to release the swapchain image.
+//!   runs between two frames' graphs: the uploads, the screenshot and readback copies, and any wait for the compositor
+//!   to release the swapchain image.
 //!
-//! Both are read back a frame or two late, into `DiagnosticsStore`, and `prof.rs` prints their averages with the
-//! other `render/` timers.
+//! Both are read back a frame or two late, into `DiagnosticsStore`, and `prof.rs` prints their averages with the other
+//! `render/` timers. Run 6 printed neither on the console, and nothing in the log said why. So this version creates its
+//! query resources on the first `Begin` (no `RenderStartup` hook), polls the device so mapped readbacks are seen, and
+//! reports each step it reaches as one `[GPU frame]` line (`report_once`). The lines are queued by the render world and
+//! printed by the main world, whose output the log keeps, and the main world also says if the `Begin` set never runs.
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU8, AtomicU32, Ordering},
 };
 
 use bevy::{
@@ -28,7 +30,7 @@ use bevy::{
     platform::time::Instant,
     prelude::*,
     render::{
-        RenderApp, RenderStartup,
+        RenderApp,
         renderer::{RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue},
     },
 };
@@ -44,6 +46,28 @@ const MAPPING: u8 = 1;
 const MAPPED: u8 = 2;
 const FAILED: u8 = 3;
 
+/// One `[GPU frame]` line per bit: each step is reported once.
+const REPORT_START: u32 = 1 << 0;
+const REPORT_UNAVAILABLE: u32 = 1 << 1;
+const REPORT_CREATED: u32 = 1 << 2;
+const REPORT_FIRST: u32 = 1 << 3;
+const REPORT_NEGATIVE: u32 = 1 << 4;
+const REPORT_MAP_FAILED: u32 = 1 << 5;
+const REPORT_STALL: u32 = 1 << 6;
+static REPORTED: AtomicU32 = AtomicU32::new(0);
+
+/// The lines the render world has queued, for the main world to print (statics are shared by both worlds).
+static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Queues `[GPU frame] …` the first time `bit` is reported, and never again.
+fn report_once(bit: u32, text: impl FnOnce() -> String) {
+    if REPORTED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+        if let Ok(mut lines) = LINES.lock() {
+            lines.push(text());
+        }
+    }
+}
+
 pub struct GpuFrameTimePlugin;
 
 impl Plugin for GpuFrameTimePlugin {
@@ -51,13 +75,10 @@ impl Plugin for GpuFrameTimePlugin {
         let latest = Latest::default();
         app.insert_resource(latest.clone()).add_systems(PreUpdate, publish);
         if let Some(render) = app.get_sub_app_mut(RenderApp) {
-            render
-                .insert_resource(latest)
-                .add_systems(RenderStartup, create)
-                .add_systems(
-                    RenderGraph,
-                    (start.in_set(RenderGraphSystems::Begin), end.in_set(RenderGraphSystems::Finish)),
-                );
+            render.insert_resource(latest).add_systems(
+                RenderGraph,
+                (start.in_set(RenderGraphSystems::Begin), end.in_set(RenderGraphSystems::Finish)),
+            );
         }
     }
 }
@@ -91,10 +112,20 @@ struct Stamps {
     frame: u64,
     /// The last frame read back and its final timestamp, for the next frame's wait.
     previous: Option<(u64, u64)>,
+    /// Readbacks handed back so far.
+    taken: u64,
 }
 
 impl Stamps {
-    fn new(device: &RenderDevice, queue: &RenderQueue) -> Self {
+    /// The query resources, or `None` when the device can't time inside encoders.
+    fn try_new(device: &RenderDevice, queue: &RenderQueue) -> Option<Self> {
+        let needed = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        if !device.features().contains(needed) {
+            report_once(REPORT_UNAVAILABLE, || {
+                "no timestamp queries inside encoders on this device: no whole-frame GPU time".to_string()
+            });
+            return None;
+        }
         let device = device.wgpu_device();
         let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("dx_frame_timestamps"),
@@ -119,7 +150,7 @@ impl Stamps {
                 frame: 0,
             })
             .collect();
-        Self {
+        Some(Self {
             queries,
             resolve,
             slots,
@@ -127,25 +158,34 @@ impl Stamps {
             current: None,
             frame: 0,
             previous: None,
+            taken: 0,
+        })
+    }
+}
+
+/// The `Begin` set, before the camera passes: creates the query resources on the first frame, takes the frames the GPU
+/// has finished, oldest first (so each wait has the end of the frame before it), then writes this frame's first
+/// timestamp into a slot's query pair.
+fn start(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    latest: Res<Latest>,
+    stamps: Option<ResMut<Stamps>>,
+) {
+    report_once(REPORT_START, || "the Begin set runs; the frame's first timestamp is next".to_string());
+    let Some(mut stamps) = stamps else {
+        if let Some(new) = Stamps::try_new(&device, &queue) {
+            report_once(REPORT_CREATED, || {
+                format!("timestamps on: {SLOTS} frames in flight, {:.3} ns per tick", new.ms_per_tick * 1e6)
+            });
+            commands.insert_resource(new);
         }
-    }
-}
-
-/// Starts (and on every new device, restarts) the timers, if the device can time inside encoders.
-fn create(mut commands: Commands, device: Res<RenderDevice>, queue: Res<RenderQueue>) {
-    let needed = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
-    if !device.features().contains(needed) {
-        eprintln!("[GPU frame] no timestamp queries inside encoders on this device: no whole-frame GPU time");
         return;
-    }
-    commands.insert_resource(Stamps::new(&device, &queue));
-}
-
-/// The `Begin` set, before the camera passes: takes the frames the GPU has finished, oldest first, so each wait has the
-/// end of the frame before it, then writes this frame's first timestamp into a slot's query pair.
-fn start(device: Res<RenderDevice>, queue: Res<RenderQueue>, latest: Res<Latest>, stamps: Option<ResMut<Stamps>>) {
-    let Some(mut stamps) = stamps else { return };
+    };
     let stamps = &mut *stamps;
+    // Mapped readbacks are handed back when the device is polled; `Poll` doesn't wait.
+    let _ = device.wgpu_device().poll(wgpu::PollType::Poll);
     while let Some(index) = (0..SLOTS)
         .filter(|&i| stamps.slots[i].state.load(Ordering::Acquire) != FREE)
         .min_by_key(|&i| stamps.slots[i].frame)
@@ -155,26 +195,40 @@ fn start(device: Res<RenderDevice>, queue: Res<RenderQueue>, latest: Res<Latest>
             MAPPED => {
                 let (first, last) = {
                     let view = slot.readback.slice(..).get_mapped_range();
-                    let stamp = |i: usize| {
-                        u64::from_le_bytes(view[8 * i..8 * i + 8].try_into().expect("8 bytes"))
-                    };
+                    let stamp =
+                        |i: usize| u64::from_le_bytes(view[8 * i..8 * i + 8].try_into().expect("8 bytes"));
                     (stamp(0), stamp(1))
                 };
                 slot.readback.unmap();
+                stamps.taken += 1;
+                report_once(REPORT_FIRST, || format!("first readback: {first} then {last} ticks"));
                 let ms = |ticks: u64| ticks as f64 * stamps.ms_per_tick;
                 let wait = match stamps.previous {
                     Some((frame, end)) if frame + 1 == slot.frame => first.checked_sub(end).map(ms),
                     _ => None,
                 };
                 stamps.previous = Some((slot.frame, last));
-                if let (Some(busy), Ok(mut latest)) = (last.checked_sub(first).map(ms), latest.0.lock()) {
-                    *latest = Some(FrameTime { busy, wait });
+                match last.checked_sub(first) {
+                    Some(ticks) => {
+                        if let Ok(mut latest) = latest.0.lock() {
+                            *latest = Some(FrameTime { busy: ms(ticks), wait });
+                        }
+                    }
+                    None => report_once(REPORT_NEGATIVE, || {
+                        format!("a readback ends before it starts ({first} then {last} ticks): frames not timed")
+                    }),
                 }
             }
             FAILED => stamps.previous = None,
             _ => break,
         }
         slot.state.store(FREE, Ordering::Relaxed);
+    }
+    if stamps.taken == 0 && stamps.frame == 300 {
+        let states: Vec<u8> = stamps.slots.iter().map(|s| s.state.load(Ordering::Relaxed)).collect();
+        report_once(REPORT_STALL, || {
+            format!("no readback after 300 frames; slot states {states:?} (0 free, 1 mapping, 2 mapped, 3 failed)")
+        });
     }
     stamps.current = (0..SLOTS).find(|&i| stamps.slots[i].state.load(Ordering::Acquire) == FREE);
     if let Some(index) = stamps.current {
@@ -208,12 +262,25 @@ fn end(device: Res<RenderDevice>, queue: Res<RenderQueue>, stamps: Option<ResMut
     let state = slot.state.clone();
     state.store(MAPPING, Ordering::Relaxed);
     slot.readback.map_async(wgpu::MapMode::Read, .., move |result| {
+        if let Err(error) = &result {
+            report_once(REPORT_MAP_FAILED, || format!("a readback failed to map: {error:?}"));
+        }
         state.store(if result.is_ok() { MAPPED } else { FAILED }, Ordering::Release);
     });
 }
 
-/// Main world: the newest frame the render world read back, into the diagnostics the profiler prints.
+/// Main world: prints the `[GPU frame]` lines the render world queued (and says if its `Begin` set never ran), then
+/// hands the newest frame read back to the diagnostics the profiler prints.
 fn publish(latest: Res<Latest>, store: Option<ResMut<DiagnosticsStore>>) {
+    static FRAMES: AtomicU32 = AtomicU32::new(0);
+    if let Ok(mut lines) = LINES.lock() {
+        for line in lines.drain(..) {
+            eprintln!("[GPU frame] {line}");
+        }
+    }
+    if FRAMES.fetch_add(1, Ordering::Relaxed) == 300 && REPORTED.load(Ordering::Relaxed) & REPORT_START == 0 {
+        eprintln!("[GPU frame] the Begin set has not run after 300 frames: the render world's graph isn't timed");
+    }
     let Some(mut store) = store else { return };
     let Some(frame) = latest.0.lock().ok().and_then(|mut latest| latest.take()) else { return };
     let time = Instant::now();

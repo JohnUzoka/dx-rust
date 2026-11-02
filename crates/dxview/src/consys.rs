@@ -1149,20 +1149,23 @@ impl ConState {
             .as_ref()?;
         let e = au.export(sound_id)?;
         let path = format!("DeusExConAudio{pkg}.{}", e.name);
-        // Decoded already (prefetched in the background when the conversation began)?
-        let clip = match crate::sound::cached(&path) {
-            Some(c) => c,
-            None => {
-                let snd = unreal_pkg::objects::read_sound(&au.package, e).ok()?;
-                let c = imsim_audio::decode(&snd.data).map(Arc::new);
-                crate::sound::remember(&path, c.clone());
-                c
+        match crate::sound::cached(&path) {
+            // Decoded already (prefetched in the background when the conversation began): its exact length and lips.
+            Some(Some(clip)) => {
+                let (len, lips) = (clip.duration(), phonemes(&clip));
+                self.lips.insert((pkg.clone(), sound_id), Arc::new(lips));
+                self.lens.insert((pkg, sound_id), len);
+                Some(len)
             }
-        };
-        let (len, lips) = (clip.as_ref()?.duration(), phonemes(clip.as_ref()?));
-        self.lips.insert((pkg.clone(), sound_id), Arc::new(lips));
-        self.lens.insert((pkg, sound_id), len);
-        Some(len)
+            Some(None) => None,
+            // Not decoded yet: the length comes from the MP3 frame headers, so no frame waits on a decode. The
+            // background decoder gets the clip; this line has no lip shapes.
+            None => {
+                crate::sound::prefetch([path]);
+                let snd = unreal_pkg::objects::read_sound(&au.package, e).ok()?;
+                wav_seconds(&snd.data)
+            }
+        }
     }
 
     /// Queue every spoken line of a conversation for background decoding.
@@ -2323,11 +2326,11 @@ impl ConState {
     }
 }
 
-/// Length of a WAV payload in seconds (data bytes over the byte rate).
+/// Length of a speech payload in seconds: a WAV from its data chunk, an MP3 from its frame headers.
 fn wav_seconds(b: &[u8]) -> Option<f32> {
     if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
-        // MP3 (conversation speech): decode it.
-        return imsim_audio::decode(b).map(|c| c.duration());
+        // MP3 (conversation speech): from the frame headers, without decoding.
+        return imsim_audio::mp3_seconds(b);
     }
     let mut i = 12;
     let mut byte_rate = 0u32;

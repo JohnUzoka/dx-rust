@@ -219,6 +219,7 @@ pub fn first_level_setup(world: &mut World) {
 
 /// First schedule (before the save restore): start a requested load, and swap the map in once it's read.
 pub fn loader_system(world: &mut World) {
+    let _prof = crate::prof::scope("loader::loader_system");
     dev_goto(world);
     if !busy() {
         prefetch_tick(world);
@@ -502,6 +503,7 @@ pub fn loading_screen_system(
     mut shown: Local<bool>,
     mut font: Local<Option<Option<std::sync::Arc<crate::uicanvas::UiFont>>>>,
 ) {
+    let _prof = crate::prof::scope("loader::loading_screen_system");
     let want = busy();
     if want == *shown {
         return;
