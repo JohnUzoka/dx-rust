@@ -350,6 +350,9 @@ struct ViewClusteringReadbackData {
     metadata_staging_free_buffers: Vec<Buffer>,
     /// Statistics about GPU clustering that the GPU calculated last frame.
     last_frame_statistics: Option<ViewClusteringLastFrameStatistics>,
+    /// Switch build patch: the view's index list, kept between frames (`ViewClusterBindings::keep_index_lists`) and
+    /// made again only when the capacity grows.
+    index_lists: Option<Buffer>,
 }
 
 /// Statistics about GPU clustering that the GPU calculated last frame.
@@ -377,6 +380,7 @@ impl ViewClusteringReadbackData {
             metadata_staging_pending_buffers: vec![],
             metadata_staging_free_buffers: vec![],
             last_frame_statistics: None,
+            index_lists: None,
         }
     }
 
@@ -1240,7 +1244,7 @@ fn prepare_clustering_bind_groups(
             view_gpu_clustering_buffers
                 .scratchpad_offsets_and_counts_buffer
                 .buffer(),
-            maybe_clusterable_object_index_lists.buffer(),
+            view_cluster_bindings.kept_index_lists().or(maybe_clusterable_object_index_lists.buffer()),
             maybe_cluster_offsets_and_counts.buffer(),
         )
         else {
@@ -1644,7 +1648,7 @@ pub(crate) fn prepare_clusters_for_gpu_clustering(
         all_view_main_entities.insert(*view_main_entity);
 
         // Create the readback data.
-        let Ok(view_clustering_buffer_size_data) = render_view_clustering_index_list_sizes
+        let Ok(mut view_clustering_buffer_size_data) = render_view_clustering_index_list_sizes
             .views
             .entry(*view_main_entity)
             .or_insert_with(|| {
@@ -1703,9 +1707,24 @@ pub(crate) fn prepare_clusters_for_gpu_clustering(
             );
         }
 
-        // Make room for the appropriate number of indices.
-        view_clusters_bindings
-            .reserve_indices(view_clustering_buffer_size_data.max_index_list_capacity);
+        // Make room for the appropriate number of indices. Switch build patch: in a buffer the view keeps, not a
+        // capacity's worth of zeros serialized into a new buffer every frame (the passes write each cluster's
+        // stretch of the list before anything reads it).
+        let index_list_size = (view_clustering_buffer_size_data.max_index_list_capacity.max(1) * size_of::<u32>()) as u64;
+        let index_lists = match &view_clustering_buffer_size_data.index_lists {
+            Some(kept) if kept.size() == index_list_size => kept.clone(),
+            _ => {
+                let buffer = render_device.create_buffer(&BufferDescriptor {
+                    label: Some("clusterable object index lists (kept)"),
+                    size: index_list_size,
+                    usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                view_clustering_buffer_size_data.index_lists = Some(buffer.clone());
+                buffer
+            }
+        };
+        view_clusters_bindings.keep_index_lists(index_lists);
         view_clusters_bindings.write_buffers(render_device, &render_queue);
 
         // Allocate scratchpad offsets and counts.

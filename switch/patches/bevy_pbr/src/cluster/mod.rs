@@ -12,7 +12,7 @@ use bevy_light::{
 use bevy_math::{uvec4, UVec3, UVec4, Vec4};
 use bevy_render::{
     render_resource::{
-        BindingResource, BufferBindingType, BufferUsages, DownlevelFlags, RawBufferVec, ShaderSize,
+        BindingResource, Buffer, BufferBindingType, BufferUsages, DownlevelFlags, RawBufferVec, ShaderSize,
         ShaderType, StorageBuffer, UniformBuffer,
     },
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
@@ -250,6 +250,9 @@ pub struct ViewClusterBindings {
     n_indices: usize,
     n_offsets: usize,
     buffers: ViewClusterBuffers,
+    /// Switch build patch: with GPU clustering, an index list the view keeps from frame to frame, bound instead of
+    /// `buffers`' (see `keep_index_lists`).
+    kept_index_lists: Option<Buffer>,
 }
 
 pub fn init_global_clusterable_object_meta(
@@ -581,7 +584,20 @@ impl ViewClusterBindings {
             n_indices: 0,
             n_offsets: 0,
             buffers: ViewClusterBuffers::new(buffer_binding_type),
+            kept_index_lists: None,
         }
+    }
+
+    /// Switch build patch: binds `buffer` as the index list instead of uploading one. For GPU clustering, whose
+    /// passes write every cluster's stretch of the list before any shader reads it, so the list needn't start out
+    /// zeroed: a buffer kept between frames replaces a capacity's worth of zeros serialized and uploaded per frame.
+    pub(crate) fn keep_index_lists(&mut self, buffer: Buffer) {
+        self.kept_index_lists = Some(buffer);
+    }
+
+    /// The kept index list, if any (`keep_index_lists`).
+    pub(crate) fn kept_index_lists(&self) -> Option<&Buffer> {
+        self.kept_index_lists.as_ref()
     }
 
     pub fn clear(&mut self) {
@@ -727,6 +743,7 @@ impl ViewClusterBindings {
     }
 
     pub fn write_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
+        let kept = self.kept_index_lists.is_some();
         match &mut self.buffers {
             ViewClusterBuffers::Uniform {
                 clusterable_object_index_lists,
@@ -739,13 +756,18 @@ impl ViewClusterBindings {
                 clusterable_object_index_lists,
                 cluster_offsets_and_counts,
             } => {
-                clusterable_object_index_lists.write_buffer(render_device, render_queue);
+                if !kept {
+                    clusterable_object_index_lists.write_buffer(render_device, render_queue);
+                }
                 cluster_offsets_and_counts.write_buffer(render_device, render_queue);
             }
         }
     }
 
     pub fn clusterable_object_index_lists_binding(&self) -> Option<BindingResource<'_>> {
+        if let Some(kept) = &self.kept_index_lists {
+            return Some(kept.as_entire_binding());
+        }
         match &self.buffers {
             ViewClusterBuffers::Uniform {
                 clusterable_object_index_lists,
