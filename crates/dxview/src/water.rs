@@ -971,8 +971,10 @@ pub fn ocean_system(
     // Attached once Modern Water is on now or in the Modern mix Classic / Modern remembers, then kept for the session
     // (see postfx.rs: taking it off while SSAO was on crashed Bevy, and adding it recompiles every material - the
     // switch's wipe waits for that). A player who stays in Classic never pays for the extra depth pass.
+    // DXVIEW_WATER_NOPREPASS=1 never attaches it: an A/B of what the depth pass costs and saves in Classic, where
+    // nothing reads it (Modern Water's depth effect goes with it).
     static WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if modern() || crate::settings::get("Modern.ModernWater") > 0.5 {
+    if (modern() || crate::settings::get("Modern.ModernWater") > 0.5) && !env_on!("DXVIEW_WATER_NOPREPASS") {
         WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     for (e, _, has) in &cam {

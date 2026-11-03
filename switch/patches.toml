@@ -15,3 +15,9 @@ gilrs-core = { path = "switch/patches/gilrs-core" }
 # hidapi 2.6.7, whose build script stops on an OS it has no backend for. This copy builds on Horizon and
 # reports that there are no HID devices (src/horizon.rs); dualsense.rs then runs without a DualSense.
 hidapi = { path = "switch/patches/hidapi" }
+# bevy_pbr 0.19.1 with one change (src/lightmap/mod.rs, "Patched for the Switch build"): entities whose lightmap is
+# the same image share one slot. Without binding arrays, which the Switch build turns off (horizon.rs), Bevy gave
+# every lightmapped surface a slot of its own, and a bind group for it in every phase, rebuilt every frame: run 11's
+# profile spent 28% of both worker threads and 18% of the render thread on them, though DX RUST's surfaces all
+# share one lightmap atlas. Same picture; Bevy's lightmap docs advise the atlas for exactly this.
+bevy_pbr = { path = "switch/patches/bevy_pbr" }

@@ -18,12 +18,13 @@ env BEVY_HORIZON_CPU_PROFILE=1
 # A/B switches, one per run after the baseline:
 # multi_threaded
 # no_cpu_boost
-# gpu_clocks=fast
+# gpu_clocks=fast              # a measurement only: the user keeps the GPU at 307.2 MHz
 # env DXVIEW_NO_PREFETCH=1
 # env BH_THREAD_CORES=any
 # env BH_ROBUST_BUFFER_ACCESS=0
 # env DXVIEW_MIRROR_SLOTS=0    # no reflections: mirrored floors and glass show their own picture
 # ssao                         # SSAO as the game decides it; off on the Switch from run 11 (about 22 ms a frame)
+# env DXVIEW_WATER_NOPREPASS=1 # no depth prepass: the Modern look's remembered Modern Water turns it on in Classic too
 
 # Upstream's GPU-driven drawing (bindless materials, multi-draw indirect calls, the level culled on the GPU): off
 # on the Switch since run 10, because it cost the title about 30 ms of GPU time a frame in run 9.
