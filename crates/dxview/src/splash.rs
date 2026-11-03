@@ -29,8 +29,8 @@ const ITEM_MASS: f64 = 10.0;
 
 #[derive(Resource, Default)]
 pub struct Splashes {
-    /// Last known "in water" state per entity (for decorations, the feet for live NPCs).
-    inside: HashMap<Entity, bool>,
+    /// Last known "in water" state per entity (for decorations, the feet for live NPCs), and where it was checked.
+    inside: HashMap<Entity, (bool, DVec3)>,
     /// Last FootZoneChange splash per NPC (0.25 s gap).
     npc_time: HashMap<Entity, f64>,
     /// WaterRing.Tick's extra rings: (due, place, size).
@@ -73,12 +73,16 @@ pub fn splash_system(
     // (place, ring scale, sound volume, exit?)
     let mut fx: Vec<(DVec3, f32, f32, bool)> = Vec::new();
 
-    let cross = |st: &mut Splashes, e: Entity, now_in: bool| -> Option<bool> {
-        let was = st.inside.insert(e, now_in);
-        match was {
-            // First sight: no splash for starting out where it is.
-            None => None,
-            Some(w) if w != now_in => Some(now_in),
+    // Entering (Some(true)) or leaving (Some(false)) water at `p` since last frame; None otherwise and on first
+    // sight (no splash for starting out where it is). Water zones don't move, so a body still where it was checked
+    // last is still in or out of water as it was: only moved bodies look up their zone.
+    let cross = |st: &mut Splashes, e: Entity, p: DVec3| -> Option<bool> {
+        if st.inside.get(&e).is_some_and(|&(_, at)| at == p) {
+            return None;
+        }
+        let now_in = water_at(lvl, p).is_some();
+        match st.inside.insert(e, (now_in, p)) {
+            Some((w, _)) if w != now_in => Some(now_in),
             _ => None,
         }
     };
@@ -90,8 +94,7 @@ pub fn splash_system(
                 // A live pawn: Pawn.FootZoneChange.
                 let Some(b) = n.body.as_ref() else { continue };
                 let feet = b.location - DVec3::Z * (n.params.height - 1.0);
-                let now_in = water_at(lvl, feet).is_some();
-                if let Some(entered) = cross(&mut st, e, now_in) {
+                if let Some(entered) = cross(&mut st, e, feet) {
                     let last = st.npc_time.get(&e).copied().unwrap_or(-1.0);
                     if now - last <= 0.25 {
                         continue;
@@ -113,8 +116,7 @@ pub fn splash_system(
                     Some(b) => (b.location, b.velocity),
                     None => (d.body.location, d.body.velocity),
                 };
-                let now_in = water_at(lvl, loc).is_some();
-                if let Some(true) = cross(&mut st, e, now_in) {
+                if let Some(true) = cross(&mut st, e, loc) {
                     if vel.z < -200.0 {
                         let size = (0.0001 * d.mass * (250.0 - 0.5 * vel.z.max(-600.0))).clamp(1.0, 3.0) as f32;
                         fx.push((surface_near(lvl, loc), size, size, false));
@@ -126,8 +128,7 @@ pub fn splash_system(
 
     for (e, mut l, item) in &mut loose {
         seen.push(e);
-        let now_in = water_at(lvl, l.pos).is_some();
-        if let Some(true) = cross(&mut st, e, now_in) {
+        if let Some(true) = cross(&mut st, e, l.pos) {
             let at = surface_near(lvl, l.pos);
             if item.is_some() {
                 // Inventory (Pickup state).
@@ -144,8 +145,7 @@ pub fn splash_system(
 
     for (e, mut g) in &mut grenades {
         seen.push(e);
-        let now_in = water_at(lvl, g.pos).is_some();
-        if let Some(true) = cross(&mut st, e, now_in) {
+        if let Some(true) = cross(&mut st, e, g.pos) {
             g.vel *= 0.2;
             let vz = g.vel.z;
             for r in g.rot_rate.iter_mut() {

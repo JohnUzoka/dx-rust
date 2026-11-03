@@ -6784,23 +6784,33 @@ pub fn npc_weapon_models(
         } else {
             anim.mesh.weapon_coords(start, frames, f)
         };
+        // Lean Updates: visibility and transform written only when they differ (a write marks them changed, and
+        // Bevy then propagates and re-extracts the weapon every frame, a holstered one too).
+        let lean = crate::perf::lean_updates();
         let Some([o, x, y, z]) = coords else {
-            *vis = Visibility::Hidden;
+            if !lean || *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
             continue;
         };
-        *vis = Visibility::Inherited;
+        if !lean || *vis != Visibility::Inherited {
+            *vis = Visibility::Inherited;
+        }
         // Pawn-local Unreal: p' = O * DrawScale + [X Y Z] * ThirdPersonScale * p; then into Bevy axes.
         let ds = anim.draw_scale;
         let r = Mat3::from_cols(Vec3::from(x), Vec3::from(y), Vec3::from(z)) * hm.scale;
         let s = swap();
         let lin = s * r * s;
         let t = Vec3::from(ue_to_bevy([o[0] * ds, o[1] * ds, o[2] * ds]));
-        *rtf = Transform::from_matrix(Mat4::from_cols(
+        let pose = Transform::from_matrix(Mat4::from_cols(
             lin.x_axis.extend(0.0),
             lin.y_axis.extend(0.0),
             lin.z_axis.extend(0.0),
             t.extend(1.0),
         ));
+        if !lean || *rtf != pose {
+            *rtf = pose;
+        }
         // Light it from the static lights near the pawn now and then.
         hm.relight -= dt;
         if hm.relight <= 0.0 {
