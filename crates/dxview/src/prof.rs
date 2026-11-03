@@ -513,9 +513,11 @@ pub fn scene_stats_system(
         return;
     }
     st.frames += 1;
+    let mut mesh_ids = Vec::new();
     for e in mesh_ev.read() {
         if let AssetEvent::Modified { id } = e {
             st.mesh_mod += 1;
+            mesh_ids.push(*id);
             if let Some(m) = meshes.get(*id) {
                 st.mesh_bytes += m.count_vertices() as u64 * 48;
             }
@@ -529,10 +531,15 @@ pub fn scene_stats_system(
             }
         }
     }
+    let mut mat_ids = Vec::new();
     for e in mat_ev.read() {
-        if let AssetEvent::Modified { .. } = e {
+        if let AssetEvent::Modified { id } = e {
             st.mat_mod += 1;
+            mat_ids.push(*id);
         }
+    }
+    if let Ok(mut m) = MODIFIED.lock() {
+        *m = (mesh_ids, mat_ids);
     }
     let now = Instant::now();
     if let Some(l) = st.last {
@@ -1158,4 +1165,39 @@ pub fn census_system(world: &mut bevy::prelude::World, mut frame: bevy::prelude:
     for (k, (roots, n, shown, out)) in v.iter().take(25) {
         println!("PROF census ui {n:5} nodes ({shown} shown, {out} out) in {roots} tree(s) [{k}]");
     }
+    // The meshes and materials modified in the latest frame (each one is re-uploaded, a material's bind group made
+    // again), by the tree of the entity drawing them: who rewrites assets every frame.
+    let (mesh_ids, mat_ids) = MODIFIED.lock().map(|m| m.clone()).unwrap_or_default();
+    let mesh_ids: std::collections::HashSet<bevy::asset::AssetId<Mesh>> = mesh_ids.into_iter().collect();
+    let mat_ids: std::collections::HashSet<bevy::asset::AssetId<StandardMaterial>> = mat_ids.into_iter().collect();
+    let mut mq = world.query::<(Entity, &Mesh3d, Option<&MeshMaterial3d<StandardMaterial>>, Option<&ChildOf>)>();
+    let parts: Vec<(Entity, bool, bool, Option<Entity>)> = mq
+        .iter(world)
+        .map(|(e, m, mat, p)| (e, mesh_ids.contains(&m.0.id()), mat.is_some_and(|m| mat_ids.contains(&m.0.id())), p.map(|p| p.parent())))
+        .filter(|p| p.1 || p.2)
+        .collect();
+    let mut owners: HashMap<String, (usize, usize)> = HashMap::new();
+    for (e, mesh, mat, parent) in parts {
+        let mut root = parent.unwrap_or(e);
+        while let Some(p) = world.get::<ChildOf>(root) {
+            root = p.parent();
+        }
+        let mut names: Vec<String> = world
+            .inspect_entity(root)
+            .map(|it| it.filter_map(|c| c.name().to_string().strip_prefix("dxview::").map(str::to_string)).collect())
+            .unwrap_or_default();
+        names.sort();
+        let k = owners.entry(names.join(",")).or_insert((0, 0));
+        *k = (k.0 + usize::from(mesh), k.1 + usize::from(mat));
+    }
+    let mut v: Vec<_> = owners.into_iter().collect();
+    v.sort_by(|a, b| (b.1 .0 + b.1 .1).cmp(&(a.1 .0 + a.1 .1)));
+    for (k, (meshes, mats)) in v.iter().take(15) {
+        println!("PROF census modified {meshes:4} meshes {mats:3} materials [{k}]");
+    }
 }
+
+/// The mesh and material assets modified in the latest frame (scene_stats_system), for the census.
+#[allow(clippy::type_complexity)]
+static MODIFIED: Mutex<(Vec<bevy::asset::AssetId<bevy::prelude::Mesh>>, Vec<bevy::asset::AssetId<bevy::prelude::StandardMaterial>>)> =
+    Mutex::new((Vec::new(), Vec::new()));

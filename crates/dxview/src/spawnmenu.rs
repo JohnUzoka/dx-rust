@@ -63,7 +63,6 @@ const AUGS: &[&str] = &[
 #[derive(Resource, Default)]
 pub struct SpawnMenu {
     pub open: bool,
-    built: bool,
 }
 
 #[derive(Component)]
@@ -247,10 +246,6 @@ pub fn spawn_menu_system(
     ),
     mut inv: ResMut<crate::pickups::PlayerInventory>,
 ) {
-    if !menu.built {
-        menu.built = true;
-        build(&mut commands, &mut assets, &mut images);
-    }
     // Debug Mode (Settings > Enhancements) off: no spawn menu, and its god mode goes too.
     if !crate::settings::debug_mode() {
         if menu.open {
@@ -263,16 +258,20 @@ pub fn spawn_menu_system(
     if toggle {
         menu.open = !menu.open;
         if menu.open {
+            // Built when first opened (and again after a map change took it): its few hundred hidden nodes would
+            // otherwise be laid out, extracted and walked every frame, by a menu only Debug Mode's Insert opens.
+            if root.is_empty() {
+                build(&mut commands, &mut assets, &mut images);
+            }
             cursor.visible = true;
             cursor.grab_mode = CursorGrabMode::None;
         }
     }
+    let want = if menu.open { Visibility::Inherited } else { Visibility::Hidden };
     for mut v in &mut root {
-        *v = if menu.open {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
+        if *v != want {
+            *v = want;
+        }
     }
     if !menu.open {
         return;
