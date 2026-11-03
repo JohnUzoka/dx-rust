@@ -64,7 +64,7 @@ pub fn postfx_system(
             With<crate::augdisplay::AugViewCam>,
         )>,
     >,
-    mut ao_gen: Local<Option<(bool, u32, bool)>>,
+    mut ao_gen: Local<Option<(bool, u32, bool, bool)>>,
 ) {
     // The cameras' make-up never changes in play: the SSAO pass, the depth / normal prepasses, MSAA off with SMAA.
     // Each of those is part of every material's pipeline, so adding or removing one recompiled them all (a long
@@ -76,14 +76,17 @@ pub fn postfx_system(
     // the lights in each fragment's cluster.
     let strength = crate::shadowlight::shadow_strength();
     let detail = crate::settings::get("DetailTextures") > 0.5;
-    if *ao_gen != Some((ao, strength.to_bits(), detail)) {
-        *ao_gen = Some((ao, strength.to_bits(), detail));
+    // Lean Rendering's Classic lights (shadowlight.rs): a change re-specializes the level's pipelines.
+    let classic = crate::shadowlight::classic_lights();
+    if *ao_gen != Some((ao, strength.to_bits(), detail, classic)) {
+        *ao_gen = Some((ao, strength.to_bits(), detail, classic));
         let ids: Vec<_> = bsp.ids().collect();
         for id in ids {
             if let Some(mut m) = bsp.get_mut(id) {
                 m.extension.params.q.x = if ao { 0.85 } else { 0.0 };
                 m.extension.params.p.x = strength;
                 m.extension.params.q.z = if detail { 1.0 } else { 0.0 };
+                m.extension.params.q.w = if classic { 1.0 } else { 0.0 };
             }
         }
     }

@@ -46,7 +46,7 @@ pub struct BspShadowParams {
     /// x: strength (0 = no shadows), y: 1 / ENCODE, z: dx-level's LIGHT_GAIN.
     pub p: Vec4,
     /// x: Ambient Occlusion's strength on the lightmap (0 = off; the SSAO pass itself always runs, so switching it
-    /// never recompiles every material).
+    /// never recompiles every material). w: 1 = the dynamic lights as Unreal 1 drew them (`classic_lights`).
     pub q: Vec4,
     /// Remastered lighting (relight.rs): x 1 = on, y highlight strength, z roughness, w metalness.
     pub r: Vec4,
@@ -89,16 +89,22 @@ impl<'a> From<&'a BspShadow> for BspShadowParams {
 /// What a BSP material's fragment shader compiles in: its spot shadows (`p.x` > 0) and its remastered lighting
 /// (`r.x` on) only when it uses them. The branches they replace were already skipped at run time, so the picture is
 /// the same. With the Switch's one-tap shadow filter (horizon.rs), the Switch's BSP shader went from 4,825
-/// instructions to 2,790 (NAK); its 96 registers stayed, so a path that runs sets them.
+/// instructions to 2,790 (NAK); its 96 registers stayed, so a path that runs sets them. That path is Bevy's lighting
+/// of the dynamic lights, which `classic_lights` (`q.w`) replaces.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BspShadowKey {
     spot_shadows: bool,
     relight: bool,
+    classic_lights: bool,
 }
 
 impl From<&BspShadow> for BspShadowKey {
     fn from(m: &BspShadow) -> Self {
-        BspShadowKey { spot_shadows: m.params.p.x > 0.0, relight: m.params.r.x > 0.5 }
+        BspShadowKey {
+            spot_shadows: m.params.p.x > 0.0,
+            relight: m.params.r.x > 0.5,
+            classic_lights: m.params.q.w > 0.5,
+        }
     }
 }
 
@@ -126,6 +132,9 @@ impl MaterialExtension for BspShadow {
             if key.bind_group_data.relight {
                 fragment.shader_defs.push("BSP_RELIGHT".into());
             }
+            if key.bind_group_data.classic_lights {
+                fragment.shader_defs.push("BSP_CLASSIC_LIGHTS".into());
+            }
         }
         Ok(())
     }
@@ -137,7 +146,7 @@ pub fn bsp_material(base: StandardMaterial) -> BspMaterial {
         extension: BspShadow {
             params: BspShadowParams {
                 p: Vec4::new(shadow_strength(), 1.0 / ENCODE, dx_level::lighting::LIGHT_GAIN, env_val!("DXVIEW_SHADOW_DEBUG").map(str::to_owned).and_then(|v| v.parse().ok()).unwrap_or(0.0)),
-                q: Vec4::new(if crate::postfx::ao_on() { 0.85 } else { 0.0 }, 0.0, 0.0, 0.0),
+                q: Vec4::new(if crate::postfx::ao_on() { 0.85 } else { 0.0 }, 0.0, 0.0, if classic_lights() { 1.0 } else { 0.0 }),
                 r: Vec4::ZERO,
                 s: Vec4::new(1.0, 0.0, 0.0, 0.0),
                 u: Vec4::ZERO,
@@ -147,6 +156,14 @@ pub fn bsp_material(base: StandardMaterial) -> BspMaterial {
             detail: None,
         },
     }
+}
+
+/// Lean Rendering lights the level's surfaces the way Unreal 1 did (bsp_shadow.wgsl, `BSP_CLASSIC_LIGHTS`): each
+/// dynamic light (dynlight.rs) added to the lightmap as the bake added the static ones, diffuse only, instead of
+/// Bevy's PBR lighting, whose light loop held the BSP shader at 96 registers. `env DXVIEW_BEVY_LIGHTS=1` keeps Bevy's
+/// lighting, to compare.
+pub fn classic_lights() -> bool {
+    crate::perf::lean_rendering() && !env_on!("DXVIEW_BEVY_LIGHTS")
 }
 
 pub const SPOTS_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("2c7d9a51-6e3b-4f08-8a1c-5b9e0d4f7a63");
