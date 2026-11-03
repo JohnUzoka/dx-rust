@@ -1999,10 +1999,13 @@ fn texture_pixels_due(mut seen: Local<u64>, mut wait: Local<u8>) -> bool {
     *wait == 0
 }
 
+/// A click takes the mouse for looking. Escape doesn't let it go here: in play it opens the menu, which frees the
+/// cursor and takes it back on closing, and the screens that use Escape (conversations, cut scenes, the inventory,
+/// terminals) keep the cursor as they need; freeing it under them left play without mouse look until a click, and
+/// a pad's right stick scrolling the belt.
 fn cursor_grab(
     mut cursor: Single<&mut CursorOptions>,
     mouse: Res<ButtonInput<MouseButton>>,
-    key: Res<ButtonInput<KeyCode>>,
     menu: Res<spawnmenu::SpawnMenu>,
     binds: Res<keybinds::Bindings>,
 ) {
@@ -2012,10 +2015,6 @@ fn cursor_grab(
     if mouse.just_pressed(MouseButton::Left) && !menu.open && !consys::third_person() {
         cursor.visible = false;
         cursor.grab_mode = CursorGrabMode::Locked;
-    }
-    if key.just_pressed(KeyCode::Escape) && !menus::open() {
-        cursor.visible = true;
-        cursor.grab_mode = CursorGrabMode::None;
     }
 }
 
