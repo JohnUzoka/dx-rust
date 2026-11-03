@@ -62,6 +62,7 @@ pub struct BspShadowParams {
 /// render thread records a fraction of the commands. Without binding arrays (old GPUs) it falls back to one bind
 /// group per material, as before.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+#[bind_group_data(BspShadowKey)]
 #[data(100, BspShadowParams, binding_array(111))]
 #[bindless(index_table(range(100..106), binding(110)))]
 pub struct BspShadow {
@@ -85,6 +86,22 @@ impl<'a> From<&'a BspShadow> for BspShadowParams {
     }
 }
 
+/// What a BSP material's fragment shader compiles in: its spot shadows (`p.x` > 0) and its remastered lighting
+/// (`r.x` on) only when it uses them. The branches they replace were already skipped at run time, so the picture is
+/// the same. With the Switch's one-tap shadow filter (horizon.rs), the Switch's BSP shader went from 4,825
+/// instructions to 2,790 (NAK); its 96 registers stayed, so a path that runs sets them.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct BspShadowKey {
+    spot_shadows: bool,
+    relight: bool,
+}
+
+impl From<&BspShadow> for BspShadowKey {
+    fn from(m: &BspShadow) -> Self {
+        BspShadowKey { spot_shadows: m.params.p.x > 0.0, relight: m.params.r.x > 0.5 }
+    }
+}
+
 impl MaterialExtension for BspShadow {
     fn fragment_shader() -> ShaderRef {
         BSP_SHADER.into()
@@ -95,6 +112,22 @@ impl MaterialExtension for BspShadow {
     // and a dead flashlight.
     fn enable_prepass() -> bool {
         true
+    }
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialExtensionPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        key: bevy::pbr::MaterialExtensionKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            if key.bind_group_data.spot_shadows {
+                fragment.shader_defs.push("BSP_SPOT_SHADOWS".into());
+            }
+            if key.bind_group_data.relight {
+                fragment.shader_defs.push("BSP_RELIGHT".into());
+            }
+        }
+        Ok(())
     }
 }
 

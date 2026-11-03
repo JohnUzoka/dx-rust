@@ -3,6 +3,10 @@
 // colour x intensity carries the Unreal light's colour (x ENCODE), its range the Unreal radius. Where its shadow
 // map says the texel is blocked, the light's own term of the bake comes off the lightmap - in gamma space, as
 // dx-level's bake summed it: colour x (1 - d / r) x |N.L| x LIGHT_GAIN.
+//
+// BSP_SPOT_SHADOWS and BSP_RELIGHT (shadowlight.rs, BspShadowKey) compile the spot-shadow walk and remastered
+// lighting in only for materials that use them: the branches that guard them are uniform per material, so a material
+// without them never ran them, but the shader carried their code.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -252,6 +256,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var spec = vec3<f32>(0.0);
     var unlit_glow = 0.0;
 #ifdef LIGHTMAP
+#ifdef BSP_SPOT_SHADOWS
     if (bsp.p.x > 0.0) {
         var ids = vec4<f32>(0.0);
         var has_ids = false;
@@ -270,9 +275,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             has_ids,
         );
     }
+#endif // BSP_SPOT_SHADOWS
 #endif
 #ifdef LIGHTMAP
 #ifdef VERTEX_COLORS
+#ifdef BSP_RELIGHT
     if (bsp.r.x > 0.5) {
         // Surfaces drawn full bright (PF_Unlit: lamps, screens, signs) have a white lightmap: they glow instead.
         if (min(pbr_input.lightmap_light.r, min(pbr_input.lightmap_light.g, pbr_input.lightmap_light.b)) > 0.98) {
@@ -284,6 +291,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             spec = r.spec * bsp.r.y;
         }
     }
+#endif // BSP_RELIGHT
 #endif
 #endif
 #ifdef SCREEN_SPACE_AMBIENT_OCCLUSION

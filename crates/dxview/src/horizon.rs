@@ -37,7 +37,9 @@
 //!
 //! The settings the Switch starts with (`switch_settings`), unless settings.txt already has a value: Anti-Aliasing and
 //! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), and Open Sea on (water.rs). They are on the
-//! Settings > Enhancements list like the rest.
+//! Settings > Enhancements list like the rest. While neither Realtime Shadows nor Soft Shadows is on, every 3D camera
+//! uses Bevy's one-tap `Hardware2x2` shadow filter instead of its 8- to 9-tap Gaussian (`shadow_filter`): the filter is
+//! compiled into every lit shader whether or not a light casts: 450 of the PBR shaders' 3,120 instructions (NAK).
 
 use bevy::prelude::*;
 
@@ -161,6 +163,7 @@ impl Plugin for SwitchPlugin {
         {
             _app.add_plugins(bevy_horizon::HorizonPlugin);
             _app.add_systems(Startup, screen_size);
+            _app.add_systems(Update, shadow_filter);
             _app.add_systems(PreUpdate, dock_clocks);
             _app.add_systems(Last, (cpu_boost, shadow_lights_log, draw_check_collect));
             if let Some(render) = _app.get_sub_app_mut(bevy::render::RenderApp) {
@@ -197,6 +200,21 @@ impl Plugin for SwitchPlugin {
 fn screen_size(mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>) {
     for mut window in &mut windows {
         window.resolution.set_physical_resolution(1280, 720);
+    }
+}
+
+/// Every 3D camera's shadow filter: Bevy's one-tap `Hardware2x2` while neither Realtime Shadows nor Soft Shadows is on
+/// (the module notes), its Gaussian otherwise. With no light casting, the picture is the same. A change re-specializes
+/// the lit pipelines, so it happens only when one of those settings changes.
+#[cfg(target_os = "horizon")]
+fn shadow_filter(mut commands: Commands, cameras: Query<(Entity, Option<&bevy::light::ShadowFilteringMethod>), With<Camera3d>>) {
+    use bevy::light::ShadowFilteringMethod;
+    let shadows = crate::settings::get("RealtimeShadows") > 0.5 || crate::settings::get("SoftShadows") > 0.5;
+    let want = if shadows { ShadowFilteringMethod::Gaussian } else { ShadowFilteringMethod::Hardware2x2 };
+    for (e, now) in &cameras {
+        if now != Some(&want) {
+            commands.entity(e).insert(want);
+        }
     }
 }
 
