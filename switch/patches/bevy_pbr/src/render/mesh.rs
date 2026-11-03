@@ -790,6 +790,8 @@ bitflags::bitflags! {
         /// CPU culling has been disabled because the `NoCpuCulling` component
         /// is present on the mesh instance.
         const NO_CPU_CULLING          = 1 << 5;
+        /// Switch build patch: the mesh has [`crate::SkipPrepass`] and is left out of the depth prepass.
+        const NO_PREPASS              = 1 << 6;
     }
 }
 
@@ -1101,6 +1103,7 @@ impl RenderMeshInstanceSharedFlat {
         not_shadow_caster: bool,
         no_automatic_batching: bool,
         no_cpu_culling: bool,
+        no_prepass: bool,
     ) -> Self {
         Self::new(
             previous_transform,
@@ -1110,6 +1113,7 @@ impl RenderMeshInstanceSharedFlat {
             not_shadow_caster,
             no_automatic_batching,
             no_cpu_culling,
+            no_prepass,
         )
     }
 
@@ -1121,6 +1125,7 @@ impl RenderMeshInstanceSharedFlat {
         material_bindings_index: MaterialBindingId,
         not_shadow_caster: bool,
         no_automatic_batching: bool,
+        no_prepass: bool,
     ) -> Self {
         Self::new(
             previous_transform,
@@ -1130,6 +1135,7 @@ impl RenderMeshInstanceSharedFlat {
             not_shadow_caster,
             no_automatic_batching,
             false,
+            no_prepass,
         )
     }
 
@@ -1141,6 +1147,7 @@ impl RenderMeshInstanceSharedFlat {
         not_shadow_caster: bool,
         no_automatic_batching: bool,
         no_cpu_culling: bool,
+        no_prepass: bool,
     ) -> Self {
         let mut mesh_instance_flags = RenderMeshInstanceFlags::empty();
         mesh_instance_flags.set(RenderMeshInstanceFlags::SHADOW_CASTER, !not_shadow_caster);
@@ -1153,6 +1160,7 @@ impl RenderMeshInstanceSharedFlat {
             previous_transform.is_some(),
         );
         mesh_instance_flags.set(RenderMeshInstanceFlags::NO_CPU_CULLING, no_cpu_culling);
+        mesh_instance_flags.set(RenderMeshInstanceFlags::NO_PREPASS, no_prepass);
 
         RenderMeshInstanceSharedFlat {
             asset_id: mesh.id().into(),
@@ -1776,6 +1784,7 @@ pub fn extract_meshes_for_cpu_building(
             Has<NoAutomaticBatching>,
             Option<&VisibilityRange>,
             Option<&RenderLayers>,
+            Has<crate::SkipPrepass>,
         )>,
     >,
 ) {
@@ -1796,6 +1805,7 @@ pub fn extract_meshes_for_cpu_building(
             no_automatic_batching,
             visibility_range,
             render_layers,
+            no_prepass,
         )| {
             if !view_visibility.get() {
                 return;
@@ -1829,6 +1839,7 @@ pub fn extract_meshes_for_cpu_building(
                 material_bindings_index,
                 not_shadow_caster,
                 no_automatic_batching,
+                no_prepass,
             );
 
             let world_from_local = transform.affine();
@@ -1885,6 +1896,7 @@ type GpuMeshExtractionQuery = (
         Has<NotShadowCaster>,
         Has<NoAutomaticBatching>,
         Has<NoCpuCulling>,
+        Has<crate::SkipPrepass>,
     ),
     Option<Read<VisibilityRange>>,
     Option<Read<RenderLayers>>,
@@ -1920,6 +1932,7 @@ pub fn extract_meshes_for_gpu_building(
                     Changed<NotShadowCaster>,
                     Changed<NoAutomaticBatching>,
                     Changed<NoCpuCulling>,
+                    Changed<crate::SkipPrepass>,
                 )>,
                 Changed<VisibilityRange>,
                 Changed<SkinnedMesh>,
@@ -1939,6 +1952,7 @@ pub fn extract_meshes_for_gpu_building(
         mut removed_no_cpu_culling_query,
         mut removed_visibility_range_query,
         mut removed_skinned_mesh_query,
+        mut removed_skip_prepass_query,
     ): (
         Extract<RemovedComponents<PreviousGlobalTransform>>,
         Extract<RemovedComponents<Lightmap>>,
@@ -1952,6 +1966,7 @@ pub fn extract_meshes_for_gpu_building(
         Extract<RemovedComponents<NoCpuCulling>>,
         Extract<RemovedComponents<VisibilityRange>>,
         Extract<RemovedComponents<SkinnedMesh>>,
+        Extract<RemovedComponents<crate::SkipPrepass>>,
     ),
     all_meshes_query: Extract<Query<GpuMeshExtractionQuery>>,
     mut removed_meshes_query: Extract<RemovedComponents<Mesh3d>>,
@@ -1991,7 +2006,8 @@ pub fn extract_meshes_for_gpu_building(
             .chain(removed_no_automatic_batching_query.read())
             .chain(removed_no_cpu_culling_query.read())
             .chain(removed_visibility_range_query.read())
-            .chain(removed_skinned_mesh_query.read()),
+            .chain(removed_skinned_mesh_query.read())
+            .chain(removed_skip_prepass_query.read()),
     );
 
     // We have to skip the meshes in the potential reextraction set if we
@@ -2098,6 +2114,7 @@ fn extract_mesh_for_gpu_building(
             not_shadow_caster,
             no_automatic_batching,
             no_cpu_culling,
+            no_prepass,
         ),
         visibility_range,
         render_layers,
@@ -2137,6 +2154,7 @@ fn extract_mesh_for_gpu_building(
         not_shadow_caster,
         no_automatic_batching,
         no_cpu_culling,
+        no_prepass,
     );
 
     // Calculate the lightmap UV rect, if applicable.

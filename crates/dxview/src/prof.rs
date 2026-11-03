@@ -1114,4 +1114,48 @@ pub fn census_system(world: &mut bevy::prelude::World, mut frame: bevy::prelude:
     for (k, n) in v.iter().take(40) {
         println!("PROF census {n:5}  {k}");
     }
+    // UI nodes by the tree they belong to, named by its root's distinctive components (the game's own, else Bevy's
+    // short names): what Bevy's UI layout, extract and drawing go through every frame, shown or not. "out" counts
+    // the nodes laid out of the flow with Display::None.
+    let mut nq = world.query_filtered::<(Entity, Option<&ChildOf>, &InheritedVisibility, &Node), With<Node>>();
+    let nodes: Vec<(Entity, Option<Entity>, bool, bool)> =
+        nq.iter(world).map(|(e, p, v, n)| (e, p.map(|p| p.parent()), v.get(), n.display == Display::None)).collect();
+    let up: HashMap<Entity, Entity> = nodes.iter().filter_map(|&(e, p, _, _)| Some((e, p?))).collect();
+    let mut trees: HashMap<Entity, (usize, usize, usize)> = HashMap::new();
+    for &(e, _, shown, out) in &nodes {
+        let mut root = e;
+        while let Some(&p) = up.get(&root) {
+            root = p;
+        }
+        let t = trees.entry(root).or_insert((0, 0, 0));
+        *t = (t.0 + 1, t.1 + usize::from(shown), t.2 + usize::from(out));
+    }
+    const COMMON: &[&str] = &[
+        "Node", "ComputedNode", "ComputedUiTargetCamera", "ComputedUiRenderTargetInfo", "UiTransform", "UiGlobalTransform",
+        "Visibility", "InheritedVisibility", "ViewVisibility", "ZIndex", "FocusPolicy", "ScrollPosition", "Children",
+        "BackgroundColor", "BorderColor", "BorderRadius", "Outline", "Pickable", "Transform", "GlobalTransform",
+        "TransformTreeChanged", "ChildOf", "Name", "LayoutConfig", "UiAntiAlias", "IsDefaultUiCamera",
+    ];
+    let mut named: HashMap<String, (usize, usize, usize, usize)> = HashMap::new();
+    for (root, (n, shown, out)) in trees {
+        let all: Vec<String> = world.inspect_entity(root).map(|it| it.map(|c| c.name().to_string()).collect()).unwrap_or_default();
+        let ours: Vec<String> = all.iter().filter_map(|c| c.strip_prefix("dxview::").map(str::to_string)).collect();
+        let mut names: Vec<String> = if ours.is_empty() {
+            all.iter()
+                .map(|c| c.split('<').next().unwrap_or(c).rsplit("::").next().unwrap_or(c).to_string())
+                .filter(|c| !COMMON.contains(&c.as_str()))
+                .collect()
+        } else {
+            ours
+        };
+        names.sort();
+        names.dedup();
+        let k = named.entry(names.join(",")).or_insert((0, 0, 0, 0));
+        *k = (k.0 + 1, k.1 + n, k.2 + shown, k.3 + out);
+    }
+    let mut v: Vec<_> = named.into_iter().collect();
+    v.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    for (k, (roots, n, shown, out)) in v.iter().take(25) {
+        println!("PROF census ui {n:5} nodes ({shown} shown, {out} out) in {roots} tree(s) [{k}]");
+    }
 }

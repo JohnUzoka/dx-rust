@@ -51,6 +51,13 @@ use core::any::TypeId;
 pub use prepass_bindings::*;
 use tracing::{error, warn};
 
+/// Switch build patch (DX RUST `switch/patches/bevy_pbr`): a mesh entity with this is drawn by its views' main
+/// passes but left out of their depth prepass, so the prepass holds only what is worth testing against there
+/// (the game uses it to keep small props out, which saves a draw each on the CPU). Set it before the mesh is
+/// first extracted: an entity already specialized for the prepass stays there until it is respecialized.
+#[derive(Component, Clone, Copy, Default, Debug)]
+pub struct SkipPrepass;
+
 #[cfg(feature = "meshlet")]
 use crate::meshlet::{
     prepare_material_meshlet_meshes_prepass, queue_material_meshlet_meshes, InstanceManager,
@@ -222,13 +229,16 @@ type PreviousMeshFilter = Or<(With<Mesh3d>, With<MeshletMesh3d>)>;
 
 pub fn update_mesh_previous_global_transforms(
     mut commands: Commands,
-    views: Query<&Camera, Or<(With<Camera3d>, With<ShadowView>)>>,
+    views: Query<&Camera, (Or<(With<Camera3d>, With<ShadowView>)>, With<MotionVectorPrepass>)>,
     new_meshes: Query<
         (Entity, &GlobalTransform),
         (PreviousMeshFilter, Without<PreviousGlobalTransform>),
     >,
     mut meshes: Query<(Ref<GlobalTransform>, &mut PreviousGlobalTransform), PreviousMeshFilter>,
 ) {
+    // Switch build patch: only motion vectors read the previous transforms, so with no active view drawing them
+    // (the Switch's settings: no temporal anti-aliasing) the walk over every mesh each frame is skipped. A view that
+    // starts drawing them gets every mesh's transform from its first frame, as a newly spawned mesh does.
     if !views.iter().any(|camera| camera.is_active) {
         return;
     }
@@ -1016,6 +1026,10 @@ pub(crate) fn specialize_prepass_material_meshes(
                     removals.push((extracted_view.retained_view_entity, *visible_entity));
                     continue;
                 }
+                if mesh_instance.flags().contains(RenderMeshInstanceFlags::NO_PREPASS) {
+                    removals.push((extracted_view.retained_view_entity, *visible_entity));
+                    continue;
+                }
                 let Some(mesh) = render_meshes.get(mesh_instance.mesh_asset_id()) else {
                     continue;
                 };
@@ -1289,6 +1303,9 @@ pub fn queue_prepass_material_meshes(
                     .insert((*render_entity, *visible_entity));
                 continue;
             };
+            if mesh_instance.flags().contains(RenderMeshInstanceFlags::NO_PREPASS) {
+                continue;
+            }
             let Some(material) = render_materials.get(material_instance.asset_id) else {
                 view_pending_prepass_mesh_material_queues
                     .current_frame

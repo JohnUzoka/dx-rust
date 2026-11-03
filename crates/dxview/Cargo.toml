@@ -32,6 +32,10 @@ avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", 
 trace = ["bevy/trace_chrome"]
 # Bevy's spans (every system, render graph node, submit, present) summed per frame into prof.log with DXVIEW_PROF=1.
 spans = ["bevy/trace", "bevy/debug"]
+# A desktop build with switch/patches/bevy_pbr in place of crates.io's (the Switch build always has it), to check
+# what uses its additions (horizon.rs: the props' SkipPrepass): cargo build --features patched_bevy_pbr
+# --config 'patch.crates-io.bevy_pbr.path="switch/patches/bevy_pbr"'.
+patched_bevy_pbr = []
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }

@@ -1,5 +1,6 @@
 //! Nintendo Switch (Horizon OS) glue: bevy-horizon's platform layer under the game, and nothing else. On every
-//! other platform both entry points do nothing. switch/build.sh has the build and the SD card layout.
+//! other platform both entry points do nothing unless `DXVIEW_AS_SWITCH=1` asks for the Switch's drawing (below).
+//! switch/build.sh has the build and the SD card layout.
 //!
 //! `options.txt` beside the NRO is optional: one option per line, `#` starts a comment. log.txt echoes what was
 //! read (`[DX RUST] options.txt: …`); switch/options.txt is a template.
@@ -34,6 +35,10 @@
 //!   included, and then for the session). Otherwise it stays off on the Switch (`DXVIEW_AO_NOSSAO`): with the depth
 //!   and normal prepass and the SMAA it brings, it cost about 22 ms of GPU time a frame with Ambient Occlusion off
 //!   (runs 6b to 9), and the Switch keeps it off until the game holds 60 fps without it (the user's call, 2026-11-02).
+//!
+//! On the desktop, `DXVIEW_AS_SWITCH=1` draws and schedules as the Switch does without `gpu_driven` and
+//! `multi_threaded` (no binding arrays, direct draws, one thread for the main world), so desktop runs measure the
+//! Switch's path; run it with `DXVIEW_CPU_CULL=1` and `DXVIEW_AO_NOSSAO=1` as `init` sets them on the console.
 //!
 //! The settings the Switch starts with (`switch_settings`), unless settings.txt already has a value: Anti-Aliasing and
 //! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), and Open Sea on (water.rs). They are on the
@@ -71,11 +76,10 @@ fn value(name: &str) -> Option<&'static str> {
     OPTIONS.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix('=')).map(str::trim)
 }
 
-/// Bevy's render plugin: on the Switch, without the binding-array features unless options.txt has `gpu_driven` (the
-/// module notes), so every material and lightmap binds on its own.
+/// Bevy's render plugin: without the binding-array features when drawing as the Switch does (`direct_drawing`), so
+/// every material and lightmap binds on its own.
 pub fn render_plugin() -> bevy::render::RenderPlugin {
-    #[cfg(target_os = "horizon")]
-    if !option("gpu_driven") {
+    if direct_drawing() {
         use bevy::render::settings::{WgpuFeatures, WgpuSettings};
         return bevy::render::RenderPlugin {
             render_creation: WgpuSettings {
@@ -87,6 +91,15 @@ pub fn render_plugin() -> bevy::render::RenderPlugin {
         };
     }
     bevy::render::RenderPlugin::default()
+}
+
+/// The Switch's drawing (module notes): on the console unless options.txt has `gpu_driven`, on the desktop with
+/// `DXVIEW_AS_SWITCH=1`.
+fn direct_drawing() -> bool {
+    #[cfg(target_os = "horizon")]
+    return !option("gpu_driven");
+    #[cfg(not(target_os = "horizon"))]
+    return env_on!("DXVIEW_AS_SWITCH");
 }
 
 /// First thing in `main`: the Switch's log (stdout and stderr go to log.txt beside the NRO, a panic to panic.txt),
@@ -160,6 +173,18 @@ impl Plugin for SwitchPlugin {
         if std::env::var_os("DXVIEW_PROF").is_some() {
             _app.add_plugins(gpu_frame_time::GpuFrameTimePlugin);
         }
+        if direct_drawing() {
+            // Bevy wants NoIndirectDrawing on a camera from its spawn: every camera the game makes gets it then.
+            _app.add_observer(|add: On<Add, Camera>, mut commands: Commands| {
+                commands.entity(add.entity).insert(bevy::render::view::NoIndirectDrawing);
+            });
+        }
+        #[cfg(not(target_os = "horizon"))]
+        if env_on!("DXVIEW_AS_SWITCH") {
+            single_threaded(_app);
+        }
+        #[cfg(any(target_os = "horizon", feature = "patched_bevy_pbr"))]
+        _app.add_systems(PostUpdate, props_skip_prepass.after(bevy::transform::TransformSystems::Propagate));
         #[cfg(target_os = "horizon")]
         {
             _app.add_plugins(bevy_horizon::HorizonPlugin);
@@ -169,12 +194,6 @@ impl Plugin for SwitchPlugin {
             _app.add_systems(Last, (cpu_boost, shadow_lights_log, draw_check_collect));
             if let Some(render) = _app.get_sub_app_mut(bevy::render::RenderApp) {
                 render.add_systems(bevy::render::Render, draw_check_report.after(bevy::render::RenderSystems::PrepareAssets));
-            }
-            if !option("gpu_driven") {
-                // Bevy wants NoIndirectDrawing on a camera from its spawn: every camera the game makes gets it then.
-                _app.add_observer(|add: On<Add, Camera>, mut commands: Commands| {
-                    commands.entity(add.entity).insert(bevy::render::view::NoIndirectDrawing);
-                });
             }
             if option("draw_empty") {
                 let set = bevy_horizon::nvk_tune::set(bevy_horizon::nvk_tune::Knob::SkipEmptyDraws, 0);
@@ -190,6 +209,38 @@ impl Plugin for SwitchPlugin {
                 let set = bevy_horizon::nvk_tune::set(bevy_horizon::nvk_tune::Knob::Zcull, 0);
                 eprintln!("[DX RUST] options.txt no_zcull: ZCULL off in every render pass ({})", if set { "set" } else { "this NVK has no switch for it" });
             }
+        }
+    }
+}
+
+/// Props out of the depth prepass (`SkipPrepass`, switch/patches/bevy_pbr): each part of a level mesh actor whose
+/// bounding sphere's radius is at most `DXVIEW_PROP_PREPASS_LIMIT` metres (1 by default: crates, chairs, lamps; boats,
+/// trees and statues stay) is drawn once instead of twice, a draw less each on the render thread. The
+/// level's surfaces and the large meshes keep the prepass and so the main pass's early depth test against them.
+/// Tagged in the frame a part appears, before its first extraction (an entity already specialized for the prepass
+/// would stay in it); `DXVIEW_PROP_PREPASS_LIMIT=0` keeps every prop in the prepass, as through run 13.
+#[cfg(any(target_os = "horizon", feature = "patched_bevy_pbr"))]
+fn props_skip_prepass(
+    mut commands: Commands,
+    parts: Query<(Entity, &ChildOf, &Mesh3d, &GlobalTransform), (Added<Mesh3d>, With<MeshMaterial3d<StandardMaterial>>)>,
+    actors: Query<(), With<crate::actors::MeshActorRef>>,
+    meshes: Res<Assets<Mesh>>,
+) {
+    use bevy::camera::primitives::MeshAabb;
+    static LIMIT: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
+        std::env::var("DXVIEW_PROP_PREPASS_LIMIT").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(1.0)
+    });
+    if *LIMIT <= 0.0 {
+        return;
+    }
+    for (part, parent, mesh, tf) in &parts {
+        if !actors.contains(parent.parent()) {
+            continue;
+        }
+        let Some(aabb) = meshes.get(&mesh.0).and_then(|m| m.compute_aabb()) else { continue };
+        let radius = Vec3::from(aabb.half_extents).length() * tf.compute_transform().scale.abs().max_element();
+        if radius <= *LIMIT {
+            commands.entity(part).insert(bevy::pbr::SkipPrepass);
         }
     }
 }
@@ -409,8 +460,8 @@ fn settings_line() -> String {
     line
 }
 
-/// One thread for the main world and the render world's extract, unless options.txt has `multi_threaded` (top of file).
-#[cfg(target_os = "horizon")]
+/// One thread for the main world and the render world's extract: on the console unless options.txt has
+/// `multi_threaded` (top of file), on the desktop with `DXVIEW_AS_SWITCH=1`.
 fn single_threaded(app: &mut App) {
     use bevy::app::{
         First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate, FixedPreUpdate, FixedUpdate, Last, Main, PostStartup,
