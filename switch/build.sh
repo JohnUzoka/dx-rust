@@ -45,8 +45,12 @@ for error in errors:
 sys.exit(1 if errors else 0)
 EOF
 
+# log.txt's "[DX RUST] build" line names the commit the NRO is from, "-dirty" when other changes were in the tree.
+build="$(git -C "$repo" rev-parse --short HEAD)"
+git -C "$repo" diff --quiet HEAD -- . ':(exclude)Cargo.lock' || build="$build-dirty"
+
 # Symbols stay in the ELF (crash reports and CPU profiles are looked up in it); the NRO holds only code and data.
 BEVY=0.19 \
 AUTHOR="${AUTHOR:-DX RUST contributors}" \
-CARGO_ARGS="--config switch/patches.toml --config profile.release.strip=false --config profile.release.debug=1 ${CARGO_ARGS:-}" \
+CARGO_ARGS="--config switch/patches.toml --config profile.release.strip=false --config profile.release.debug=1 --config env.DXVIEW_BUILD=\"$build\" ${CARGO_ARGS:-}" \
     "$bh/scripts/build_game.sh" "$repo" dxview dxview "DX RUST"

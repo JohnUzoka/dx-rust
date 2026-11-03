@@ -100,6 +100,7 @@ pub fn init() {
         if let Err(error) = std::env::set_current_dir(&*ROOT) {
             eprintln!("[DX RUST] could not make {} the working folder: {error}", *ROOT);
         }
+        eprintln!("[DX RUST] build {}", option_env!("DXVIEW_BUILD").unwrap_or("not named (built without switch/build.sh)"));
         let options = &*OPTIONS;
         // SAFETY: no other thread reads the environment yet.
         unsafe {
