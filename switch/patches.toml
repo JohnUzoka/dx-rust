@@ -15,9 +15,14 @@ gilrs-core = { path = "switch/patches/gilrs-core" }
 # hidapi 2.6.7, whose build script stops on an OS it has no backend for. This copy builds on Horizon and
 # reports that there are no HID devices (src/horizon.rs); dualsense.rs then runs without a DualSense.
 hidapi = { path = "switch/patches/hidapi" }
-# bevy_pbr 0.19.1 with one change (src/lightmap/mod.rs, "Patched for the Switch build"): entities whose lightmap is
-# the same image share one slot. Without binding arrays, which the Switch build turns off (horizon.rs), Bevy gave
-# every lightmapped surface a slot of its own, and a bind group for it in every phase, rebuilt every frame: run 11's
-# profile spent 28% of both worker threads and 18% of the render thread on them, though DX RUST's surfaces all
-# share one lightmap atlas. Same picture; Bevy's lightmap docs advise the atlas for exactly this.
+# bevy_pbr 0.19.1 with these changes for the Switch build, each marked "Patched" or "Switch build patch" in its source:
+# - src/lightmap/mod.rs: entities whose lightmap is the same image share one slot. Without binding arrays, which the
+#   Switch build turns off (horizon.rs), Bevy gave every lightmapped surface a slot of its own, and a bind group for
+#   it in every phase, rebuilt every frame: run 11's profile spent 28% of both worker threads and 18% of the render
+#   thread on them, though DX RUST's surfaces all share one lightmap atlas. Same picture; Bevy's lightmap docs advise
+#   the atlas for exactly this.
+# - src/prepass/mod.rs, src/render/mesh.rs: `SkipPrepass` leaves a mesh out of its views' depth prepass (horizon.rs
+#   tags small props), and the previous transforms are kept only while a view draws motion vectors.
+# - src/cluster/mod.rs, src/cluster/gpu.rs: GPU light clustering keeps each view's index list between frames instead
+#   of uploading a new zeroed one every frame.
 bevy_pbr = { path = "switch/patches/bevy_pbr" }
