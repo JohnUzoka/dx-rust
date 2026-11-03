@@ -116,6 +116,7 @@ pub enum VAlign {
 
 pub type Rgb = [u8; 3];
 
+#[derive(Clone)]
 pub struct Canvas {
     pub w: i32,
     pub h: i32,
