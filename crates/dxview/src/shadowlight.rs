@@ -78,6 +78,9 @@ pub struct BspShadow {
     #[texture(104)]
     #[sampler(105)]
     pub detail: Option<Handle<Image>>,
+    /// A measurement, not a look (`bsp_diag_cycle`): 0 as normal, 1 without the dynamic lights, 2 the lightmapped
+    /// surface alone.
+    pub diag: u8,
 }
 
 impl<'a> From<&'a BspShadow> for BspShadowParams {
@@ -87,15 +90,18 @@ impl<'a> From<&'a BspShadow> for BspShadowParams {
 }
 
 /// What a BSP material's fragment shader compiles in: its spot shadows (`p.x` > 0) and its remastered lighting
-/// (`r.x` on) only when it uses them. The branches they replace were already skipped at run time, so the picture is
-/// the same. With the Switch's one-tap shadow filter (horizon.rs), the Switch's BSP shader went from 4,825
-/// instructions to 2,790 (NAK); its 96 registers stayed, so a path that runs sets them. That path is Bevy's lighting
-/// of the dynamic lights, which `classic_lights` (`q.w`) replaces.
+/// (`r.x` on) only when it uses them, and its detail texture only when it has one with Detail Textures on (`q.y` > 0,
+/// `q.z` on). The branches they replace were already skipped at run time, so the picture is the same. With the
+/// Switch's one-tap shadow filter (horizon.rs), the Switch's BSP shader went from 4,825 instructions to 2,790 (NAK);
+/// its 96 registers stayed, so a path that runs sets them. That path is Bevy's lighting of the dynamic lights, which
+/// `classic_lights` (`q.w`) replaces.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BspShadowKey {
     spot_shadows: bool,
     relight: bool,
     classic_lights: bool,
+    detail: bool,
+    diag: u8,
 }
 
 impl From<&BspShadow> for BspShadowKey {
@@ -104,6 +110,8 @@ impl From<&BspShadow> for BspShadowKey {
             spot_shadows: m.params.p.x > 0.0,
             relight: m.params.r.x > 0.5,
             classic_lights: m.params.q.w > 0.5,
+            detail: m.params.q.y > 0.0 && m.params.q.z > 0.5,
+            diag: m.diag,
         }
     }
 }
@@ -135,6 +143,14 @@ impl MaterialExtension for BspShadow {
             if key.bind_group_data.classic_lights {
                 fragment.shader_defs.push("BSP_CLASSIC_LIGHTS".into());
             }
+            if key.bind_group_data.detail {
+                fragment.shader_defs.push("BSP_DETAIL".into());
+            }
+            match key.bind_group_data.diag {
+                1 => fragment.shader_defs.push("BSP_NO_DYNLIGHTS".into()),
+                2 => fragment.shader_defs.push("BSP_FLAT".into()),
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -154,6 +170,7 @@ pub fn bsp_material(base: StandardMaterial) -> BspMaterial {
             mask: None,
             lights: None,
             detail: None,
+            diag: DIAG.load(std::sync::atomic::Ordering::Relaxed),
         },
     }
 }
@@ -164,6 +181,31 @@ pub fn bsp_material(base: StandardMaterial) -> BspMaterial {
 /// lighting, to compare.
 pub fn classic_lights() -> bool {
     crate::perf::lean_rendering() && !env_on!("DXVIEW_BEVY_LIGHTS")
+}
+
+/// The level shader's variant for materials made from now on (`bsp_diag_cycle`; 0 as normal).
+static DIAG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// A measurement, not a look: with `DXVIEW_BSP_DIAG_CYCLE=1` the level's shader goes round three variants, 15 s each:
+/// as normal, without the dynamic lights (classic_lighting's walk over each pixel's cluster left out), and the
+/// lightmapped surface alone (no lights, fog, tonemapping or dithering). Standing still, each stretch's opaque pass
+/// says what that part of the shader costs on the console. log.txt says `[DX RUST] BSP diagnostic: …` at each change;
+/// the first one of each variant compiles its shaders.
+pub fn bsp_diag_cycle(time: Res<Time<bevy::time::Real>>, mut bsp: ResMut<Assets<BspMaterial>>, mut last: Local<Option<u8>>) {
+    const NAMES: [&str; 3] = ["as normal", "without the dynamic lights", "the lightmapped surface alone"];
+    let diag = ((time.elapsed_secs() / 15.0) as u32 % 3) as u8;
+    if *last == Some(diag) {
+        return;
+    }
+    *last = Some(diag);
+    DIAG.store(diag, std::sync::atomic::Ordering::Relaxed);
+    let ids: Vec<_> = bsp.ids().collect();
+    for id in ids {
+        if let Some(mut m) = bsp.get_mut(id) {
+            m.extension.diag = diag;
+        }
+    }
+    eprintln!("[DX RUST] BSP diagnostic: {} from {:.0} s", NAMES[diag as usize], time.elapsed_secs());
 }
 
 pub const SPOTS_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("2c7d9a51-6e3b-4f08-8a1c-5b9e0d4f7a63");

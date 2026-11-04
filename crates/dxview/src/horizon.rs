@@ -7,8 +7,8 @@
 //! - `env NAME=VALUE`: an environment variable, set before the game reads any. `DXVIEW_PROF=1` prints the game's
 //!   per-system, per-pass and scene report to log.txt every 5 s (prof.rs); `BEVY_HORIZON_CPU_PROFILE=1` writes
 //!   bevy-horizon's cpu-profile.txt; `DXVIEW_NO_PREFETCH=1`, `BH_THREAD_CORES=any`, `BH_ROBUST_BUFFER_ACCESS=0`,
-//!   `DXVIEW_ENCODER_PER_PASS=1` (`camera_schedules_in_order`) and `DXVIEW_NO_REAPER=1` (`submission_reaper`) are A/B
-//!   switches.
+//!   `DXVIEW_ENCODER_PER_PASS=1` and `DXVIEW_ENCODE_ON_RENDER_THREAD=1` (`camera_schedules_in_order`) and
+//!   `DXVIEW_NO_REAPER=1` (`submission_reaper`) are A/B switches.
 //! - `multi_threaded`: Bevy's multi-threaded executors. Without it, the main world's schedules and the render
 //!   world's extract run on one thread, as Skate 3 Rust Engine runs them on the Switch (its findings 63 §6.2, 52.5
 //!   to 57.5 fps; and 66 §3): most of DX RUST's ~160 systems take the same resources, so they ran one at a time
@@ -557,7 +557,9 @@ fn single_threaded(app: &mut App) {
 /// thread: their render systems record into one command encoder a frame (switch/patches/bevy_render), one at a time,
 /// and a single-threaded executor runs them in the order upstream submits their command buffers in. Upstream's
 /// encoder per pass cost about a quarter of the render thread on the title (run 15). `DXVIEW_ENCODER_PER_PASS=1` keeps
-/// an encoder per pass and Bevy's executor for them: the A/B switch.
+/// an encoder per pass and Bevy's executor for them: the A/B switch. Within a frame, an encoder that holds 64 draws or
+/// more is finished (encoded for the GPU) on a thread of its own while the render thread records the passes after it
+/// (run 20); `DXVIEW_ENCODE_ON_RENDER_THREAD=1` finishes them all on the render thread at submit, as before.
 #[cfg(any(target_os = "horizon", feature = "patched_bevy_render"))]
 fn camera_schedules_in_order(app: &mut App) {
     use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
@@ -572,7 +574,11 @@ fn camera_schedules_in_order(app: &mut App) {
             });
         }
     }
-    eprintln!("[DX RUST] render passes: one command encoder a frame, the camera schedules on one thread (env DXVIEW_ENCODER_PER_PASS=1: one per pass)");
+    if env_on!("DXVIEW_ENCODE_ON_RENDER_THREAD") {
+        eprintln!("[DX RUST] render passes: one command encoder a frame, the camera schedules on one thread, all encoded on the render thread (env DXVIEW_ENCODE_ON_RENDER_THREAD)");
+    } else {
+        eprintln!("[DX RUST] render passes: the camera schedules on one thread into one encoder, a new one after every 64 draws, those encoded on a thread of their own (env DXVIEW_ENCODER_PER_PASS=1: one per pass; DXVIEW_ENCODE_ON_RENDER_THREAD=1: all on the render thread)");
+    }
 }
 
 /// Finished frames torn down on a thread of their own. wgpu-core tears a frame down in whatever next polls the device,

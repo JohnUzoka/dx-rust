@@ -34,7 +34,7 @@ hidapi = { path = "switch/patches/hidapi" }
 #   lighting at run time, so the picture is the same, but its code held every unlit mesh's shader at the lit one's 80
 #   registers, and DX RUST's mesh actors are all unlit. `env DXVIEW_UNLIT_FULL=1` compiles them as upstream (an A/B switch).
 bevy_pbr = { path = "switch/patches/bevy_pbr" }
-# bevy_render 0.19.1 with this change for the Switch build, marked "Switch build patch" in its source:
+# bevy_render 0.19.1 with these changes for the Switch build, marked "Switch build patch" in its source:
 # - src/renderer/render_context.rs: the render systems of a frame record into one command encoder instead of one each,
 #   about 19 a frame on the title. Every encoder cost wgpu-core and the driver a command pool reset, resource trackers
 #   sized to everything alive, a barrier buffer at submit and their teardown: about a quarter of run 15's render
@@ -42,4 +42,9 @@ bevy_pbr = { path = "switch/patches/bevy_pbr" }
 #   takes it at its first command and gives it back at the end of its run, and systems running at the same time take
 #   turns; horizon.rs puts the camera schedules on one thread, which records them in the order upstream submits them.
 #   `env DXVIEW_ENCODER_PER_PASS=1` gives each pass its own encoder again (an A/B switch).
+# - src/renderer/render_context.rs, src/render_phase/draw_state.rs: once the frame's encoder holds 64 draws, the end
+#   of the render system that recorded them hands it to a thread of its own, which finishes it (wgpu-core's encoding
+#   for the GPU: a quarter of the render thread in run 19's busy views) while the render thread records the passes
+#   after it into a new encoder; submit takes them in order. `env DXVIEW_ENCODE_ON_RENDER_THREAD=1` finishes them all
+#   on the render thread (an A/B switch).
 bevy_render = { path = "switch/patches/bevy_render" }

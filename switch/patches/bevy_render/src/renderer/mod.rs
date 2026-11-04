@@ -7,6 +7,8 @@ mod wgpu_wrapper;
 pub use render_context::{
     CurrentView, FlushCommands, PendingCommandBuffers, RenderContext, RenderContextState, ViewQuery,
 };
+// Switch build patch: draws counted for the frame encoder's hand-off (render_context.rs).
+pub(crate) use render_context::note_draw;
 pub use render_device::*;
 pub use wgpu_wrapper::WgpuWrapper;
 

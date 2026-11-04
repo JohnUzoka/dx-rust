@@ -33,6 +33,8 @@ env BEVY_HORIZON_CPU_PROFILE=1
 # env DXVIEW_NO_REAPER=1       # finished frames torn down in the render thread's next submit, as upstream (from run 19 on a thread of their own)
 # env DXVIEW_UNLIT_FULL=1      # unlit meshes' shaders with Bevy's lighting compiled in, as upstream (from run 19 left out)
 # env DXVIEW_MESH_SHADOW_WALK=1 # mesh actors' shaders walk for shadow lights even with Realtime Shadows off (from run 19 not)
+# env DXVIEW_ENCODE_ON_RENDER_THREAD=1 # every encoder turned into GPU commands on the render thread (from run 20 the big ones on a thread of their own)
+# env DXVIEW_BSP_DIAG_CYCLE=1  # a measurement, not a look: the level's shader as normal, without dynamic lights, then flat, 15 s each
 
 # Upstream's GPU-driven drawing (bindless materials, multi-draw indirect calls, the level culled on the GPU): off
 # on the Switch since run 10, because it cost the title about 30 ms of GPU time a frame in run 9.

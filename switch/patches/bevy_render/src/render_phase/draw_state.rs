@@ -275,6 +275,8 @@ impl<'a> TrackedRenderPass<'a> {
     pub fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
         #[cfg(feature = "detailed_trace")]
         trace!("draw: {:?} {:?}", vertices, instances);
+        // Switch build patch: counted for the frame encoder's hand-off (renderer/render_context.rs).
+        crate::renderer::note_draw();
         self.pass.draw(vertices, instances);
     }
 
@@ -290,6 +292,7 @@ impl<'a> TrackedRenderPass<'a> {
             base_vertex,
             instances
         );
+        crate::renderer::note_draw();
         self.pass.draw_indexed(indices, base_vertex, instances);
     }
 
@@ -313,6 +316,7 @@ impl<'a> TrackedRenderPass<'a> {
     pub fn draw_indirect(&mut self, indirect_buffer: &'a Buffer, indirect_offset: u64) {
         #[cfg(feature = "detailed_trace")]
         trace!("draw indirect: {:?} {}", indirect_buffer, indirect_offset);
+        crate::renderer::note_draw();
         self.pass.draw_indirect(indirect_buffer, indirect_offset);
     }
 
@@ -342,6 +346,7 @@ impl<'a> TrackedRenderPass<'a> {
             indirect_buffer,
             indirect_offset
         );
+        crate::renderer::note_draw();
         self.pass
             .draw_indexed_indirect(indirect_buffer, indirect_offset);
     }
@@ -376,6 +381,7 @@ impl<'a> TrackedRenderPass<'a> {
             indirect_offset,
             count
         );
+        crate::renderer::note_draw();
         self.pass
             .multi_draw_indirect(indirect_buffer, indirect_offset, count);
     }
@@ -419,6 +425,7 @@ impl<'a> TrackedRenderPass<'a> {
             count_offset,
             max_count
         );
+        crate::renderer::note_draw();
         self.pass.multi_draw_indirect_count(
             indirect_buffer,
             indirect_offset,
@@ -460,6 +467,7 @@ impl<'a> TrackedRenderPass<'a> {
             indirect_offset,
             count
         );
+        crate::renderer::note_draw();
         self.pass
             .multi_draw_indexed_indirect(indirect_buffer, indirect_offset, count);
     }
@@ -505,6 +513,7 @@ impl<'a> TrackedRenderPass<'a> {
             count_offset,
             max_count
         );
+        crate::renderer::note_draw();
         self.pass.multi_draw_indexed_indirect_count(
             indirect_buffer,
             indirect_offset,

@@ -972,6 +972,7 @@ fn main() {
         .add_systems(Update, particles::barrel_fire_system.before(particles::particle_system))
         .add_systems(Update, weather::weather_system.after(fly))
         .add_systems(Update, (shadowlight::shadow_light_system.after(fly), shadowlight::tag_casters_system, shadowlight::assign_system.after(shadowlight::shadow_light_system).after(shadowlight::tag_casters_system), shadowlight::no_transparent_shadows_system))
+        .add_systems(Update, shadowlight::bsp_diag_cycle.run_if(|| env_on!("DXVIEW_BSP_DIAG_CYCLE")))
         .add_systems(Update, fx::fx_system.after(fly))
         .add_systems(Update, thirdperson::toggle_system)
         // Lean Rendering's weapon on the world camera: decided after the heat view's camera, before the layers and

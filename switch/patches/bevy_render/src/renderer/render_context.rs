@@ -42,15 +42,96 @@ fn encoder_per_pass() -> bool {
 #[derive(Default)]
 struct FrameCommands {
     encoder: Option<CommandEncoder>,
-    finished: Vec<CommandBuffer>,
+    finished: Vec<Finishing>,
 }
 
 static FRAME: std::sync::Mutex<Option<WgpuWrapper<FrameCommands>>> = std::sync::Mutex::new(None);
 static RECORDING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Switch build patch: the draws recorded into the frame's encoder so far (`TrackedRenderPass`, `note_draw`).
+static FRAME_DRAWS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 fn with_frame<R>(f: impl FnOnce(&mut FrameCommands) -> R) -> R {
     let mut frame = FRAME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     f(frame.get_or_insert_with(|| WgpuWrapper::new(FrameCommands::default())))
+}
+
+/// Switch build patch: a draw recorded by a `TrackedRenderPass`.
+pub(crate) fn note_draw() {
+    FRAME_DRAWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Switch build patch: once the frame's encoder holds this many draws, the end of the render system that recorded
+/// them hands it to the finisher thread (`hand_off`).
+const HAND_OFF_DRAWS: u32 = 64;
+
+/// Switch build patch: `DXVIEW_ENCODE_ON_RENDER_THREAD=1` finishes every encoder of the frame on the render thread at
+/// submit, as before (an A/B switch). Otherwise a frame's encoder that holds `HAND_OFF_DRAWS` draws goes to a thread
+/// of its own when the render system that recorded them ends, and the systems after it record into a new one.
+/// wgpu-core turns an encoder's recorded passes into the GPU's commands in `finish` (`encode_render_pass`), a quarter
+/// of the Switch's render thread in busy views (profile 19a), done while the worker threads idle; handed off, the
+/// passes recorded first are encoded while the render thread records the rest. A frame with fewer draws, the title's,
+/// stays one encoder.
+fn encode_on_render_thread() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("DXVIEW_ENCODE_ON_RENDER_THREAD").is_some());
+    *ON
+}
+
+/// Switch build patch: one of the frame's command buffers in submission order, finished on the render thread or on
+/// the finisher thread.
+enum Finishing {
+    Done(CommandBuffer),
+    Finisher(std::sync::mpsc::Receiver<CommandBuffer>),
+}
+
+impl Finishing {
+    fn wait(self) -> CommandBuffer {
+        match self {
+            Finishing::Done(buffer) => buffer,
+            Finishing::Finisher(done) => done.recv().expect("the encoder finisher thread ended"),
+        }
+    }
+}
+
+type FinishJob = (CommandEncoder, std::sync::mpsc::SyncSender<CommandBuffer>);
+
+/// Switch build patch: the encoder finished on the finisher thread, started on first use; finished here if there's
+/// no such thread.
+fn finish_elsewhere(encoder: CommandEncoder) -> Finishing {
+    static FINISHER: std::sync::OnceLock<Option<std::sync::mpsc::Sender<FinishJob>>> = std::sync::OnceLock::new();
+    let finisher = FINISHER.get_or_init(|| {
+        let (jobs, todo) = std::sync::mpsc::channel::<FinishJob>();
+        std::thread::Builder::new()
+            .name("encoder finisher".into())
+            .spawn(move || {
+                for (encoder, done) in todo {
+                    let _ = done.send(encoder.finish());
+                }
+            })
+            .ok()
+            .map(|_| jobs)
+    });
+    let Some(finisher) = finisher else {
+        return Finishing::Done(encoder.finish());
+    };
+    let (done, finished) = std::sync::mpsc::sync_channel(1);
+    match finisher.send((encoder, done)) {
+        Ok(()) => Finishing::Finisher(finished),
+        Err(std::sync::mpsc::SendError((encoder, _))) => Finishing::Done(encoder.finish()),
+    }
+}
+
+/// Switch build patch: the frame's encoder to the finisher thread if it holds enough draws (`encode_on_render_thread`).
+fn hand_off(frame: &mut FrameCommands) {
+    if encode_on_render_thread()
+        || FRAME_DRAWS.load(core::sync::atomic::Ordering::Relaxed) < HAND_OFF_DRAWS
+    {
+        return;
+    }
+    if let Some(encoder) = frame.encoder.take() {
+        FRAME_DRAWS.store(0, core::sync::atomic::Ordering::Relaxed);
+        frame.finished.push(finish_elsewhere(encoder));
+    }
 }
 
 /// A resource that holds command buffers and encoders that are pending submission to the render queue.
@@ -73,12 +154,14 @@ impl PendingCommandBuffers {
     }
 
     pub fn take(&mut self) -> Vec<CommandBuffer> {
-        // Switch build patch: the frame's commands first, as the render systems' buffers come first upstream.
-        let mut buffers = with_frame(|frame| {
-            let mut buffers = core::mem::take(&mut frame.finished);
-            buffers.extend(frame.encoder.take().map(CommandEncoder::finish));
-            buffers
+        // Switch build patch: the frame's commands first, as the render systems' buffers come first upstream: the
+        // buffers handed to the finisher thread in order, then the frame's last encoder, finished here.
+        let (finishing, last) = with_frame(|frame| {
+            FRAME_DRAWS.store(0, core::sync::atomic::Ordering::Relaxed);
+            (core::mem::take(&mut frame.finished), frame.encoder.take())
         });
+        let mut buffers: Vec<CommandBuffer> = finishing.into_iter().map(Finishing::wait).collect();
+        buffers.extend(last.map(CommandEncoder::finish));
         buffers.append(&mut self.0.buffers);
         let encoders: Vec<_> = self.0.encoders.drain(..).collect();
         for encoder in encoders {
@@ -264,9 +347,10 @@ impl<'w, 's> RenderContext<'w, 's> {
             self.take_frame();
             let encoder = self.state.0.command_encoder.take();
             with_frame(|frame| {
-                frame.finished.extend(encoder.map(CommandEncoder::finish));
-                frame.finished.push(command_buffer);
+                frame.finished.extend(encoder.map(|encoder| Finishing::Done(encoder.finish())));
+                frame.finished.push(Finishing::Done(command_buffer));
             });
+            FRAME_DRAWS.store(0, core::sync::atomic::Ordering::Relaxed);
             return;
         }
         self.state.flush_encoder();
@@ -274,14 +358,18 @@ impl<'w, 's> RenderContext<'w, 's> {
     }
 }
 
-/// Switch build patch: the end of a render system's run gives the frame's encoder back for the next one.
+/// Switch build patch: the end of a render system's run gives the frame's encoder back for the next one, or to the
+/// finisher thread once it holds enough draws (`hand_off`).
 impl Drop for RenderContext<'_, '_> {
     fn drop(&mut self) {
         if !self.state.0.holds_frame {
             return;
         }
         let encoder = self.state.0.command_encoder.take();
-        with_frame(|frame| frame.encoder = encoder);
+        with_frame(|frame| {
+            frame.encoder = encoder;
+            hand_off(frame);
+        });
         self.state.0.holds_frame = false;
         RECORDING.store(false, core::sync::atomic::Ordering::Release);
     }

@@ -2,17 +2,19 @@
 //! (`env DXVIEW_PROF=1`), where the device has timestamp queries inside encoders. Ported from Skate 3 Rust Engine's
 //! `gpu_frame_time.rs` (Bevy 0.18, render graph nodes). Bevy 0.19 has no render graph nodes: the camera passes run in
 //! the `RenderGraph` schedule between its `Begin` and `Finish` sets, so the first timestamp is written by a `Begin`
-//! system and the last by a `Finish` system, each in its own command buffer. The queue runs command buffers in
-//! submission order, so they bracket the frame's passes and submits the same way.
+//! system, as the first command of the frame's own encoder, and the last by a `Finish` system, in a command buffer
+//! submitted after the frame's. The queue runs command buffers in submission order, so they bracket the frame's passes.
 //!
 //! The pass timers cover only their passes, and on the Switch they summed to less than the frame. Two timestamps around
 //! the whole graph tell the rest apart:
 //!
-//! - `render/dx_frame/busy_gpu`: from the frame's first command to its last. Less the sum of the pass times, it is the
-//!   work inside the frame that no pass timer covers.
-//! - `render/dx_frame/wait_gpu`: from the previous frame's last command to this frame's first. Idle time, plus what
-//!   runs between two frames' graphs: the uploads, the screenshot and readback copies, and any wait for the compositor
-//!   to release the swapchain image.
+//! - `render/dx_frame/busy_gpu`: from the frame's first command to its last: the GPU's work on the frame. Less the sum
+//!   of the pass times, it is the work inside the frame that no pass timer covers. Up to run 19 the first timestamp
+//!   went in a submit of its own at the start of the graph, so `busy_gpu` also counted an idle GPU's wait for the
+//!   frame's submit, which is why it followed the render thread's encoding.
+//! - `render/dx_frame/wait_gpu`: from the previous frame's last command to this frame's first: the GPU idle between
+//!   frames, plus the uploads queued ahead of the frame's commands, the screenshot and readback copies, and any wait
+//!   for the compositor to release the swapchain image.
 //! - `render/dx_frame/passes_gpu`: every pass span of the newest frame added up (`frame_sums`). Bevy makes each span
 //!   its own measurement, so a pass that two cameras run prints as the mean of their spans; `busy_gpu` less this is
 //!   the work no pass timer covers, and `render/dx_frame/frame/<pass>` is such a pass's sum over the frame.
@@ -35,7 +37,7 @@ use bevy::{
     prelude::*,
     render::{
         RenderApp,
-        renderer::{RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue},
+        renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue},
     },
 };
 
@@ -170,13 +172,17 @@ impl Stamps {
 
 /// The `Begin` set, before the camera passes: creates the query resources on the first frame, takes the frames the GPU
 /// has finished, oldest first (so each wait has the end of the frame before it), then writes this frame's first
-/// timestamp into a slot's query pair.
+/// timestamp into a slot's query pair, as the first command of the frame's own encoder (`RenderContext`; the Switch
+/// build's bevy_render patch gives every render system the frame's one encoder), so it runs when the GPU starts the
+/// frame's work. Up to run 19 it went in a submit of its own, which an idle GPU ran at once and then waited for the
+/// frame's submit: `busy_gpu` counted that wait.
 fn start(
     mut commands: Commands,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     latest: Res<Latest>,
     stamps: Option<ResMut<Stamps>>,
+    mut render_context: RenderContext,
 ) {
     report_once(REPORT_START, || "the Begin set runs; the frame's first timestamp is next".to_string());
     let Some(mut stamps) = stamps else {
@@ -238,9 +244,7 @@ fn start(
     stamps.current = (0..SLOTS).find(|&i| stamps.slots[i].state.load(Ordering::Acquire) == FREE);
     if let Some(index) = stamps.current {
         stamps.slots[index].frame = stamps.frame;
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        encoder.write_timestamp(&stamps.queries, 2 * index as u32);
-        queue.submit([encoder.finish()]);
+        render_context.command_encoder().write_timestamp(&stamps.queries, 2 * index as u32);
     }
     stamps.frame += 1;
 }

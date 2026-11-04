@@ -7,7 +7,10 @@
 // BSP_SPOT_SHADOWS and BSP_RELIGHT (shadowlight.rs, BspShadowKey) compile the spot-shadow walk and remastered
 // lighting in only for materials that use them: the branches that guard them are uniform per material, so a material
 // without them never ran them, but the shader carried their code. BSP_CLASSIC_LIGHTS (Lean Rendering) lights the
-// surface with classic_lighting below instead of Bevy's apply_pbr_lighting.
+// surface with classic_lighting below instead of Bevy's apply_pbr_lighting. BSP_DETAIL samples the detail texture only
+// where the surface has one and Detail Textures is on, the only places it was ever used. BSP_NO_DYNLIGHTS and BSP_FLAT
+// are measurements (`DXVIEW_BSP_DIAG_CYCLE`), not looks: the level without its dynamic lights, and the lightmapped
+// surface alone.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -163,6 +166,7 @@ fn classic_lighting(in: PbrInput) -> vec4<f32> {
     let base = in.material.base_color;
     let diffuse_color = base.rgb * (1.0 - in.material.metallic) * (1.0 - in.material.specular_transmission) *
         (1.0 - in.material.diffuse_transmission);
+#ifndef BSP_NO_DYNLIGHTS
     let view_z = dot(vec4<f32>(
         view_bindings::view.view_from_world[0].z,
         view_bindings::view.view_from_world[1].z,
@@ -171,7 +175,9 @@ fn classic_lighting(in: PbrInput) -> vec4<f32> {
     ), in.world_position);
     let cluster_index = clustering::view_fragment_cluster_index(in.frag_coord.xy, view_z, in.is_orthographic);
     let ranges = clustering::unpack_clusterable_object_index_ranges(cluster_index);
+#endif
     var added = vec3<f32>(0.0);
+#ifndef BSP_NO_DYNLIGHTS
     for (var i: u32 = ranges.first_point_light_index_offset;
             i < ranges.first_reflection_probe_index_offset;
             i = i + 1u) {
@@ -203,6 +209,7 @@ fn classic_lighting(in: PbrInput) -> vec4<f32> {
         let rgb = (*light).color_inverse_square_range.rgb;
         added += to_srgb(rgb / max(max(rgb.r, rgb.g), max(rgb.b, 1e-8))) * (brightness * reach);
     }
+#endif // BSP_NO_DYNLIGHTS
     var lm = in.lightmap_light;
     if (max(added.r, max(added.g, added.b)) > 0.0) {
         lm = from_srgb(to_srgb(lm) + added * bsp.p.z);
@@ -312,20 +319,21 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 #ifdef VERTEX_UVS_A
+#ifdef BSP_DETAIL
     // Detail textures (the original renderers' DetailTexture pass): within 380 units the surface is modulated by
-    // its detail picture (grey = no change, at half contrast), fading out by 760 units. q.y = the detail's UV scale
-    // (0: none), q.z = on.
-    let detail_uv = vin.uv * bsp.q.y;
-    let detail = detail_sample(detail_uv);
-    if (bsp.q.y > 0.0 && bsp.q.z > 0.5) {
-        let units = length(view_bindings::view.world_position.xyz - pbr_input.world_position.xyz) * 52.5;
-        let a = clamp(2.0 - units / 380.0, 0.0, 1.0);
-        let d = (detail.rgb - 0.5) * 0.5 + 1.0;
-        pbr_input.material.base_color = vec4<f32>(pbr_input.material.base_color.rgb * mix(vec3<f32>(1.0), d, a), pbr_input.material.base_color.a);
-    }
+    // its detail picture (grey = no change, at half contrast), fading out by 760 units. q.y = the detail's UV scale;
+    // compiled in only where it's above 0 with Detail Textures on (q.z), BspShadowKey.
+    let detail = detail_sample(vin.uv * bsp.q.y);
+    let units = length(view_bindings::view.world_position.xyz - pbr_input.world_position.xyz) * 52.5;
+    let a = clamp(2.0 - units / 380.0, 0.0, 1.0);
+    let d = (detail.rgb - 0.5) * 0.5 + 1.0;
+    pbr_input.material.base_color = vec4<f32>(pbr_input.material.base_color.rgb * mix(vec3<f32>(1.0), d, a), pbr_input.material.base_color.a);
 #endif
+#endif
+#ifdef BSP_RELIGHT
     var spec = vec3<f32>(0.0);
     var unlit_glow = 0.0;
+#endif
 #ifdef LIGHTMAP
 #ifdef BSP_SPOT_SHADOWS
     if (bsp.p.x > 0.0) {
@@ -374,7 +382,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 #endif
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
-#ifdef BSP_CLASSIC_LIGHTS
+#ifdef BSP_FLAT
+        // The lightmapped surface alone: no lights, emissive, fog, tonemapping or dithering (a measurement).
+        out.color = vec4<f32>(view_bindings::view.exposure * pbr_input.lightmap_light * pbr_input.material.base_color.rgb, pbr_input.material.base_color.a);
+#else ifdef BSP_CLASSIC_LIGHTS
         out.color = classic_lighting(pbr_input);
 #else
         out.color = apply_pbr_lighting(pbr_input);
@@ -382,13 +393,20 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     } else {
         out.color = pbr_input.material.base_color;
     }
-    // Highlights (metal tints them by its colour) and glow (bloom picks up what goes past white).
+    // Highlights (metal tints them by its colour) and glow (bloom picks up what goes past white). Without remastered
+    // lighting there's no highlight and no unlit glow, only the named glowing textures' (s.z, 0 or more).
     let base = pbr_input.material.base_color.rgb;
+#ifdef BSP_RELIGHT
     let tint = mix(vec3<f32>(1.0), base * 2.0, bsp.r.w);
     out.color = vec4<f32>(out.color.rgb + spec * tint, out.color.a);
     let lum = dot(base, vec3<f32>(0.299, 0.587, 0.114));
     let glow = max(bsp.s.z, unlit_glow * smoothstep(0.35, 0.85, lum));
+#else
+    let glow = bsp.s.z;
+#endif
     out.color = vec4<f32>(out.color.rgb + base * glow, out.color.a);
+#ifndef BSP_FLAT
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
+#endif
     return out;
 }
