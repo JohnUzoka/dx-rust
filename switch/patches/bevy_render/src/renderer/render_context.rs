@@ -30,8 +30,9 @@ struct PendingCommandBuffersInner {
 /// resource trackers sized to every buffer and texture alive, a barrier buffer at submit, and their teardown), which
 /// was about a quarter of the Switch's render thread at about 19 encoders a frame on a title screen of 12 draws.
 fn encoder_per_pass() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("DXVIEW_ENCODER_PER_PASS").is_some())
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("DXVIEW_ENCODER_PER_PASS").is_some());
+    *ON
 }
 
 /// Switch build patch: the frame's command encoder, with the buffers finished ahead of it in submission order. Kept out

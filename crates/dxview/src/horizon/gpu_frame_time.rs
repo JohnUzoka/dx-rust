@@ -299,8 +299,14 @@ fn publish(latest: Res<Latest>, store: Option<ResMut<DiagnosticsStore>>) {
 /// Main world, after Bevy's `sync_diagnostics` (PreUpdate). Bevy makes every span of a pass its own measurement, so a
 /// pass that two cameras run, the world's and the weapon's, prints as the mean of their spans. This adds up the newest
 /// frame's spans: `render/dx_frame/passes_gpu`, all of them, so that `busy_gpu` less it is the work no pass timer
-/// covers, and `render/dx_frame/frame/<pass>` for each pass with more than one span.
-fn frame_sums(store: Option<ResMut<DiagnosticsStore>>, mut done: Local<Option<Instant>>) {
+/// covers, and `render/dx_frame/frame/<pass>` for each pass that has had more than one span. Such a pass stays
+/// measured every frame after, whatever its spans: run 17's opaque pass went to one span with the weapon's camera off,
+/// and its sum, no longer measured, printed the stale 23.5 ms of a few frames with two.
+fn frame_sums(
+    store: Option<ResMut<DiagnosticsStore>>,
+    mut done: Local<Option<Instant>>,
+    mut shared_once: Local<std::collections::HashSet<String>>,
+) {
     let Some(mut store) = store else { return };
     let is_pass = |d: &&Diagnostic| d.path().as_str().ends_with("/elapsed_gpu");
     // sync_diagnostics stamps every measurement of one frame with the same instant.
@@ -319,9 +325,12 @@ fn frame_sums(store: Option<ResMut<DiagnosticsStore>>, mut done: Local<Option<In
             .filter(|m| m.time == newest)
             .fold((0.0, 0), |(sum, spans), m| (sum + m.value, spans + 1));
         all += sum;
-        if spans > 1 {
-            let pass = diagnostic.path().as_str().trim_start_matches("render/").trim_end_matches("/elapsed_gpu");
-            let pass = pass.replace('/', " ");
+        let path = diagnostic.path().as_str();
+        if spans > 1 && !shared_once.contains(path) {
+            shared_once.insert(path.to_string());
+        }
+        if shared_once.contains(path) {
+            let pass = path.trim_start_matches("render/").trim_end_matches("/elapsed_gpu").replace('/', " ");
             shared.push((DiagnosticPath::from_components(["render", "dx_frame", "frame", pass.as_str()]), sum));
         }
     }
