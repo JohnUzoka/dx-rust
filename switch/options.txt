@@ -27,6 +27,7 @@ env BEVY_HORIZON_CPU_PROFILE=1
 # env DXVIEW_WATER_NOPREPASS=1 # no depth prepass: the Modern look's remembered Modern Water turns it on in Classic too
 # env DXVIEW_BEVY_LIGHTS=1     # Bevy's lighting of the dynamic lights on the level, not Lean Rendering's Classic lights
 # env DXVIEW_PROP_PREPASS_LIMIT=0 # every prop in the depth prepass, as through run 13 (from run 14 props up to 1 m are out)
+# env DXVIEW_BATCH_CELL=0      # no batches: every still decoration part drawn on its own, as through run 14
 
 # Upstream's GPU-driven drawing (bindless materials, multi-draw indirect calls, the level culled on the GPU): off
 # on the Switch since run 10, because it cost the title about 30 ms of GPU time a frame in run 9.
