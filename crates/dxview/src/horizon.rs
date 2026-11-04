@@ -184,7 +184,10 @@ impl Plugin for SwitchPlugin {
             single_threaded(_app);
         }
         #[cfg(any(target_os = "horizon", feature = "patched_bevy_pbr"))]
-        _app.add_systems(PostUpdate, props_skip_prepass.after(bevy::transform::TransformSystems::Propagate));
+        _app.add_systems(
+            PostUpdate,
+            props_skip_prepass.after(bevy::transform::TransformSystems::Propagate).after(crate::batches::batch_system),
+        );
         #[cfg(target_os = "horizon")]
         {
             _app.add_plugins(bevy_horizon::HorizonPlugin);
@@ -218,12 +221,14 @@ impl Plugin for SwitchPlugin {
 /// trees and statues stay) is drawn once instead of twice, a draw less each on the render thread. The
 /// level's surfaces and the large meshes keep the prepass and so the main pass's early depth test against them.
 /// Tagged in the frame a part appears, before its first extraction (an entity already specialized for the prepass
-/// would stay in it); `DXVIEW_PROP_PREPASS_LIMIT=0` keeps every prop in the prepass, as through run 13.
+/// would stay in it); `DXVIEW_PROP_PREPASS_LIMIT=0` keeps every prop in the prepass, as through run 13. Lean
+/// Rendering's batches (batches.rs) of parts no larger than that are tagged the same way.
 #[cfg(any(target_os = "horizon", feature = "patched_bevy_pbr"))]
 fn props_skip_prepass(
     mut commands: Commands,
     parts: Query<(Entity, &ChildOf, &Mesh3d, &GlobalTransform), (Added<Mesh3d>, With<MeshMaterial3d<StandardMaterial>>)>,
     actors: Query<(), With<crate::actors::MeshActorRef>>,
+    batches: Query<(Entity, &crate::batches::StaticBatch), Added<crate::batches::StaticBatch>>,
     meshes: Res<Assets<Mesh>>,
 ) {
     use bevy::camera::primitives::MeshAabb;
@@ -241,6 +246,11 @@ fn props_skip_prepass(
         let radius = Vec3::from(aabb.half_extents).length() * tf.compute_transform().scale.abs().max_element();
         if radius <= *LIMIT {
             commands.entity(part).insert(bevy::pbr::SkipPrepass);
+        }
+    }
+    for (batch, b) in &batches {
+        if b.max_radius <= *LIMIT {
+            commands.entity(batch).insert(bevy::pbr::SkipPrepass);
         }
     }
 }
