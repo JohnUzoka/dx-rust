@@ -138,7 +138,18 @@ pub fn upscale_system(
         if changed || !same(&target, &want_target) {
             *target = want_target.clone();
         }
-        let out = if m >= 2 { bevy::camera::CameraOutputMode::default() } else { bevy::camera::CameraOutputMode::Skip };
+        // Below the upscaler the cameras after the world copy its picture to the window, unless it's the last to draw
+        // (viewcam.rs: Lean Rendering's weapon on the world camera), as postfx.rs writes the last one.
+        let out = if m >= 2 {
+            bevy::camera::CameraOutputMode::default()
+        } else if crate::viewcam::world_draws_weapon() {
+            bevy::camera::CameraOutputMode::Write {
+                blend_state: Some(bevy::render::render_resource::BlendState::REPLACE),
+                clear_color: ClearColorConfig::None,
+            }
+        } else {
+            bevy::camera::CameraOutputMode::Skip
+        };
         if std::mem::discriminant(&cam.output_mode) != std::mem::discriminant(&out) {
             cam.output_mode = out;
         }

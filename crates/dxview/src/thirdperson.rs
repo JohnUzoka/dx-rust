@@ -181,8 +181,14 @@ pub fn camera_layers() -> RenderLayers {
     }
     if active() {
         l.push(crate::mirror::BODY_LAYER);
-    } else if crate::bodyfx::fp_on() {
-        l.push(crate::bodyfx::FP_LAYER);
+    } else {
+        if crate::bodyfx::fp_on() {
+            l.push(crate::bodyfx::FP_LAYER);
+        }
+        // Lean Rendering's weapon on the world camera (viewcam.rs).
+        if crate::viewcam::world_draws_weapon() {
+            l.push(crate::weapons::VIEW_LAYER);
+        }
     }
     RenderLayers::from_layers(&l)
 }

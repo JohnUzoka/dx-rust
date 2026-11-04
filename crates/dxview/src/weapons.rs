@@ -847,9 +847,6 @@ pub fn spawn_view_camera(commands: &mut Commands) {
         Camera {
             order: 3,
             clear_color: ClearColorConfig::None,
-            // A measurement (DXVIEW_NO_VIEW_CAM=1): the weapon's camera off, so no gun and no brightness curve, to
-            // see what a second 3D camera costs the render thread and the GPU.
-            is_active: !env_on!("DXVIEW_NO_VIEW_CAM"),
             ..default()
         },
         Projection::Perspective(PerspectiveProjection {

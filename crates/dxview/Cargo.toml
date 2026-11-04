@@ -36,6 +36,9 @@ spans = ["bevy/trace", "bevy/debug"]
 # what uses its additions (horizon.rs: the props' SkipPrepass): cargo build --features patched_bevy_pbr
 # --config 'patch.crates-io.bevy_pbr.path="switch/patches/bevy_pbr"'.
 patched_bevy_pbr = []
+# The same for switch/patches/bevy_render (horizon.rs: the camera schedules on one thread with its one command encoder
+# a frame): --features patched_bevy_render --config 'patch.crates-io.bevy_render.path="switch/patches/bevy_render"'.
+patched_bevy_render = []
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }

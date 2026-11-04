@@ -6,8 +6,8 @@
 //! read (`[DX RUST] options.txt: …`); switch/options.txt is a template.
 //! - `env NAME=VALUE`: an environment variable, set before the game reads any. `DXVIEW_PROF=1` prints the game's
 //!   per-system, per-pass and scene report to log.txt every 5 s (prof.rs); `BEVY_HORIZON_CPU_PROFILE=1` writes
-//!   bevy-horizon's cpu-profile.txt; `DXVIEW_NO_PREFETCH=1`, `BH_THREAD_CORES=any` and `BH_ROBUST_BUFFER_ACCESS=0`
-//!   are A/B switches.
+//!   bevy-horizon's cpu-profile.txt; `DXVIEW_NO_PREFETCH=1`, `BH_THREAD_CORES=any`, `BH_ROBUST_BUFFER_ACCESS=0` and
+//!   `DXVIEW_ENCODER_PER_PASS=1` (`camera_schedules_in_order`) are A/B switches.
 //! - `multi_threaded`: Bevy's multi-threaded executors. Without it, the main world's schedules and the render
 //!   world's extract run on one thread, as Skate 3 Rust Engine runs them on the Switch (its findings 63 §6.2, 52.5
 //!   to 57.5 fps; and 66 §3): most of DX RUST's ~160 systems take the same resources, so they ran one at a time
@@ -183,11 +183,20 @@ impl Plugin for SwitchPlugin {
         if env_on!("DXVIEW_AS_SWITCH") {
             single_threaded(_app);
         }
+        #[cfg(any(target_os = "horizon", feature = "patched_bevy_render"))]
+        if cfg!(target_os = "horizon") || env_on!("DXVIEW_AS_SWITCH") {
+            camera_schedules_in_order(_app);
+        }
         #[cfg(any(target_os = "horizon", feature = "patched_bevy_pbr"))]
-        _app.add_systems(
-            PostUpdate,
-            props_skip_prepass.after(bevy::transform::TransformSystems::Propagate).after(crate::batches::batch_system),
-        );
+        {
+            _app.add_systems(
+                PostUpdate,
+                props_skip_prepass.after(bevy::transform::TransformSystems::Propagate).after(crate::batches::batch_system),
+            );
+            // Lean Rendering's weapon on the world camera (viewcam.rs): the patched mesh shader draws it there.
+            crate::viewcam::allow();
+            _app.add_systems(Last, view_model_tags);
+        }
         #[cfg(target_os = "horizon")]
         {
             _app.add_plugins(bevy_horizon::HorizonPlugin);
@@ -252,6 +261,44 @@ fn props_skip_prepass(
         if b.max_radius <= *LIMIT {
             commands.entity(batch).insert(bevy::pbr::SkipPrepass);
         }
+    }
+}
+
+/// Lean Rendering's weapon on the world camera (viewcam.rs; switch/patches/bevy_pbr's render/mesh.wgsl and
+/// material.rs): every mesh on the weapon's layer carries its camera's projection in a `MeshTag`, and stays out of the
+/// depth prepass (its depth goes in front in the main pass alone) and out of frustum culling (it lies around the
+/// origin, in its camera's space). Tagged in the frame a mesh appears, before its first extraction; all of them again
+/// when that camera's field of view changes (weapons.rs `fov_system`: the window's shape). Harmless while the
+/// weapon's own camera draws them: the same sums give its picture.
+#[cfg(any(target_os = "horizon", feature = "patched_bevy_pbr"))]
+fn view_model_tags(
+    mut commands: Commands,
+    cam: Query<&Projection, With<crate::weapons::ViewModelCam>>,
+    new: Query<
+        (Entity, &bevy::camera::visibility::RenderLayers),
+        (With<Mesh3d>, Or<(Added<Mesh3d>, Changed<bevy::camera::visibility::RenderLayers>)>),
+    >,
+    all: Query<(Entity, &bevy::camera::visibility::RenderLayers), With<Mesh3d>>,
+    mut current: Local<u32>,
+) {
+    let Some(Projection::Perspective(p)) = cam.iter().next() else { return };
+    let tag = bevy::pbr::view_model_tag(p.fov);
+    let retag = tag != *current;
+    *current = tag;
+    let view = bevy::camera::visibility::RenderLayers::layer(crate::weapons::VIEW_LAYER);
+    let mut mark = |part: Entity, layers: &bevy::camera::visibility::RenderLayers| {
+        if *layers == view {
+            commands.entity(part).insert((
+                bevy::mesh::MeshTag(tag),
+                bevy::pbr::SkipPrepass,
+                bevy::camera::visibility::NoFrustumCulling,
+            ));
+        }
+    };
+    if retag {
+        all.iter().for_each(|(part, layers)| mark(part, layers));
+    } else {
+        new.iter().for_each(|(part, layers)| mark(part, layers));
     }
 }
 
@@ -500,6 +547,28 @@ fn single_threaded(app: &mut App) {
         });
     }
     eprintln!("[DX RUST] one thread for the main world and the render world's extract (options.txt multi_threaded: Bevy's executors)");
+}
+
+/// The camera schedules (`Core3d`, which also draws the point and spot lights' shadow maps, and `Core2d`) on one
+/// thread: their render systems record into one command encoder a frame (switch/patches/bevy_render), one at a time,
+/// and a single-threaded executor runs them in the order upstream submits their command buffers in. Upstream's
+/// encoder per pass cost about a quarter of the render thread on the title (run 15). `DXVIEW_ENCODER_PER_PASS=1` keeps
+/// an encoder per pass and Bevy's executor for them: the A/B switch.
+#[cfg(any(target_os = "horizon", feature = "patched_bevy_render"))]
+fn camera_schedules_in_order(app: &mut App) {
+    use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
+    if env_on!("DXVIEW_ENCODER_PER_PASS") {
+        eprintln!("[DX RUST] env DXVIEW_ENCODER_PER_PASS: a command encoder for every render pass, as upstream");
+        return;
+    }
+    if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        for label in [bevy::core_pipeline::Core3d.intern(), bevy::core_pipeline::Core2d.intern()] {
+            render_app.edit_schedule(label, |schedule| {
+                schedule.set_executor(SingleThreadedExecutor::new());
+            });
+        }
+    }
+    eprintln!("[DX RUST] render passes: one command encoder a frame, the camera schedules on one thread (env DXVIEW_ENCODER_PER_PASS=1: one per pass)");
 }
 
 /// A `[Clocks]` line whenever the console is docked or undocked.

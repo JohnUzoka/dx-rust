@@ -1107,6 +1107,42 @@ pub(crate) fn specialize_material_meshes(
         .retain(|view, _| all_views.contains(view));
 }
 
+/// Switch build patch: a `MeshTag` whose high 16 bits are this marks a part of DX RUST's first-person weapon, which
+/// keeps its own camera's space whichever camera draws it (render/mesh.wgsl). The low 16 bits are that camera's focal
+/// factor (`1 / tan(vertical field of view / 2)`) in 4096ths: `view_model_tag`.
+pub const VIEW_MODEL_TAG_HIGH: u32 = 0x5649;
+
+/// Switch build patch: the `MeshTag` of a weapon part whose camera has this vertical field of view (radians).
+pub fn view_model_tag(fov: f32) -> u32 {
+    let focal = 1.0 / (fov * 0.5).tan();
+    (VIEW_MODEL_TAG_HIGH << 16) | (focal * 4096.0).round().clamp(1.0, 65535.0) as u32
+}
+
+/// Switch build patch: where a transparent mesh sorts. A weapon part is put in front of the view as its own camera sees
+/// it, so its parts sort back to front among themselves, and after everything else the view draws (the bias outweighs
+/// any distance within a map). Only a material with the default vertex shader reads the tag as a weapon part, as
+/// mesh.wgsl does: DX RUST's vertex-animated parts pack their frames into it for a vertex shader of their own.
+fn transparent_sorting(
+    tag: u32,
+    default_vertex_shader: bool,
+    view: &ExtractedView,
+    mesh_center: bevy_math::Vec3,
+    depth_bias: f32,
+) -> TransparentSortingInfo3d {
+    const VIEW_MODEL_SORT_BIAS: f32 = 1.0e4;
+    if default_vertex_shader && tag >> 16 == VIEW_MODEL_TAG_HIGH {
+        TransparentSortingInfo3d::Sorted {
+            mesh_center: view.world_from_view.transform_point(mesh_center),
+            depth_bias: VIEW_MODEL_SORT_BIAS,
+        }
+    } else {
+        TransparentSortingInfo3d::Sorted {
+            mesh_center,
+            depth_bias,
+        }
+    }
+}
+
 /// For each view, iterates over all the meshes visible from that view and adds
 /// them to [`BinnedRenderPhase`]s or [`SortedRenderPhase`]s as appropriate.
 pub fn queue_material_meshes(
@@ -1224,8 +1260,11 @@ pub fn queue_material_meshes(
                         continue;
                     };
                     transmissive_phase.add_retained(Transmissive3d {
-                        sorting_info: TransparentSortingInfo3d::Sorted {
-                            mesh_center: get_mesh_instance_world_from_local(
+                        sorting_info: transparent_sorting(
+                            mesh_instance.tag(),
+                            material.properties.get_shader(MaterialVertexShader).is_none(),
+                            view,
+                            get_mesh_instance_world_from_local(
                                 *visible_entity,
                                 mesh_instance.current_uniform_index,
                                 &render_mesh_instances,
@@ -1237,8 +1276,8 @@ pub fn queue_material_meshes(
                                     .unwrap()
                                     .aabb_center,
                             ),
-                            depth_bias: material.properties.depth_bias,
-                        },
+                            material.properties.depth_bias,
+                        ),
                         entity: (Entity::PLACEHOLDER, *visible_entity),
                         draw_function,
                         pipeline: pipeline_id,
@@ -1324,8 +1363,11 @@ pub fn queue_material_meshes(
                         continue;
                     };
                     transparent_phase.add_retained(Transparent3d {
-                        sorting_info: TransparentSortingInfo3d::Sorted {
-                            mesh_center: get_mesh_instance_world_from_local(
+                        sorting_info: transparent_sorting(
+                            mesh_instance.tag(),
+                            material.properties.get_shader(MaterialVertexShader).is_none(),
+                            view,
+                            get_mesh_instance_world_from_local(
                                 *visible_entity,
                                 mesh_instance.current_uniform_index,
                                 &render_mesh_instances,
@@ -1337,8 +1379,8 @@ pub fn queue_material_meshes(
                                     .unwrap()
                                     .aabb_center,
                             ),
-                            depth_bias: material.properties.depth_bias,
-                        },
+                            material.properties.depth_bias,
+                        ),
                         entity: (Entity::PLACEHOLDER, *visible_entity),
                         draw_function,
                         pipeline: pipeline_id,

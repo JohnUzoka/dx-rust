@@ -137,6 +137,7 @@ mod transcended;
 mod alertui;
 mod hudfade;
 mod upscale;
+mod viewcam;
 mod grass;
 mod trees;
 mod uicanvas;
@@ -973,6 +974,16 @@ fn main() {
         .add_systems(Update, (shadowlight::shadow_light_system.after(fly), shadowlight::tag_casters_system, shadowlight::assign_system.after(shadowlight::shadow_light_system).after(shadowlight::tag_casters_system), shadowlight::no_transparent_shadows_system))
         .add_systems(Update, fx::fx_system.after(fly))
         .add_systems(Update, thirdperson::toggle_system)
+        // Lean Rendering's weapon on the world camera: decided after the heat view's camera, before the layers and
+        // the cameras' outputs that follow from it.
+        .add_systems(
+            Update,
+            viewcam::view_camera_system
+                .after(augdisplay::vision_system)
+                .before(thirdperson::toggle_system)
+                .before(postfx::postfx_system)
+                .before(glow::glow_system),
+        )
         .add_systems(Update, audiofx::soundscape_system)
         .add_systems(Update, (atmosphere::fog_system, atmosphere::halo_system.after(fly), skyline::skyline_system, clouds::clouds_system, clouds::lightning_sky_system.after(clouds::clouds_system), wisp::wisp_system.after(fly)))
         .add_systems(Update, alertui::alert_ui_system.after(ai::npc_system))

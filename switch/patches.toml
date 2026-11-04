@@ -25,4 +25,17 @@ hidapi = { path = "switch/patches/hidapi" }
 #   tags small props), and the previous transforms are kept only while a view draws motion vectors.
 # - src/cluster/mod.rs, src/cluster/gpu.rs: GPU light clustering keeps each view's index list between frames instead
 #   of uploading a new zeroed one every frame.
+# - src/render/mesh.wgsl, src/material.rs: a mesh whose `MeshTag` carries `VIEW_MODEL_TAG_HIGH` (horizon.rs tags the
+#   first-person weapon's) is projected as its own camera would project it, in front of everything, and its
+#   transparent parts sort after everything else: the world camera draws the weapon, and the weapon's camera, a
+#   second 3D camera with every per-view cost, stays off (viewcam.rs, behind Lean Rendering).
 bevy_pbr = { path = "switch/patches/bevy_pbr" }
+# bevy_render 0.19.1 with this change for the Switch build, marked "Switch build patch" in its source:
+# - src/renderer/render_context.rs: the render systems of a frame record into one command encoder instead of one each,
+#   about 19 a frame on the title. Every encoder cost wgpu-core and the driver a command pool reset, resource trackers
+#   sized to everything alive, a barrier buffer at submit and their teardown: about a quarter of run 15's render
+#   thread on the title. The encoder sits outside the ECS (the main passes read the whole render world): a system
+#   takes it at its first command and gives it back at the end of its run, and systems running at the same time take
+#   turns; horizon.rs puts the camera schedules on one thread, which records them in the order upstream submits them.
+#   `env DXVIEW_ENCODER_PER_PASS=1` gives each pass its own encoder again (an A/B switch).
+bevy_render = { path = "switch/patches/bevy_render" }
