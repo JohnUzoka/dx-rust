@@ -6,8 +6,9 @@
 //! read (`[DX RUST] options.txt: …`); switch/options.txt is a template.
 //! - `env NAME=VALUE`: an environment variable, set before the game reads any. `DXVIEW_PROF=1` prints the game's
 //!   per-system, per-pass and scene report to log.txt every 5 s (prof.rs); `BEVY_HORIZON_CPU_PROFILE=1` writes
-//!   bevy-horizon's cpu-profile.txt; `DXVIEW_NO_PREFETCH=1`, `BH_THREAD_CORES=any`, `BH_ROBUST_BUFFER_ACCESS=0` and
-//!   `DXVIEW_ENCODER_PER_PASS=1` (`camera_schedules_in_order`) are A/B switches.
+//!   bevy-horizon's cpu-profile.txt; `DXVIEW_NO_PREFETCH=1`, `BH_THREAD_CORES=any`, `BH_ROBUST_BUFFER_ACCESS=0`,
+//!   `DXVIEW_ENCODER_PER_PASS=1` (`camera_schedules_in_order`) and `DXVIEW_NO_REAPER=1` (`submission_reaper`) are A/B
+//!   switches.
 //! - `multi_threaded`: Bevy's multi-threaded executors. Without it, the main world's schedules and the render
 //!   world's extract run on one thread, as Skate 3 Rust Engine runs them on the Switch (its findings 63 §6.2, 52.5
 //!   to 57.5 fps; and 66 §3): most of DX RUST's ~160 systems take the same resources, so they ran one at a time
@@ -186,6 +187,9 @@ impl Plugin for SwitchPlugin {
         #[cfg(any(target_os = "horizon", feature = "patched_bevy_render"))]
         if cfg!(target_os = "horizon") || env_on!("DXVIEW_AS_SWITCH") {
             camera_schedules_in_order(_app);
+        }
+        if cfg!(target_os = "horizon") || env_on!("DXVIEW_AS_SWITCH") {
+            submission_reaper(_app);
         }
         #[cfg(any(target_os = "horizon", feature = "patched_bevy_pbr"))]
         {
@@ -569,6 +573,69 @@ fn camera_schedules_in_order(app: &mut App) {
         }
     }
     eprintln!("[DX RUST] render passes: one command encoder a frame, the camera schedules on one thread (env DXVIEW_ENCODER_PER_PASS=1: one per pass)");
+}
+
+/// Finished frames torn down on a thread of their own. wgpu-core tears a frame down in whatever next polls the device,
+/// and on the render thread that's the next `Queue::submit`, before it can submit: NVK resets every command buffer in
+/// the frame's command pool, and wgpu-core drops the frame's resource trackers (`drop_glue::<EncoderInFlight>` under
+/// `Queue::maintain`, 1.4 ms a frame and a fifth of the render thread's work in run 18's profile). Woken after each
+/// frame's submit, the reaper polls the device every half millisecond until the GPU has nothing in flight, so each
+/// frame comes down soon after the GPU finishes it, while the render thread prepares the next. A poll that finds
+/// nothing finished holds the device's fence for a moment; a submit that comes while a teardown is under way waits for
+/// it, which costs that frame no more than doing it itself. `DXVIEW_NO_REAPER=1` leaves it to the render thread, as
+/// upstream (the A/B switch).
+fn submission_reaper(app: &mut App) {
+    if env_on!("DXVIEW_NO_REAPER") {
+        eprintln!("[DX RUST] env DXVIEW_NO_REAPER: finished frames are torn down in the render thread's next submit, as upstream");
+        return;
+    }
+    if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        render_app.add_systems(bevy::render::Render, wake_reaper.in_set(bevy::render::RenderSystems::Cleanup));
+        eprintln!("[DX RUST] reaper: finished frames are torn down on a thread of their own (env DXVIEW_NO_REAPER=1: in the render thread's submit)");
+    }
+}
+
+/// The reaper thread and its wake-up line. Dropped with the render world, which ends the thread and waits for it, so
+/// its handle on the device is gone before the app releases the GPU.
+struct Reaper {
+    wake: Option<std::sync::mpsc::SyncSender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        self.wake = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// In `Cleanup`, after the frame's submit: starts the reaper on the first frame and wakes it on every one.
+fn wake_reaper(device: Res<bevy::render::renderer::RenderDevice>, mut reaper: Local<Option<Reaper>>) {
+    let reaper = reaper.get_or_insert_with(|| {
+        let (wake, woken) = std::sync::mpsc::sync_channel::<()>(1);
+        let device = device.wgpu_device().clone();
+        let thread = std::thread::Builder::new()
+            .name("reaper".into())
+            .spawn(move || {
+                while woken.recv().is_ok() {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_micros(500));
+                        match device.poll(wgpu::PollType::Poll) {
+                            Ok(status) if !status.is_queue_empty() => {}
+                            _ => break,
+                        }
+                    }
+                }
+            })
+            .map_err(|e| eprintln!("[DX RUST] reaper: no thread ({e}); the render thread's submit tears frames down"))
+            .ok();
+        Reaper { wake: thread.as_ref().map(|_| wake), thread }
+    });
+    if let Some(wake) = &reaper.wake {
+        let _ = wake.try_send(());
+    }
 }
 
 /// A `[Clocks]` line whenever the console is docked or undocked.

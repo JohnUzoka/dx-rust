@@ -1240,6 +1240,9 @@ bitflags! {
         const CLEARCOAT_NORMAL_UV      = 0x100000;
         const SPECULAR_UV              = 0x200000;
         const SPECULAR_TINT_UV         = 0x400000;
+        /// Switch build patch: an unlit material (`unlit`), compiled without Bevy's lighting
+        /// (`STANDARD_MATERIAL_UNLIT`, render/pbr.wgsl) unless `DXVIEW_UNLIT_FULL` is set.
+        const UNLIT                    = 0x800000;
         const DEPTH_BIAS               = 0xffffffff_00000000;
     }
 }
@@ -1364,6 +1367,9 @@ impl From<&StandardMaterial> for StandardMaterialKey {
             );
         }
 
+        // Switch build patch: unlit materials get pipelines of their own, without Bevy's lighting.
+        key.set(StandardMaterialKey::UNLIT, material.unlit && !unlit_full());
+
         key.insert(StandardMaterialKey::from_bits_retain(
             // Casting to i32 first to ensure the full i32 range is preserved.
             // (wgpu expects the depth_bias as an i32 when this is extracted in a later step)
@@ -1371,6 +1377,17 @@ impl From<&StandardMaterial> for StandardMaterialKey {
         ));
         key
     }
+}
+
+/// Switch build patch: an unlit material's shaders take only its colour, so they leave Bevy's lighting out
+/// (`STANDARD_MATERIAL_UNLIT`). Upstream compiles one shader for lit and unlit materials alike and skips the lighting at
+/// run time for an unlit one; the code it skips still sets the registers, and DX RUST's mesh actors are all unlit
+/// (Unreal's light is in their vertex colours), so each of them shaded with the lit shader's 80 registers on the Switch.
+/// Same picture. `DXVIEW_UNLIT_FULL=1` compiles them with the lighting again, as upstream (the A/B switch).
+fn unlit_full() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("DXVIEW_UNLIT_FULL").is_some());
+    *ON
 }
 
 impl Material for StandardMaterial {
@@ -1529,6 +1546,7 @@ impl Material for StandardMaterial {
                     StandardMaterialKey::SPECULAR_TINT_UV,
                     "STANDARD_MATERIAL_SPECULAR_TINT_UV_B",
                 ),
+                (StandardMaterialKey::UNLIT, "STANDARD_MATERIAL_UNLIT"),
             ] {
                 if key.bind_group_data.intersects(flags) {
                     shader_defs.push(shader_def.into());

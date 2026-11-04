@@ -193,6 +193,29 @@ pub fn shadow_strength() -> f32 {
     }
 }
 
+/// Whether the mesh actors' fragment shaders (anim_frag.wgsl, actor_lit.wgsl) walk each fragment's cluster for shadow
+/// lights: with the BSP's (`shadow_strength` above 0). With Lean Rendering and Realtime Shadows off no shadow light is
+/// ever shown, so the walk found nothing in any fragment, and leaving it out (`ActorShadowKey`) keeps the picture.
+/// `DXVIEW_MESH_SHADOW_WALK=1` keeps it, to compare.
+pub fn actor_spot_shadows() -> bool {
+    shadow_strength() > 0.0 || env_on!("DXVIEW_MESH_SHADOW_WALK")
+}
+
+/// A mesh actor material's pipeline key (gpuanim.rs `VertAnim`, skeletal.rs `ActorLit`): the shadow lights' walk
+/// (`ACTOR_SPOT_SHADOWS`) compiled in or not. postfx.rs sets it again when Realtime Shadows or Lean Rendering change.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ActorShadowKey {
+    pub spot_shadows: bool,
+}
+
+impl ActorShadowKey {
+    pub fn specialize(self, descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor) {
+        if let (true, Some(fragment)) = (self.spot_shadows, descriptor.fragment.as_mut()) {
+            fragment.shader_defs.push("ACTOR_SPOT_SHADOWS".into());
+        }
+    }
+}
+
 fn wanted() -> usize {
     match level() {
         0 => 0,

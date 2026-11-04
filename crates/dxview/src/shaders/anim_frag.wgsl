@@ -1,7 +1,9 @@
 // Vertex-lit mesh actors drawn by gpuanim.rs (pawns, animated decorations): StandardMaterial's unlit fragment with
 // real-time shadows on top (shadowlight.rs). Their light is in the vertex colour (dx-level's light_part: the summed
 // Unreal terms x LIGHT_GAIN, clamped, to linear); where a shadow light's map says the pixel is blocked, that light's
-// own term comes off it - its share of the vertex light, never quite to black.
+// own term comes off it - its share of the vertex light, never quite to black. The shadow lights' walk is compiled in
+// only where they can exist (ACTOR_SPOT_SHADOWS, shadowlight.rs `ActorShadowKey`), and the Switch build's bevy_pbr
+// leaves the lighting out of an unlit material's pipeline (STANDARD_MATERIAL_UNLIT): neither ran without them.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -18,11 +20,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     var out: FragmentOutput;
+#ifdef STANDARD_MATERIAL_UNLIT
+    out.color = pbr_input.material.base_color;
+#else
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
     } else {
         out.color = pbr_input.material.base_color;
     }
+#endif
+#ifdef ACTOR_SPOT_SHADOWS
 #ifdef VERTEX_COLORS
     var n = normalize(in.world_normal);
     if (!is_front) {
@@ -46,6 +53,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         let left = max(g - removed * share * 0.85, g * 0.15);
         out.color = vec4<f32>(out.color.rgb * pow(left / g, vec3<f32>(2.2)), out.color.a);
     }
+#endif
 #endif
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;

@@ -54,6 +54,11 @@ pub fn postfx_system(
     mut points: Query<(&mut SpotLight, &crate::shadowlight::ShadowLight), Without<crate::dynlight::FlashCone>>,
     mut spots: Query<&mut SpotLight, (With<crate::dynlight::FlashCone>, Without<crate::shadowlight::ShadowLight>)>,
     mut bsp: ResMut<Assets<crate::shadowlight::BspMaterial>>,
+    // The mesh actors, whose shadow lights' walk goes with the BSP's (shadowlight.rs `actor_spot_shadows`).
+    (mut anim, mut actors): (
+        ResMut<Assets<crate::gpuanim::AnimMaterial>>,
+        ResMut<Assets<crate::skeletal::ActorMaterial>>,
+    ),
     // The cameras that draw the world into an image: mirrors' reflections, security feeds, the outfit and aug views.
     others: Query<
         (Entity, &Msaa),
@@ -87,6 +92,20 @@ pub fn postfx_system(
                 m.extension.params.p.x = strength;
                 m.extension.params.q.z = if detail { 1.0 } else { 0.0 };
                 m.extension.params.q.w = if classic { 1.0 } else { 0.0 };
+            }
+        }
+        // Only the materials whose walk changes: a material taken mutably is prepared again.
+        let walk = crate::shadowlight::actor_spot_shadows();
+        let ids: Vec<_> = anim.iter().filter(|(_, m)| m.extension.spot_shadows != walk).map(|(id, _)| id).collect();
+        for id in ids {
+            if let Some(mut m) = anim.get_mut(id) {
+                m.extension.spot_shadows = walk;
+            }
+        }
+        let ids: Vec<_> = actors.iter().filter(|(_, m)| m.extension.spot_shadows != walk).map(|(id, _)| id).collect();
+        for id in ids {
+            if let Some(mut m) = actors.get_mut(id) {
+                m.extension.spot_shadows = walk;
             }
         }
     }
