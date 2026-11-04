@@ -81,6 +81,10 @@ pub struct BspShadow {
     /// A measurement, not a look (`bsp_diag_cycle`): 0 as normal, 1 without the dynamic lights, 2 the lightmapped
     /// surface alone.
     pub diag: u8,
+    /// The sky room's faces, drawn far past the map (skyfollow.rs): no dynamic light reaches them.
+    pub sky: bool,
+    /// A dynamic light here can be a spot light: only the flashlight with Flashlight Cone on (dynlight.rs).
+    pub spot_lights: bool,
 }
 
 impl<'a> From<&'a BspShadow> for BspShadowParams {
@@ -95,6 +99,12 @@ impl<'a> From<&'a BspShadow> for BspShadowParams {
 /// Switch's one-tap shadow filter (horizon.rs), the Switch's BSP shader went from 4,825 instructions to 2,790 (NAK);
 /// its 96 registers stayed, so a path that runs sets them. That path is Bevy's lighting of the dynamic lights, which
 /// `classic_lights` (`q.w`) replaces.
+///
+/// The Classic lights' walk over each pixel's cluster (bsp_shadow.wgsl) only where a dynamic light can reach: not on
+/// the sky room's faces, and its spot-light cone only with Flashlight Cone on. Run 20 measured the walk at 3.3 ms of
+/// the busy dock view's opaque pass, though few of the view's pixels have a light in their cluster: it's the lookup
+/// and the 16 registers it holds every pixel's shader at (48 against 32), not the lights. `DXVIEW_BSP_WALK_ALL=1`
+/// compiles both in everywhere, as up to run 20 (the A/B switch).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BspShadowKey {
     spot_shadows: bool,
@@ -102,6 +112,8 @@ pub struct BspShadowKey {
     classic_lights: bool,
     detail: bool,
     diag: u8,
+    walk: bool,
+    spot_lights: bool,
 }
 
 impl From<&BspShadow> for BspShadowKey {
@@ -112,8 +124,15 @@ impl From<&BspShadow> for BspShadowKey {
             classic_lights: m.params.q.w > 0.5,
             detail: m.params.q.y > 0.0 && m.params.q.z > 0.5,
             diag: m.diag,
+            walk: m.diag != 1 && (!m.sky || walk_all()),
+            spot_lights: m.spot_lights || walk_all(),
         }
     }
+}
+
+/// `DXVIEW_BSP_WALK_ALL=1`: every BSP material walks for dynamic lights and their spot cones (`BspShadowKey`).
+fn walk_all() -> bool {
+    env_on!("DXVIEW_BSP_WALK_ALL")
 }
 
 impl MaterialExtension for BspShadow {
@@ -146,10 +165,14 @@ impl MaterialExtension for BspShadow {
             if key.bind_group_data.detail {
                 fragment.shader_defs.push("BSP_DETAIL".into());
             }
-            match key.bind_group_data.diag {
-                1 => fragment.shader_defs.push("BSP_NO_DYNLIGHTS".into()),
-                2 => fragment.shader_defs.push("BSP_FLAT".into()),
-                _ => {}
+            if !key.bind_group_data.walk {
+                fragment.shader_defs.push("BSP_NO_DYNLIGHTS".into());
+            }
+            if key.bind_group_data.spot_lights {
+                fragment.shader_defs.push("BSP_SPOT_LIGHTS".into());
+            }
+            if key.bind_group_data.diag == 2 {
+                fragment.shader_defs.push("BSP_FLAT".into());
             }
         }
         Ok(())
@@ -171,6 +194,8 @@ pub fn bsp_material(base: StandardMaterial) -> BspMaterial {
             lights: None,
             detail: None,
             diag: DIAG.load(std::sync::atomic::Ordering::Relaxed),
+            sky: false,
+            spot_lights: crate::dynlight::flashlight_cone(),
         },
     }
 }

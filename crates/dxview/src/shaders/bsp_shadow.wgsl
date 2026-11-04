@@ -8,9 +8,10 @@
 // lighting in only for materials that use them: the branches that guard them are uniform per material, so a material
 // without them never ran them, but the shader carried their code. BSP_CLASSIC_LIGHTS (Lean Rendering) lights the
 // surface with classic_lighting below instead of Bevy's apply_pbr_lighting. BSP_DETAIL samples the detail texture only
-// where the surface has one and Detail Textures is on, the only places it was ever used. BSP_NO_DYNLIGHTS and BSP_FLAT
-// are measurements (`DXVIEW_BSP_DIAG_CYCLE`), not looks: the level without its dynamic lights, and the lightmapped
-// surface alone.
+// where the surface has one and Detail Textures is on, the only places it was ever used. BSP_NO_DYNLIGHTS leaves the
+// Classic lights' walk out where no dynamic light can reach (the sky room's faces), and BSP_SPOT_LIGHTS puts its spot
+// cone in only with Flashlight Cone on. BSP_FLAT is a measurement (`DXVIEW_BSP_DIAG_CYCLE`), not a look: the
+// lightmapped surface alone (the cycle's other step is BSP_NO_DYNLIGHTS everywhere).
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -162,10 +163,11 @@ fn from_srgb(c: vec3<f32>) -> vec3<f32> {
 // bake's gamma space, diffuse only. Unmarked lights (shadowlight's, Light Shafts') skip a lightmapped surface's diffuse
 // in Bevy's lighting too, so they add nothing here. Directional lights (lightning) add their diffuse in Bevy's units.
 // Where no light reaches, this is apply_pbr_lighting's lightmapped surface: exposure x lightmap x diffuse + emissive.
+// The walk over the cluster's lights is compiled in only where a dynamic light can reach (not the sky room's faces:
+// BspShadowKey), and its spot cone only with Flashlight Cone on (BSP_SPOT_LIGHTS); the surface's colour is worked out
+// after it, so the walk holds fewer values live.
 fn classic_lighting(in: PbrInput) -> vec4<f32> {
     let base = in.material.base_color;
-    let diffuse_color = base.rgb * (1.0 - in.material.metallic) * (1.0 - in.material.specular_transmission) *
-        (1.0 - in.material.diffuse_transmission);
 #ifndef BSP_NO_DYNLIGHTS
     let view_z = dot(vec4<f32>(
         view_bindings::view.view_from_world[0].z,
@@ -195,6 +197,7 @@ fn classic_lighting(in: PbrInput) -> vec4<f32> {
         }
         let l = to / d;
         var reach = (1.0 - d / r) * max(dot(in.N, l), 0.0);
+#ifdef BSP_SPOT_LIGHTS
         if (((*light).flags & mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_BIT) != 0u) {
             // Bevy's cone (spot_light in pbr_lighting.wgsl): the flashlight's, with Flashlight Cone on.
             var spot_dir = vec3<f32>((*light).light_custom_data.x, 0.0, (*light).light_custom_data.y);
@@ -205,6 +208,7 @@ fn classic_lighting(in: PbrInput) -> vec4<f32> {
             let cone = saturate(dot(-l, spot_dir) * (*light).light_custom_data.z + (*light).light_custom_data.w);
             reach = reach * cone * cone;
         }
+#endif
         // The colour: Bevy's colour x intensity scaled to its brightest channel (hsv_white's 1), back in gamma space.
         let rgb = (*light).color_inverse_square_range.rgb;
         added += to_srgb(rgb / max(max(rgb.r, rgb.g), max(rgb.b, 1e-8))) * (brightness * reach);
@@ -214,6 +218,8 @@ fn classic_lighting(in: PbrInput) -> vec4<f32> {
     if (max(added.r, max(added.g, added.b)) > 0.0) {
         lm = from_srgb(to_srgb(lm) + added * bsp.p.z);
     }
+    let diffuse_color = base.rgb * (1.0 - in.material.metallic) * (1.0 - in.material.specular_transmission) *
+        (1.0 - in.material.diffuse_transmission);
     var direct = vec3<f32>(0.0);
     for (var i: u32 = 0u; i < view_bindings::lights.n_directional_lights; i = i + 1u) {
         let dl = &view_bindings::lights.directional_lights[i];
