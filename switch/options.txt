@@ -35,6 +35,9 @@ env BEVY_HORIZON_CPU_PROFILE=1
 # env DXVIEW_MESH_SHADOW_WALK=1 # mesh actors' shaders walk for shadow lights even with Realtime Shadows off (from run 19 not)
 # env DXVIEW_ENCODE_ON_RENDER_THREAD=1 # every encoder turned into GPU commands on the render thread (from run 20 the big ones on a thread of their own)
 # env DXVIEW_BSP_WALK_ALL=1    # the level's shader looks for dynamic lights everywhere, the sky too, as up to run 20 (from run 21 not on the sky)
+# env DXVIEW_LIGHTMAP_LIGHTS=0 # the dynamic lights walked per pixel by the level's shader, as in run 21 (from run 22 drawn into the lightmap)
+# no_class_prefetch            # the game's code packages read by the title's setup, as up to run 21 (from run 22 on a thread from launch)
+# no_splash                    # a black screen until the first frame, as up to run 21 (from run 22 the DX RUST logo)
 # env DXVIEW_BSP_DIAG_CYCLE=1  # a measurement, not a look: the level's shader as normal, without dynamic lights, then flat, 15 s each
 
 # Upstream's GPU-driven drawing (bindless materials, multi-draw indirect calls, the level culled on the GPU): off

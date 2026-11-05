@@ -142,6 +142,7 @@ pub fn init() {
         }
         let read = if options.is_empty() { "none".to_string() } else { options.replace('\n', "; ") };
         eprintln!("[DX RUST] options.txt: {read}");
+        splash();
         if option("gpu_driven") {
             eprintln!("[DX RUST] options.txt gpu_driven: upstream's GPU-driven drawing (binding arrays, indirect draws, the level culled on the GPU)");
         } else {
@@ -161,6 +162,75 @@ pub fn init() {
             boost::allow();
             boost::set(true, "the first map loads before the game starts");
         }
+    }
+}
+
+/// From the start of `main` to the game's first frame (run 21: 7.8 s of black screen), the DX RUST logo on black with
+/// a bar running under it, drawn by bevy_horizon's splash on the window before Bevy has a surface. The first frame
+/// replaces it with upstream's own LOADING screen. `no_splash` in options.txt leaves the screen black, as before.
+#[cfg(target_os = "horizon")]
+fn splash() {
+    use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
+    if option("no_splash") {
+        return;
+    }
+    let logo = Image::from_buffer(
+        include_bytes!("../../../assets/dxrust_256.png"),
+        ImageType::Extension("png"),
+        CompressedImageFormats::NONE,
+        true,
+        ImageSampler::Default,
+        bevy::asset::RenderAssetUsages::MAIN_WORLD,
+    );
+    let Ok(logo) = logo else {
+        eprintln!("[DX RUST] splash: the logo didn't decode");
+        return;
+    };
+    let (lw, lh) = (logo.width() as usize, logo.height() as usize);
+    let Some(mut rgba) = logo.data.filter(|d| d.len() == lw * lh * 4) else { return };
+    // On black: the colour times its alpha, opaque.
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        for c in &mut px[..3] {
+            *c = (*c as u32 * a / 255) as u8;
+        }
+        px[3] = 255;
+    }
+    let mut first_frames = 0;
+    let shown = bevy_horizon::splash::show(1280, 720, std::time::Duration::from_millis(33), move |f| {
+        let (w, h, stride) = (f.width as usize, f.height as usize, f.stride);
+        let (x0, y0) = (w.saturating_sub(lw) / 2, h.saturating_sub(lh) / 2 - 24);
+        // The buffer keeps what is drawn into it: the black and the logo go in once (a few times over, for the
+        // display's buffers), then only the bar moves.
+        if first_frames < 3 {
+            first_frames += 1;
+            for row in f.pixels.chunks_mut(stride).take(h) {
+                for px in row[..w * 4].chunks_exact_mut(4) {
+                    px.copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+            for y in 0..lh.min(h - y0) {
+                let at = (y0 + y) * stride + x0 * 4;
+                f.pixels[at..at + lw * 4].copy_from_slice(&rgba[y * lw * 4..(y + 1) * lw * 4]);
+            }
+        }
+        // A short orange glow running along a dim track under the logo, once every 1.4 s.
+        let (bw, glow) = (lw as i32, 72i32);
+        let head = ((f.elapsed.as_secs_f32() / 1.4).fract() * (bw + glow) as f32) as i32 - glow;
+        let by = y0 + lh + 36;
+        for y in by..(by + 3).min(h) {
+            let row = &mut f.pixels[y * stride..];
+            for x in 0..bw {
+                let d = x - head;
+                let k = if (0..glow).contains(&d) { 1.0 - ((d - glow / 2) as f32).abs() / (glow / 2) as f32 } else { 0.0 };
+                let mix = |dim: f32, lit: f32| (dim + (lit - dim) * k) as u8;
+                let at = (x0 + x as usize) * 4;
+                row[at..at + 4].copy_from_slice(&[mix(36.0, 240.0), mix(36.0, 122.0), mix(36.0, 30.0), 255]);
+            }
+        }
+    });
+    if !shown {
+        eprintln!("[DX RUST] splash: none (the screen stays black until the first frame)");
     }
 }
 

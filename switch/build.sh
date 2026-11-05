@@ -49,8 +49,15 @@ EOF
 build="$(git -C "$repo" rev-parse --short HEAD)"
 git -C "$repo" diff --quiet HEAD -- . ':(exclude)Cargo.lock' || build="$build-dirty"
 
+# The HOME menu's icon (upstream's DX RUST logo on black: switch/icon.jpg) and version (the upstream release the port
+# is on, from its tag). ICON= and VERSION= override them.
+release="$(git -C "$repo" describe --tags --abbrev=0 2>/dev/null)"
+release="${release#v}"
+
 # Symbols stay in the ELF (crash reports and CPU profiles are looked up in it); the NRO holds only code and data.
 BEVY=0.19 \
 AUTHOR="${AUTHOR:-DX RUST contributors}" \
+ICON="${ICON:-$repo/switch/icon.jpg}" \
+VERSION="${VERSION:-${release:-0.1.0}-switch}" \
 CARGO_ARGS="--config switch/patches.toml --config profile.release.strip=false --config profile.release.debug=1 --config env.DXVIEW_BUILD=\"$build\" ${CARGO_ARGS:-}" \
     "$bh/scripts/build_game.sh" "$repo" dxview dxview "DX RUST"
