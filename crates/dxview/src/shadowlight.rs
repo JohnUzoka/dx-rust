@@ -85,6 +85,8 @@ pub struct BspShadow {
     pub sky: bool,
     /// A dynamic light here can be a spot light: only the flashlight with Flashlight Cone on (dynlight.rs).
     pub spot_lights: bool,
+    /// The dynamic lights are in the lightmap (lmlights.rs): no walk for them at all.
+    pub lm_lights: bool,
 }
 
 impl<'a> From<&'a BspShadow> for BspShadowParams {
@@ -104,7 +106,8 @@ impl<'a> From<&'a BspShadow> for BspShadowParams {
 /// the sky room's faces, and its spot-light cone only with Flashlight Cone on. Run 20 measured the walk at 3.3 ms of
 /// the busy dock view's opaque pass, though few of the view's pixels have a light in their cluster: it's the lookup
 /// and the 16 registers it holds every pixel's shader at (48 against 32), not the lights. `DXVIEW_BSP_WALK_ALL=1`
-/// compiles both in everywhere, as up to run 20 (the A/B switch).
+/// compiles both in everywhere, as up to run 20 (the A/B switch). With the lightmap lights (lmlights.rs) the dynamic
+/// lights come with the lightmap and no material walks (`DXVIEW_LIGHTMAP_LIGHTS=0` to compare).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BspShadowKey {
     spot_shadows: bool,
@@ -124,7 +127,7 @@ impl From<&BspShadow> for BspShadowKey {
             classic_lights: m.params.q.w > 0.5,
             detail: m.params.q.y > 0.0 && m.params.q.z > 0.5,
             diag: m.diag,
-            walk: m.diag != 1 && (!m.sky || walk_all()),
+            walk: m.diag != 1 && (!m.sky || walk_all()) && !m.lm_lights,
             spot_lights: m.spot_lights || walk_all(),
         }
     }
@@ -196,6 +199,7 @@ pub fn bsp_material(base: StandardMaterial) -> BspMaterial {
             diag: DIAG.load(std::sync::atomic::Ordering::Relaxed),
             sky: false,
             spot_lights: crate::dynlight::flashlight_cone(),
+            lm_lights: crate::lmlights::active(),
         },
     }
 }

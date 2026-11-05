@@ -69,7 +69,7 @@ pub fn postfx_system(
             With<crate::augdisplay::AugViewCam>,
         )>,
     >,
-    mut ao_gen: Local<Option<(bool, u32, bool, bool, bool)>>,
+    mut ao_gen: Local<Option<(bool, u32, bool, bool, bool, bool)>>,
 ) {
     // The cameras' make-up never changes in play: the SSAO pass, the depth / normal prepasses, MSAA off with SMAA.
     // Each of those is part of every material's pipeline, so adding or removing one recompiled them all (a long
@@ -82,11 +82,13 @@ pub fn postfx_system(
     let strength = crate::shadowlight::shadow_strength();
     let detail = setting!("DetailTextures") > 0.5;
     // Lean Rendering's Classic lights (shadowlight.rs): a change re-specializes the level's pipelines, as does
-    // Flashlight Cone, the one spot light their walk may meet.
+    // Flashlight Cone, the one spot light their walk may meet, and the lightmap lights (lmlights.rs), which take the
+    // walk away.
     let classic = crate::shadowlight::classic_lights();
     let cone = crate::dynlight::flashlight_cone();
-    if *ao_gen != Some((ao, strength.to_bits(), detail, classic, cone)) {
-        *ao_gen = Some((ao, strength.to_bits(), detail, classic, cone));
+    let lm = crate::lmlights::active();
+    if *ao_gen != Some((ao, strength.to_bits(), detail, classic, cone, lm)) {
+        *ao_gen = Some((ao, strength.to_bits(), detail, classic, cone, lm));
         let ids: Vec<_> = bsp.ids().collect();
         for id in ids {
             if let Some(mut m) = bsp.get_mut(id) {
@@ -95,6 +97,7 @@ pub fn postfx_system(
                 m.extension.params.q.z = if detail { 1.0 } else { 0.0 };
                 m.extension.params.q.w = if classic { 1.0 } else { 0.0 };
                 m.extension.spot_lights = cone;
+                m.extension.lm_lights = lm;
             }
         }
         // Only the materials whose walk changes: a material taken mutably is prepared again.
