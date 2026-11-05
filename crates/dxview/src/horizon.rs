@@ -111,6 +111,9 @@ pub fn init() {
     {
         // The folder bevy_horizon falls back to; normally the NRO's own name has picked it before main.
         bevy_horizon::init_switch_logging("dxview");
+        // Its panic hook, kept for the whole run (`keep_switch_panic_hook`).
+        let _ = SWITCH_PANIC_HOOK.set(std::panic::take_hook());
+        keep_switch_panic_hook();
         // libnx starts in the NRO's folder already; setting it makes launcher.txt, settings.txt and Save/ certain.
         if let Err(error) = std::env::set_current_dir(&*ROOT) {
             eprintln!("[DX RUST] could not make {} the working folder: {error}", *ROOT);
@@ -164,6 +167,24 @@ pub fn init() {
             boost::set(true, "the first map loads before the game starts");
         }
     }
+}
+
+/// bevy_horizon's panic hook (the panic's message and place to log.txt and panic.txt), taken in `init`. The game's
+/// own, `install_crash_log` (main.rs, a Startup system), wraps it and formats a backtrace first; on the Switch
+/// libgcc's unwinder aborts there (in `uw_init_context_1`), so run 22 ended with nothing about its panic in the log.
+/// PostStartup puts bevy_horizon's back over the game's (`SwitchPlugin`). Set in `init`, not lazily: it has to be
+/// taken right after bevy_horizon installs it, before the game's Startup systems put theirs in place.
+#[cfg(target_os = "horizon")]
+static SWITCH_PANIC_HOOK: std::sync::OnceLock<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "horizon")]
+fn keep_switch_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        if let Some(hook) = SWITCH_PANIC_HOOK.get() {
+            hook(info);
+        }
+    }));
 }
 
 /// From the start of `main` to the game's first frame (run 21: 7.8 s of black screen), the DX RUST logo on black with
@@ -278,7 +299,13 @@ impl Plugin for SwitchPlugin {
             _app.add_systems(Startup, screen_size);
             _app.add_systems(Update, shadow_filter);
             _app.add_systems(PreUpdate, dock_clocks);
-            _app.add_systems(Last, (cpu_boost, shadow_lights_log, draw_check_collect));
+            _app.add_systems(Last, (cpu_boost, shadow_lights_log, draw_check_collect, log_app_exit));
+            // bevy_horizon's panic hook back over the game's (`SWITCH_PANIC_HOOK`).
+            _app.add_systems(PostStartup, keep_switch_panic_hook);
+            // The thread that ends the NRO, in the `[Exit]` lines (`exit_backtrace`).
+            if !bevy_horizon::register_release_hook(exit_backtrace) {
+                eprintln!("[DX RUST] no release hook left for the exit's backtrace");
+            }
             if let Some(render) = _app.get_sub_app_mut(bevy::render::RenderApp) {
                 render.add_systems(bevy::render::Render, draw_check_report.after(bevy::render::RenderSystems::PrepareAssets));
             }
@@ -298,6 +325,49 @@ impl Plugin for SwitchPlugin {
             }
         }
     }
+}
+
+/// Why the app ended, in log.txt: each `AppExit` the main world is asked for in a frame (a game system, such as the
+/// menu's Quit, or bevy_horizon's applet check). Bevy's renderer asks after `Last`, in the render world's extract,
+/// once the render thread has gone; switch/patches/bevy_render's `pipelined_rendering.rs` logs that.
+#[cfg(target_os = "horizon")]
+fn log_app_exit(mut exits: MessageReader<AppExit>, frame: Option<Res<bevy::diagnostic::FrameCount>>) {
+    for exit in exits.read() {
+        eprintln!("[Exit] AppExit::{exit:?} asked for in frame {}", frame.as_ref().map_or(0, |f| f.0));
+    }
+}
+
+/// A release hook, run in bevy_horizon's `[Exit]` lines on the thread that ended the NRO: that thread's return
+/// addresses, newest first, from its frame records, as ELF addresses (`nro+X`: `addr2line -f -C -e dxview.elf X`).
+/// `main` returning shows the C runtime's `exit` under `main`; an `exit()` or `abort()` elsewhere shows its caller.
+#[cfg(target_os = "horizon")]
+fn exit_backtrace() {
+    unsafe extern "C" {
+        fn _start();
+    }
+    // libnx's crt0 is the first thing in the NRO, which the ELF has at 0.
+    let base = _start as usize;
+    let mut fp: usize;
+    // SAFETY: reads this function's frame pointer.
+    unsafe { core::arch::asm!("mov {}, x29", out(reg) fp) };
+    eprint!("[Exit] the thread that ended the app, newest call first:");
+    for _ in 0..32 {
+        if fp == 0 || fp % 8 != 0 {
+            break;
+        }
+        // SAFETY: a frame record (the caller's frame pointer, then the return address) on this thread's stack:
+        // aligned, and each record is above the last by less than 1 MiB, as one stack's frames are.
+        let (next, lr) = unsafe { (*(fp as *const usize), *((fp + 8) as *const usize)) };
+        if lr == 0 {
+            break;
+        }
+        eprint!(" nro+{:#x}", lr.wrapping_sub(base));
+        if next <= fp || next - fp > 1 << 20 {
+            break;
+        }
+        fp = next;
+    }
+    eprintln!();
 }
 
 /// Props out of the depth prepass (`SkipPrepass`, switch/patches/bevy_pbr): each part of a level mesh actor whose
@@ -474,6 +544,8 @@ struct Surface {
     mesh: AssetId<Mesh>,
     material: AssetId<crate::shadowlight::BspMaterial>,
     image: Option<AssetId<Image>>,
+    /// Triangles, from the main world's copy of the mesh while it has one: upstream v0.11.0's level meshes live on
+    /// the GPU alone once uploaded (`Mesh::indices` panics on those), and then `draw_check_report` counts them there.
     tris: usize,
     at: Vec3,
     seen: bool,
@@ -517,7 +589,7 @@ fn draw_check_collect(
             mesh: mesh.0.id(),
             material: mat.0.id(),
             image: mats.get(&mat.0).and_then(|m| m.base.base_color_texture.as_ref()).map(|h| h.id()),
-            tris: meshes.get(&mesh.0).and_then(|m| m.indices()).map_or(0, |i| i.len() / 3),
+            tris: meshes.get(&mesh.0).and_then(|m| m.try_indices().ok()).map_or(0, |i| i.len() / 3),
             at: aabb.map_or(tf.translation(), |a| tf.transform_point(Vec3::from(a.center))),
             seen: seen.get(),
         })
@@ -552,7 +624,8 @@ fn draw_check_report(
                 why.push("mesh not allocated");
             }
             let seen = if s.seen { ", in view" } else { "" };
-            missing.push(format!("{} tris at {:.0} ({}){seen}", s.tris, s.at, why.join(", ")));
+            let tris = allocator.mesh_index_slice(&s.mesh).map_or(s.tris, |i| i.range.len() / 3);
+            missing.push(format!("{tris} tris at {:.0} ({}){seen}", s.at, why.join(", ")));
         }
     }
     let detail = if missing.is_empty() { String::new() } else { format!(": {}", missing.join("; ")) };

@@ -159,6 +159,8 @@ impl Plugin for PipelinedRenderingPlugin {
                     })
                     .pop();
                 let Some(Ok(mut render_app)) = sent_app else {
+                    // Switch port: said, so an exit that started here shows in log.txt.
+                    bevy_log::warn!("[Render] the render thread ends: the main world sends no more frames");
                     break;
                 };
 
@@ -170,6 +172,7 @@ impl Plugin for PipelinedRenderingPlugin {
                 }
 
                 if render_to_app_sender.send_blocking(render_app).is_err() {
+                    bevy_log::warn!("[Render] the render thread ends: the main world takes no more frames back");
                     break;
                 }
             }
@@ -197,7 +200,8 @@ fn renderer_extract(app_world: &mut World, _world: &mut World) {
 
                 render_channels.send_blocking(render_app);
             } else {
-                // Renderer thread panicked
+                // Renderer thread panicked (or left its loop: its lines above say which)
+                bevy_log::error!("[Render] the render thread has gone, so the app quits (AppExit::error)");
                 world.write_message(AppExit::error());
             }
         });
