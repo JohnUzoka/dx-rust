@@ -9,10 +9,11 @@
 //!
 //! One gamepad, id 0: libnx's default pad, which merges player 1 and the handheld Joy-Con, so a
 //! Pro Controller, a pair of Joy-Con held together or the console in handheld mode all come
-//! through it. Buttons are reported by position (the bottom face button, Nintendo's B, is South; A
-//! is East; Y is West; X is North), and the vendor id is Nintendo's, so a game that picks glyphs
-//! by vendor shows Nintendo's letters. The sticks run -32767..=32767 with up positive. No SDL
-//! mapping applies (the UUID is nil), so gilrs maps these native codes one to one.
+//! through it. Face buttons are reported by their letters, not their places: A is South, B East, X
+//! West and Y North, so a game's A (confirm, jump) is the Switch's A on the right, as the console
+//! has it, and the letters it shows are the ones on the buttons. The vendor id is Nintendo's. The
+//! sticks run -32767..=32767 with up positive. No SDL mapping applies (the UUID is nil), so gilrs
+//! maps these native codes one to one.
 
 use super::FfDevice;
 use crate::{AxisInfo, Event, EventType, PlatformError, PowerInfo};
@@ -99,12 +100,12 @@ mod npad {
 
 use self::native_ev_codes as nec;
 
-/// Each npad button and its native code, by position.
+/// Each npad button and its native code (the face buttons by letter: A is South).
 const BUTTONS: [(u64, EvCode); 16] = [
-    (npad::B, nec::BTN_SOUTH),
-    (npad::A, nec::BTN_EAST),
-    (npad::Y, nec::BTN_WEST),
-    (npad::X, nec::BTN_NORTH),
+    (npad::A, nec::BTN_SOUTH),
+    (npad::B, nec::BTN_EAST),
+    (npad::X, nec::BTN_WEST),
+    (npad::Y, nec::BTN_NORTH),
     (npad::L, nec::BTN_LT),
     (npad::R, nec::BTN_RT),
     (npad::ZL, nec::BTN_LT2),

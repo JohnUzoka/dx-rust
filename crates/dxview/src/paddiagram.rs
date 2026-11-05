@@ -26,10 +26,12 @@ fn anchor(b: PadBtn) -> (i32, i32) {
         PadBtn::Select => (280, 118),
         PadBtn::Start => (320, 118),
         PadBtn::Touch => (300, 100),
-        PadBtn::North => (360, 108),
-        PadBtn::West => (340, 129),
-        PadBtn::East => (380, 129),
-        PadBtn::South => (360, 150),
+        // The Switch reports its face buttons by letter (switch/patches/gilrs-core: A South, B East, X West, Y
+        // North), so its picture has each where a Joy-Con does: A right, B bottom, X top, Y left.
+        PadBtn::North => if cfg!(target_os = "horizon") { (340, 129) } else { (360, 108) },
+        PadBtn::West => if cfg!(target_os = "horizon") { (360, 108) } else { (340, 129) },
+        PadBtn::East => if cfg!(target_os = "horizon") { (360, 150) } else { (380, 129) },
+        PadBtn::South => if cfg!(target_os = "horizon") { (380, 129) } else { (360, 150) },
         PadBtn::R3 => (330, 172),
     }
 }
