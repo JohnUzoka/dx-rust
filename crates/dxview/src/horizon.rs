@@ -339,7 +339,9 @@ fn log_app_exit(mut exits: MessageReader<AppExit>, frame: Option<Res<bevy::diagn
 
 /// A release hook, run in bevy_horizon's `[Exit]` lines on the thread that ended the NRO: that thread's return
 /// addresses, newest first, from its frame records, as ELF addresses (`nro+X`: `addr2line -f -C -e dxview.elf X`).
-/// `main` returning shows the C runtime's `exit` under `main`; an `exit()` or `abort()` elsewhere shows its caller.
+/// It reaches log.txt for an `abort()` (a panic among them), which skips `exit()`'s cleanup; after `exit()` (`main`
+/// returning, `std::process::exit`) the stdio streams are closed by now and the line is lost, and the `AppExit`
+/// line or the caller's own message says why instead (run 23).
 #[cfg(target_os = "horizon")]
 fn exit_backtrace() {
     unsafe extern "C" {
