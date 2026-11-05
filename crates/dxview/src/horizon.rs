@@ -36,6 +36,9 @@
 //!   included, and then for the session). Otherwise it stays off on the Switch (`DXVIEW_AO_NOSSAO`): with the depth
 //!   and normal prepass and the SMAA it brings, it cost about 22 ms of GPU time a frame with Ambient Occlusion off
 //!   (runs 6b to 9), and the Switch keeps it off until the game holds 60 fps without it (the user's call, 2026-11-02).
+//! - `ui_sharp`: a fractional UI Scale (the Switch's 125%) drawn at the next whole scale up and shrunk, sharp.
+//!   Otherwise it is drawn at the whole scale below and enlarged by the GPU (`DXVIEW_UI_UPSCALE`, hud.rs): softer,
+//!   and 3.8 ms a frame cheaper for the HUD in busy views (run 24); the user kept that one.
 //!
 //! On the desktop, `DXVIEW_AS_SWITCH=1` draws and schedules as the Switch does without `gpu_driven` and
 //! `multi_threaded` (no binding arrays, direct draws, one thread for the main world), so desktop runs measure the
@@ -136,6 +139,12 @@ pub fn init() {
             if !option("ssao") {
                 // No SSAO whatever Ambient Occlusion says (postfx.rs), until the game holds 60 fps without it.
                 std::env::set_var("DXVIEW_AO_NOSSAO", "1");
+            }
+            if !option("ui_sharp") {
+                // A fractional UI Scale (125%, the Switch's) drawn at the whole scale below and enlarged by the GPU
+                // (hud.rs): drawn at 2x and shrunk it cost the HUD 3.8 ms more a frame in busy views (run 24 a
+                // against b). `ui_sharp` draws it the sharp way, to compare.
+                std::env::set_var("DXVIEW_UI_UPSCALE", "1");
             }
             // Last, so an env line can change any of the above.
             for (name, value) in options.lines().filter_map(|line| line.strip_prefix("env ")?.split_once('=')) {
