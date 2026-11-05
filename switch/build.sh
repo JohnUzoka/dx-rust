@@ -49,15 +49,24 @@ EOF
 build="$(git -C "$repo" rev-parse --short HEAD)"
 git -C "$repo" diff --quiet HEAD -- . ':(exclude)Cargo.lock' || build="$build-dirty"
 
-# The HOME menu's icon (upstream's DX RUST logo on black: switch/icon.jpg) and version (the upstream release the port
-# is on, from its tag). ICON= and VERSION= override them.
-release="$(git -C "$repo" describe --tags --abbrev=0 2>/dev/null)"
+# The HOME menu's icon (upstream's DX RUST logo on black: switch/icon.jpg) and version: the port's own release from
+# its tag (switch-v0.1.0 gives 0.1.0, and 0.1.0-dev for a build after it), else the upstream release the port is on
+# (v0.11.0 gives 0.11.0-switch). ICON= and VERSION= override them.
+port="$(git -C "$repo" describe --tags --match 'switch-v*' 2>/dev/null)"
+release="$(git -C "$repo" describe --tags --abbrev=0 --exclude 'switch-v*' 2>/dev/null)"
 release="${release#v}"
+if [ -n "$port" ]; then
+    version="${port#switch-v}"
+    version="${version%%-*}"
+    [ "$port" = "switch-v$version" ] || version="$version-dev"
+else
+    version="${release:-0.1.0}-switch"
+fi
 
 # Symbols stay in the ELF (crash reports and CPU profiles are looked up in it); the NRO holds only code and data.
 BEVY=0.19 \
 AUTHOR="${AUTHOR:-DX RUST contributors}" \
 ICON="${ICON:-$repo/switch/icon.jpg}" \
-VERSION="${VERSION:-${release:-0.1.0}-switch}" \
+VERSION="${VERSION:-$version}" \
 CARGO_ARGS="--config switch/patches.toml --config profile.release.strip=false --config profile.release.debug=1 --config env.DXVIEW_BUILD=\"$build\" ${CARGO_ARGS:-}" \
     "$bh/scripts/build_game.sh" "$repo" dxview dxview "DX RUST"
