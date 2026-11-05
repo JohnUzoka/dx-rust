@@ -368,7 +368,7 @@ fn choice(assets: &mut RuntimeAssets, class: &str) -> Choice {
 
 /// Our own choice: HUD Scale on the Display screen.
 fn hud_scale_choice() -> Choice {
-    let v = crate::settings::get("HUDScale");
+    let v = setting!("HUDScale");
     Choice {
         key: "HUDScale".into(),
         label: "|&HUD Scale".into(),
@@ -387,7 +387,7 @@ fn hud_scale_choice() -> Choice {
 /// Ours, in place of Toggle Full-Screen Mode: Full Screen (exclusive), Windowed, or Borderless (a screen-sized
 /// window without borders, so alt-tab and clicking out behave).
 fn display_mode_choice() -> Choice {
-    let v = crate::settings::get("DisplayMode");
+    let v = setting!("DisplayMode");
     Choice {
         key: "DisplayMode".into(),
         label: "|&Display Mode".into(),
@@ -412,7 +412,7 @@ fn vsync_choice() -> Choice {
     c.label = "|&Vertical Sync".into();
     c.help = "Wait for the monitor's refresh before showing each frame: no tearing, frame rate capped at the refresh rate. Off: as many frames as the PC can draw.".into();
     c.kind = ChoiceKind::Enum(vec!["Disabled".into(), "Enabled".into()]);
-    c.value = crate::settings::get("VSync");
+    c.value = setting!("VSync");
     c.saved = c.value;
     c.dropdown = false;
     c
@@ -458,7 +458,7 @@ pub fn fullscreen_when_ready_system(
     if *done || !cfg!(target_os = "linux") {
         return;
     }
-    let want = crate::settings::get("DisplayMode").round() as i32;
+    let want = setting!("DisplayMode").round() as i32;
     let Ok(mut w) = windows.single_mut() else { return };
     if want == 1 {
         *done = true;
@@ -585,10 +585,25 @@ enum MsgPurpose {
     Delete,
     /// DeusExRootWindow.ConfirmQuickLoad.
     QuickLoad,
-    /// Ours: starting a new character overwrites the shared autosave slots (st.box_new_game).
-    AutosaveWarn,
     /// root.MessageBox asked for by another screen (the persona screen's Delete Note?): the answer goes back.
     External,
+    /// Ours: the controller layout picture (Settings > Enhancements > Controller Layout; once at the first map for
+    /// a player on a pad).
+    PadMap,
+}
+
+/// Open the controller layout picture (paddiagram).
+static PADMAP_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn open_pad_map() {
+    PADMAP_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn pad_map_box(hud: &mut ClassicHud, assets: &mut RuntimeAssets) -> Option<Win> {
+    let mut w = msg_box(hud, assets, "Controller Layout", "", false, MsgPurpose::PadMap)?;
+    w.f.cw = crate::paddiagram::W;
+    w.f.ch = crate::paddiagram::H;
+    w.f.textures.clear();
+    Some(w)
 }
 
 /// root.MessageBox(title, text, MB_YesNo) for another screen; its answer comes back through `take_box_answer`.
@@ -606,10 +621,27 @@ pub fn take_box_answer() -> Option<bool> {
 }
 
 /// MenuScreenSaveGame / MenuScreenLoadGame.
+/// A row of the save / load list.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SlRow {
+    /// "New Save Game" (save screen).
+    New,
+    /// A character's heading (load screen; index into `chars`), opened and closed like the Enhancements groups.
+    Char(usize),
+    /// A saved game (index into `games`).
+    Game(usize),
+}
+
 struct SaveLoad {
     saving: bool,
+    /// The save screen: only the character being played. The load screen: every character's.
     games: Vec<crate::save::SaveInfo>,
-    /// Selected row: on the save screen row 0 is "New Save Game", then the games.
+    /// Load screen: (character id, name, saves) in the order of each one's newest save.
+    chars: Vec<(String, String, usize)>,
+    /// The characters shown opened.
+    open: std::collections::HashSet<String>,
+    list: Vec<SlRow>,
+    /// Selected row (into `list`).
     sel: Option<usize>,
     scroll: i32,
     /// The description being typed (save screen) for the selected row.
@@ -623,23 +655,106 @@ impl SaveLoad {
     fn new(saving: bool) -> SaveLoad {
         let mut s = SaveLoad {
             saving,
-            games: crate::save::list(),
+            games: Vec::new(),
+            chars: Vec::new(),
+            open: Default::default(),
+            list: Vec::new(),
             sel: None,
             scroll: 0,
             edit: Edit::new(64),
-            confirm_delete: crate::settings::get("ConfirmSaveDeletes") < 0.5,
+            confirm_delete: setting!("ConfirmSaveDeletes") < 0.5,
             snap: None,
         };
-        s.sel = if saving || !s.games.is_empty() { Some(0) } else { None };
+        s.reload();
+        // The character being played (else the one saved last) starts opened, its newest save selected.
+        if !saving {
+            let me = crate::save::active_char();
+            let first = s.chars.iter().find(|c| c.0 == me).or(s.chars.first()).map(|c| c.0.clone());
+            if let Some(id) = first {
+                s.open.insert(id.clone());
+                s.build();
+                s.sel = s.list.iter().position(|r| matches!(r, SlRow::Game(i) if s.games[*i].char_id == id));
+            }
+        }
+        if s.sel.is_none() && !s.list.is_empty() {
+            s.sel = Some(0);
+        }
         s
+    }
+    /// Read the folder(s) again (after a delete) and rebuild the rows.
+    fn reload(&mut self) {
+        if self.saving {
+            self.games = crate::save::list_char(&crate::save::active_char());
+        } else {
+            self.games = crate::save::list();
+            self.chars.clear();
+            for g in &self.games {
+                match self.chars.iter_mut().find(|c| c.0 == g.char_id) {
+                    Some(c) => c.2 += 1,
+                    None => {
+                        let name = if g.char_id.is_empty() {
+                            format!("{} (earlier saves)", g.char_name)
+                        } else {
+                            g.char_name.clone()
+                        };
+                        self.chars.push((g.char_id.clone(), name, 1));
+                    }
+                }
+            }
+        }
+        self.build();
+    }
+    fn build(&mut self) {
+        self.list.clear();
+        if self.saving {
+            self.list.push(SlRow::New);
+            self.list.extend((0..self.games.len()).map(SlRow::Game));
+            return;
+        }
+        for (ci, c) in self.chars.iter().enumerate() {
+            self.list.push(SlRow::Char(ci));
+            if self.open.contains(&c.0) {
+                self.list.extend((0..self.games.len()).filter(|&i| self.games[i].char_id == c.0).map(SlRow::Game));
+            }
+        }
     }
     /// The game a row stands for.
     fn game(&self, row: usize) -> Option<&crate::save::SaveInfo> {
-        let i = if self.saving { row.checked_sub(1)? } else { row };
-        self.games.get(i)
+        match self.list.get(row)? {
+            SlRow::Game(i) => self.games.get(*i),
+            _ => None,
+        }
     }
     fn rows(&self) -> usize {
-        self.games.len() + self.saving as usize
+        self.list.len()
+    }
+    /// Open / close the character heading at `row` (load screen). True when the row was a heading.
+    fn toggle(&mut self, row: usize) -> bool {
+        let Some(SlRow::Char(c)) = self.list.get(row).copied() else { return false };
+        let id = self.chars[c].0.clone();
+        if !self.open.remove(&id) {
+            self.open.insert(id);
+        }
+        self.build();
+        self.sel = self.list.iter().position(|r| *r == SlRow::Char(c));
+        crate::sound::play_player("DeusExSounds.UserInterface.Menu_Press", 0.25, 0.0);
+        true
+    }
+    /// The text of a row: (description, date).
+    fn row_text(&self, row: SlRow, new_label: &str) -> [String; 2] {
+        match row {
+            SlRow::New => [new_label.to_string(), String::new()],
+            SlRow::Char(c) => {
+                let (id, name, n) = &self.chars[c];
+                let sign = if self.open.contains(id) { "-" } else { "+" };
+                [format!("{sign} {name}"), format!("{n} save{}", if *n == 1 { "" } else { "s" })]
+            }
+            SlRow::Game(i) => {
+                let g = &self.games[i];
+                let d = if self.saving { g.description.clone() } else { format!("    {}", g.description) };
+                [d, crate::save::format_date(g.saved_unix)]
+            }
+        }
     }
 }
 
@@ -658,6 +773,16 @@ enum Body {
     SaveLoad(SaveLoad),
     Keypad(KeypadWin),
     Enhance(Enhance),
+    /// Ours: the main menu's Achievements screen (every character's).
+    Achieve(AchieveView),
+    /// Ours: the welcome window (welcome.rs), its text scroll.
+    Welcome(i32),
+}
+
+struct AchieveView {
+    scroll: i32,
+    chars: Vec<crate::achievements::CharAch>,
+    global: std::collections::HashMap<String, (u64, String)>,
 }
 
 /// Ours: Settings > Enhancements as one scrolling, searchable list of every option beyond the original (the
@@ -715,6 +840,7 @@ impl Enhance {
             ("NotesAutofill", "Gameplay", "Codes From Notes", "Keypad codes and computer logins you've noted are offered: Tab (pad: Y) types a keypad code or fills in a login."),
             ("DialogueHotkeys", "Interface", "Dialogue Hotkeys", "Number the first four conversation choices; keys 1-4 pick them."),
             ("InventorySort", "Interface", "Inventory Auto-Sort", "A Sort button on the inventory screen packs the items neatly, weapons first."),
+            ("InventoryRotate", "Interface", "Item Rotation", "Items can lie turned in the inventory grid: R or right click while dragging (the pad's X) turns one, R turns the selected item in place. A Pack button turns and rearranges everything to free the most room, Shift-click puts an item on the belt, and pickups that only fit turned go in turned. Controller: Y uses / equips the item under the cursor, LT drops it, LB / RB change screens."),
             ("PersistentDebris", "Visuals", "Casings And Blood Stay", "Shell casings never vanish, many more blood splats stay, and blood, bullet holes and casings are still there when you come back to a map or load a save."),
             ("DiegeticScreens", "Interface", "Terminals In The World", "Computers, ATMs and keypads are used where they stand: the view moves in to the screen (the security terminal unfolds first), the original interface shows on the monitor and the mouse works on it; keypads are pressed button by button. Move the mouse off the screen for a second to step away."),
             ("DiscordPresence", "Interface", "Discord Rich Presence", "Show your location, mission and difficulty in Discord."),
@@ -738,15 +864,14 @@ impl Enhance {
             ("FixBlastDoors", "Fixes", "Explosions Break Strong Doors", "An explosion is dealt in five rings, so in the original no ring of even a big blast could beat a sturdy door's damage threshold. With this, a blast strong enough as a whole damages the door (GMDX fix; changes the balance)."),
             ("FixGibLoot", "Fixes", "Gibbed Bodies Drop Their Weapons", "Someone blown apart throws out the weapons they carried instead of losing them (GMDX / G-Flex fix; changes the balance)."),
             ("FixCarryJump", "Fixes", "Muscle Aug Jumps While Carrying", "With the Microfibral Muscle aug on you can jump while carrying heavier things, as the aug was meant to allow (GMDX fix; changes the balance)."),
-            // Transcended (ported by hand; the mod itself isn't needed).
-            ("TranscendedFixes", "Fixes", "Transcended Fixes", "Dozens of the original's bugs fixed as the Transcended mod does: misnamed mission flags (the Hong Kong ROM, the ship breach, the Vandenberg hazlab, Aimee's goal, Jock in Area 51), the ATM account-0 login, EMP'd robots taken as enemies, bot screens left open, the laser left on in conversations, the riot prod breaking crates, burning people left unconscious, barks under water, leather chair colours and more."),
-            ("TrUnconsciousDeath", "Gameplay", "Unconscious Bodies Can Die", "Someone knocked out can still be killed: an explosion, fire or gas that reaches the body finishes them (Transcended; changes the balance)."),
-            ("TrNoisyObjects", "AI", "Using Things Makes Noise", "Doors, buttons, switches, lamps, taps and machines you use make a noise guards nearby hear (Transcended's Noisy Object Usage)."),
-            ("TrWeaponPointing", "AI", "People Mind A Pointed Gun", "Friendly and neutral people you point a drawn weapon at, close up and in their view, complain (Transcended)."),
-            ("TrRadarCloak", "Gameplay", "Thermoptic Camo Fools Machines", "Thermoptic camo also hides you from cameras, turrets, laser beams and mines, as Radar Transparency does; Cloak and Radar Transparency together get you through beams (Transcended; changes the balance)."),
-            ("TrNpcLimp", "AI", "Wounded Legs Slow People", "People with a crippled leg walk at 85% speed, with both legs crippled 70% (Transcended)."),
-            ("TrBossResist", "Gameplay", "Stronger Gunther And Simons", "Gunther and Walton Simons shrug off tear gas and halon and take a third of explosive damage (Transcended; changes the balance)."),
-            ("TrLongFlares", "Gameplay", "Long-Burning Flares", "Flares burn for six minutes instead of thirty seconds (Transcended)."),
+            ("OptionalFixes", "Fixes", "Optional Fixes", "Dozens of the original's bugs fixed: misnamed mission flags (the Hong Kong ROM, the ship breach, the Vandenberg hazlab, Aimee's goal, Jock in Area 51), the ATM account-0 login, EMP'd robots taken as enemies, bot screens left open, the laser left on in conversations, the riot prod breaking crates, burning people left unconscious, barks under water, leather chair colours and more."),
+            ("UnconsciousDeath", "Gameplay", "Unconscious Bodies Can Die", "Someone knocked out can still be killed: an explosion, fire or gas that reaches the body finishes them (changes the balance)."),
+            ("NoisyObjects", "AI", "Using Things Makes Noise", "Doors, buttons, switches, lamps, taps and machines you use make a noise guards nearby hear."),
+            ("WeaponPointing", "AI", "People Mind A Pointed Gun", "Friendly and neutral people you point a drawn weapon at, close up and in their view, complain."),
+            ("RadarCloak", "Gameplay", "Thermoptic Camo Fools Machines", "Thermoptic camo also hides you from cameras, turrets, laser beams and mines, as Radar Transparency does; Cloak and Radar Transparency together get you through beams (changes the balance)."),
+            ("NpcLimp", "AI", "Wounded Legs Slow People", "People with a crippled leg walk at 85% speed, with both legs crippled 70%."),
+            ("BossResist", "Gameplay", "Stronger Gunther And Simons", "Gunther and Walton Simons shrug off tear gas and halon and take a third of explosive damage (changes the balance)."),
+            ("LongFlares", "Gameplay", "Long-Burning Flares", "Flares burn for six minutes instead of thirty seconds."),
             // GMDX quality of life.
             ("ToolCounts", "Interface", "Tools Owned / Needed", "Locks and devices show how many lockpicks or multitools you have against how many they need, as 2/3 picks (GMDX)."),
             ("ItemCounts", "Interface", "Item Count Labels", "A stack of items lying about shows how many there are, as Medkit (3) (GMDX)."),
@@ -778,6 +903,7 @@ impl Enhance {
             ("CoatCloth", "Visuals", "Coat Cloth", "With Skeletal Characters on, long coats swing and trail with the body's motion and fall around the legs instead of moving as one stiff piece."),
             ("EnhancedFX", "Visuals", "Enhanced Effects", "More particles: sparks off metal, dust off stone, splinters off wood and splashes off water where bullets hit; spark showers and rolling smoke from explosions; smoke from gun barrels; a spray of blood on hits."),
             ("Elements", "Gameplay", "Elemental Reactions", "Electric shocks run through water to everyone standing in it (you too), people on fire set others they touch alight, and fire caught by someone in water goes out."),
+            ("Sprint", "Gameplay", "Sprint and Stamina", "Your old running pace becomes your normal pace; hold Walk (Shift) or click the left stick to sprint faster. Sprinting uses stamina, shown on the right of the body display: it comes back slowly once you stop, and food tops it up. No sprinting while crouched, carrying, swimming or in the air."),
             ("Mantling", "Gameplay", "Mantling", "Jump at a ledge you can reach - up to about the height of your arms - and you climb onto it; jump at a low obstacle and you vault onto it. Not while crouched or carrying anything heavy."),
             ("CarryCover", "Gameplay", "Carried Objects As Cover", "A crate or anything else of some weight held in front of you stops the bullets meant for you, and takes the damage itself (it can break)."),
             ("ThirdPerson", "Gameplay", "Third Person View", "H switches between first person and a view of JC from behind (J swaps the side the camera sits on). The camera keeps out of walls and comes in closer while you aim with the scope key; first person is where you start. See Third Person Camera for how it turns."),
@@ -792,7 +918,7 @@ impl Enhance {
             ("LightShafts", "Visuals", "Light Shafts", "Beams of light in the air: the flashlight's cone, spotlights and the moonlight through windows and grates show in the haze."),
             ("FogVolumes", "Visuals", "Local Fog", "Low mist lying over the water in sewers and other indoor waterways, and a smoky haze in the bars and clubs that catches the light."),
             ("Clouds", "Visuals", "Night Clouds", "Volumetric clouds drifting over the open-air maps, lit by the moon and the city; in the rain they close into a dark overcast with lightning and thunder."),
-            ("ModernWater", "Visuals", "Modern Water", "Water with real reflections of what's around it, a dark see-through body, fine wind waves, rain rings and glints from the lights - like a modern shader pack. Costs an extra render near water."),
+            ("ModernWater", "Visuals", "Modern Water", "Water with real reflections of what's around it, a dark see-through body, fine wind waves, rain rings and glints from the lights - like a modern shader pack. See Water Reflections for how the reflections are made."),
             ("OpenSea", "Visuals", "Open Sea", "Without Modern Water: the sea runs on past the edge of the map to the horizon, in the original water's look, instead of fading into black before the walls at the map's edge. Costs almost nothing. Takes effect on the next map."),
             ("NoStrobeLights", "Visuals", "No Flickering Lights", "Flickering and blinking lights burn steady (GMDX's Lighting Accessibility, for photosensitive players)."),
         ] {
@@ -814,7 +940,6 @@ impl Enhance {
             ("DdsItems", "helios", "Helios Items And Decorations", "Helios's textures on items and decorations that keep their original models (HDTP's models keep their own). Changes take effect when the next map loads."),
             ("DdsWorld", "helios", "DDS World Textures", "Other DDS texture packs found beside Helios for walls, floors and the rest of the world (used in place of New Vision's where both have one). Changes take effect when the next map loads."),
             ("VisAttach", "visibleattachments", "Weapon Mods Shown (Visible Attachments)", "Scopes, silencers and lasers you fit show on the weapon. Changes take effect when the next map loads."),
-            ("ConfixFixes", "confix", "Confix Conversation Fixes", "Conversations from the Confix mod: typos, wrong speakers, missing lines and broken flag checks fixed. Only its conversation files are used. Changes take effect when the next map loads."),
         ] {
             if unreal_pkg::mods::active(id).is_none() {
                 continue;
@@ -833,14 +958,14 @@ impl Enhance {
             c.label = "Outfits On People (Augmentique)".into();
             c.help = "People in the world wear random outfits: none, everyone but the main characters, or everyone. Takes effect when the next map loads.".into();
             c.kind = ChoiceKind::Enum(vec!["None".into(), "Generic People".into(), "Everyone".into()]);
-            c.value = crate::settings::get("AugNPCs");
+            c.value = setting!("AugNPCs");
             c.saved = c.value;
             items.push(tag(c, "Mods"));
             let mut c = debug_mode_choice();
             c.key = "AugAllOutfits".into();
             c.label = "All Outfits Unlocked (Augmentique)".into();
             c.help = "Every outfit is in the Outfits screen from the start, instead of found in boxes in GMDX Augmented's maps. Takes effect on the next start.".into();
-            c.value = crate::settings::get("AugAllOutfits");
+            c.value = setting!("AugAllOutfits");
             c.saved = c.value;
             items.push(tag(c, "Mods"));
         }
@@ -850,7 +975,7 @@ impl Enhance {
             c.label = "Rain (Precipitation)".into();
             c.help = "Rain on the maps where it fits - New York, Hong Kong, the docks, a little over Paris - falling wherever the sky is open, splashing, with its sound. Dynamic lets it come and go.".into();
             c.kind = ChoiceKind::Enum(vec!["Off".into(), "Steady".into(), "Dynamic".into()]);
-            c.value = crate::settings::get("Weather");
+            c.value = setting!("Weather");
             c.saved = c.value;
             items.push(tag(c, "Visuals"));
         }
@@ -860,9 +985,45 @@ impl Enhance {
             c.label = "Third Person Camera".into();
             c.help = "Free: the camera turns around JC with the mouse or right stick, he runs the way you push and turns to face it, faces where the camera looks while you aim or shoot, and fidgets when left alone. Shoulder: a fixed view over his shoulder that turns with him.".into();
             c.kind = ChoiceKind::Enum(vec!["Free".into(), "Shoulder".into()]);
-            c.value = crate::settings::get("ThirdPersonCamera");
+            c.value = setting!("ThirdPersonCamera");
             c.saved = c.value;
             items.push(tag(c, "Gameplay"));
+        }
+        {
+            let mut c = debug_mode_choice();
+            c.key = "FOV".into();
+            c.label = "Field of View".into();
+            c.help = "How wide you see, in degrees across the screen (the original's DefaultFOV; 75 as it shipped, made for 4:3). Wider suits widescreen and ultrawide monitors. The weapon in your hands keeps its own view, so it never stretches or shows its cut-off ends; scopes and binoculars zoom as before.".into();
+            let vals: Vec<i32> = (60..=130).step_by(5).collect();
+            c.kind = ChoiceKind::Slider {
+                ticks: vals.len() as i32,
+                start: 60.0,
+                end: 130.0,
+                labels: vals.iter().map(|v| if *v == 75 { "75 (original)".to_string() } else { v.to_string() }).collect(),
+            };
+            c.value = crate::weapons::base_fov();
+            c.saved = c.value;
+            items.push(tag(c, "Display"));
+        }
+        {
+            let mut c = debug_mode_choice();
+            c.key = "FPSLimit".into();
+            c.label = "Frame Rate Cap".into();
+            c.help = "The most frames a second the game draws. A cap keeps the frame rate steady and the graphics card cooler and quieter; Off lets it run as fast as it can (with Vertical Sync on, the monitor's refresh rate caps it anyway).".into();
+            c.kind = ChoiceKind::Enum(crate::framecap::LABELS.iter().map(|s| s.to_string()).collect());
+            c.value = setting!("FPSLimit");
+            c.saved = c.value;
+            items.push(tag(c, "Display"));
+        }
+        {
+            let mut c = debug_mode_choice();
+            c.key = "WaterReflections".into();
+            c.label = "Water Reflections".into();
+            c.help = "How Modern Water mirrors its surroundings. Screen-Space reflects what is on screen, worked out on the graphics card from the picture already drawn: nearly free for the processor. Planar draws the whole scene a second time from below the water for exact reflections of things off screen too - sharper, but it costs the processor a second view whenever water is in sight.".into();
+            c.kind = ChoiceKind::Enum(vec!["Screen-Space".to_string(), "Planar".to_string()]);
+            c.value = setting!("WaterReflections");
+            c.saved = c.value;
+            items.push(tag(c, "Visuals"));
         }
         {
             let mut c = debug_mode_choice();
@@ -870,7 +1031,7 @@ impl Enhance {
             c.label = "CPU Worker Threads".into();
             c.help = "How many threads the game spreads its parallel work over. Auto leaves room for the main and render threads and stops at 10: on processors with many cores (workstation Xeons, Threadrippers) more threads only add overhead. Takes effect on the next start.".into();
             c.kind = ChoiceKind::Enum(crate::threads::STEPS.iter().map(|&n| if n == 0 { "Auto".to_string() } else { n.to_string() }).collect());
-            c.value = crate::threads::step_index(crate::settings::get("WorkerThreads"));
+            c.value = crate::threads::step_index(setting!("WorkerThreads"));
             c.saved = c.value;
             items.push(tag(c, "Display"));
         }
@@ -882,14 +1043,14 @@ impl Enhance {
                 t.key = "Trees".into();
                 t.label = "Grown Trees".into();
                 t.help = "The parks' flat card trees and bushes are replaced with grown ones: real branches and bark, clusters of leaves, swaying in the wind and casting shadows. Same size and place as the originals.".into();
-                t.value = crate::settings::get("Trees");
+                t.value = setting!("Trees");
                 t.saved = t.value;
                 t
             }, "Visuals"));
             c.label = "3D Grass".into();
             c.help = "Blades of grass grow out of the lawns, lit like the ground they stand on, swaying in the wind and pushed aside by whoever walks through them. Low: fewer blades and a shorter reach.".into();
             c.kind = ChoiceKind::Enum(vec!["Off".into(), "Low".into(), "High".into()]);
-            c.value = crate::settings::get("Grass");
+            c.value = setting!("Grass");
             c.saved = c.value;
             items.push(tag(c, "Visuals"));
         }
@@ -899,7 +1060,7 @@ impl Enhance {
             c.label = "Upscaling".into();
             c.help = "Native AA smooths edges with temporal antialiasing at full resolution. Quality, Balanced, Performance and Ultra Performance draw the world at 1/1.5, 1/1.7, 1/2 or 1/3 the window's size and upscale it with an edge-aware filter (AMD FSR 1) and sharpening - more frames on slower graphics cards. The weapon, HUD and menus always stay at full resolution.".into();
             c.kind = ChoiceKind::Enum(crate::upscale::NAMES.iter().map(|s| s.to_string()).collect());
-            c.value = crate::settings::get("Upscaling");
+            c.value = setting!("Upscaling");
             c.saved = c.value;
             items.push(tag(c, "Display"));
         }
@@ -909,7 +1070,7 @@ impl Enhance {
             c.label = "Real-Time Shadows".into();
             c.help = "People and objects cast moving shadows from the lamps around them, as dark as the light they block. Low uses the two strongest lights near you, High four.".into();
             c.kind = ChoiceKind::Enum(vec!["Off".into(), "Low".into(), "High".into()]);
-            c.value = crate::settings::get("RealtimeShadows");
+            c.value = setting!("RealtimeShadows");
             c.saved = c.value;
             items.push(tag(c, "Visuals"));
         }
@@ -976,7 +1137,7 @@ impl Enhance {
         lip.key = "SmoothLipSync".into();
         lip.label = "Smooth |&Lip Sync".into();
         lip.help = "Mouths blend smoothly between sounds and close gently, and people blink visibly (after Joe Wintergreen's lipsync mod).".into();
-        lip.value = crate::settings::get("SmoothLipSync");
+        lip.value = setting!("SmoothLipSync");
         lip.saved = lip.value;
         items.push(tag(lip, "Visuals"));
         items.push(tag(debug_mode_choice(), "Developer"));
@@ -1157,7 +1318,7 @@ struct KeypadWin {
 
 /// Ours: a code or password appears in one of the player's notes as a whole word.
 pub(crate) fn in_notes(code: &str) -> bool {
-    if code.is_empty() || crate::settings::get("NotesAutofill") < 0.5 {
+    if code.is_empty() || setting!("NotesAutofill") < 0.5 {
         return false;
     }
     let Some(st) = crate::consys::lock().as_ref().map(|s| s.notes.clone()) else { return false };
@@ -1273,6 +1434,9 @@ struct Win {
 }
 
 fn open_window(hud: &mut ClassicHud, assets: &mut RuntimeAssets, class: &str) -> Option<Win> {
+    if class == "PadLayout" {
+        return pad_map_box(hud, assets);
+    }
     let mut f = frame(assets, class);
     let body = match class {
         "MenuMain" | "MenuSelectDifficulty" | "MenuSettings" => {
@@ -1296,7 +1460,11 @@ fn open_window(hud: &mut ClassicHud, assets: &mut RuntimeAssets, class: &str) ->
                         b.enabled = false;
                     }
                     if i == 8 {
-                        b.enabled = false;
+                        // Ours: the multiplayer slot opens the Achievements screen (no multiplayer yet).
+                        b.label = "Achievements".into();
+                        b.invoke = "MenuScreenAchievements".into();
+                        b.action = 1;
+                        b.enabled = true;
                     }
                 }
             }
@@ -1341,6 +1509,24 @@ fn open_window(hud: &mut ClassicHud, assets: &mut RuntimeAssets, class: &str) ->
                 sl.edit.anchor = 0;
             }
             Body::SaveLoad(sl)
+        }
+        "MenuScreenWelcome" => {
+            f = frame(assets, "MenuScreenCustomizeKeys");
+            f.class = class.to_string();
+            f.title = crate::welcome::TITLE.into();
+            let ok = f.actions.iter().find(|a| a.1 == 1).map(|a| a.2.clone()).unwrap_or_else(|| "OK".into());
+            f.actions = vec![(0, 21, "Don't Show Again".into(), String::new()), (2, 20, ok, String::new())];
+            Body::Welcome(0)
+        }
+        "MenuScreenAchievements" => {
+            f = frame(assets, "MenuScreenCustomizeKeys");
+            f.class = class.to_string();
+            f.title = "Achievements".into();
+            // One button: back to the main menu.
+            let prev = f.actions.iter().find(|a| a.1 == 4).map(|a| a.2.clone()).unwrap_or_else(|| "Previous Menu".into());
+            f.actions = vec![(2, 4, prev, String::new())];
+            let (chars, global) = crate::achievements::all_characters();
+            Body::Achieve(AchieveView { scroll: 0, chars, global })
         }
         "MenuScreenEnhancements" => {
             f = frame(assets, "MenuScreenCustomizeKeys");
@@ -1508,6 +1694,19 @@ fn enhancement_choices() -> Vec<Choice> {
             dropdown: false,
         },
         Choice {
+            key: "PadLayout".into(),
+            label: "|&Controller Layout".into(),
+            help: "A picture of the gamepad with what each button does (your bindings).".into(),
+            kind: ChoiceKind::Action { action: 1, invoke: "PadLayout".into() },
+            value: 0.0,
+            saved: 0.0,
+            info_w: 98,
+            info_x: 270,
+            control_x: 270,
+            voff: 0,
+            dropdown: false,
+        },
+        Choice {
             key: "PadDualSense".into(),
             label: "|&DualSense Options".into(),
             help: "The DualSense's light bar, player lights, adaptive triggers, haptics and speaker.".into(),
@@ -1600,7 +1799,7 @@ fn dualsense_choices() -> Vec<Choice> {
 
 /// Ours: Debug Mode on the Enhancements screen.
 fn debug_mode_choice() -> Choice {
-    let v = crate::settings::get("DebugMode");
+    let v = setting!("DebugMode");
     Choice {
         key: "DebugMode".into(),
         label: "|&Debug Mode".into(),
@@ -1785,14 +1984,30 @@ fn win_key(win: &Win, h: &mut impl Hasher) {
             (text, yes_no).hash(h);
             hash_debug(h, purpose);
         }
-        Body::SaveLoad(SaveLoad { saving, games, sel, scroll, edit, confirm_delete, snap }) => {
-            (saving, sel, scroll, confirm_delete).hash(h);
+        Body::SaveLoad(SaveLoad { saving, games, chars, open, list, sel, scroll, edit, confirm_delete, snap }) => {
+            (saving, sel, scroll, confirm_delete, chars).hash(h);
+            let mut opened: Vec<&String> = open.iter().collect();
+            opened.sort();
+            opened.hash(h);
             hash_debug(h, games);
+            hash_debug(h, list);
             edit_key(edit, h);
             // The picture is loaded into `snap` only when the selected file changes: its file stands for it.
             snap.as_ref().map(|(p, t)| (p, t.is_some())).hash(h);
             // The Save button, and the dates (the time zone).
             (crate::save::can_save(false), crate::save::format_date(0)).hash(h);
+        }
+        Body::Welcome(scroll) => scroll.hash(h),
+        Body::Achieve(AchieveView { scroll, chars, global }) => {
+            scroll.hash(h);
+            for c in chars {
+                let mut u: Vec<_> = c.unlocked.iter().collect();
+                u.sort();
+                (&c.name, u).hash(h);
+            }
+            let mut g: Vec<_> = global.iter().collect();
+            g.sort();
+            g.hash(h);
         }
         Body::Keypad(KeypadWin { blocker, valid, input, wait, instant, noted }) => {
             // The drawing reads whether a result shows and which, not the time left on it.
@@ -2162,6 +2377,33 @@ fn draw_body(u: &mut Ui<W>, win: &mut Win, fonts: &Fonts, cx: i32, cy: i32, wait
             }
             list(u, 0, (cx + 11, cy + 23, 369, 268), &[240, 129], &rows, sel, &mut en.scroll, false);
         }
+        Body::Welcome(scroll) => {
+            header_button(u, W::Header(0), cx + 10, cy + 3, 322, "What's new for Deus Ex players");
+            text_area(u, 0, (cx + 11, cy + 23, 369, 268), crate::welcome::TEXT, false, scroll);
+        }
+        Body::Achieve(av) => {
+            let total = crate::achievements::LIST.len();
+            let any = crate::achievements::LIST.iter().filter(|a| av.chars.iter().any(|c| c.unlocked.contains_key(a.0)) || av.global.contains_key(a.0)).count();
+            header_button(u, W::Header(0), cx + 10, cy + 3, 222, "Achievement");
+            header_button(u, W::Header(1), cx + 235, cy + 3, 97, &format!("{any} / {total}"));
+            let (lx, ly, lw, lh) = (cx + 11, cy + 23, 369, 268);
+            let content = total as i32 * crate::achievements::ROW;
+            let inner = scrollbar(u, 0, lx, ly, lw, lh, content, &mut av.scroll);
+            let head = fh.clone();
+            let small = u.f.small.clone();
+            crate::achievements::draw_all(&mut u.c, &head, &small, (lx, ly, inner, lh), av.scroll, &av.chars, &av.global);
+            if av.chars.is_empty() {
+                u.c.text(&small, lx + 4, ly + lh - 14, inner - 8, 12, HAlign::Center, VAlign::Center, m_col(8), "No character has unlocked any yet.");
+            }
+            // Rows for the mouse wheel and the pad's snap.
+            for i in 0..total {
+                let ry = ly + i as i32 * crate::achievements::ROW - av.scroll;
+                let (top, bot) = (ry.max(ly), (ry + crate::achievements::ROW).min(ly + lh));
+                if bot - top > 0 {
+                    u.hit(W::Row(0, i), (lx, top, inner, bot - top), true);
+                }
+            }
+        }
         Body::Keys(k) => {
             let d = u.assets.classes.defaults("MenuScreenCustomizeKeys");
             header_button(u, W::Header(0), cx + 10, cy + 3, 162, &pstr(&d, "strHeaderActionLabel"));
@@ -2183,13 +2425,8 @@ fn draw_body(u: &mut Ui<W>, win: &mut Win, fonts: &Fonts, cx: i32, cy: i32, wait
             let l = |k: &str| pstr(&d, k);
             header_button(u, W::Header(0), cx + 10, cy + 3, 238, &l("strHeaderNameLabel"));
             header_button(u, W::Header(1), cx + 251, cy + 3, 131, &l("strHeaderDateLabel"));
-            let mut rows: Vec<Vec<String>> = Vec::new();
-            if sl.saving {
-                rows.push(vec![l("NewSaveGameButtonText"), String::new()]);
-            }
-            for g in &sl.games {
-                rows.push(vec![g.description.clone(), crate::save::format_date(g.saved_unix)]);
-            }
+            let new_label = l("NewSaveGameButtonText");
+            let mut rows: Vec<Vec<String>> = sl.list.iter().map(|r| sl.row_text(*r, &new_label).to_vec()).collect();
             // The row being named shows the typed description.
             let editing = sl.saving.then_some(sl.sel).flatten();
             if let Some(r) = editing {
@@ -2231,7 +2468,7 @@ fn draw_body(u: &mut Ui<W>, win: &mut Win, fonts: &Fonts, cx: i32, cy: i32, wait
                     l("LocationLabel").replace("%s", &g.location),
                     l("SaveCountLabel").replace("%d", &g.save_count.to_string()),
                     l("PlayTimeLabel").replace("%s", &crate::save::format_play_time(g.play_time)),
-                    format!("File Size: {}KB", (g.bytes + 1023) / 1024)
+                    format!("File Size: {}KB", g.bytes.div_ceil(1024))
                 );
                 u.wrapped(&fs, cx + 390, cy + 166, 155, 60, HAlign::Left, VAlign::Center, m_col(8), &info);
             }
@@ -2241,6 +2478,9 @@ fn draw_body(u: &mut Ui<W>, win: &mut Win, fonts: &Fonts, cx: i32, cy: i32, wait
             u.hit(W::Header(2), (cx + 389, cy + 255, 160, 15), true);
         }
         Body::Keypad(_) => {}
+        Body::Msg(m) if m.purpose == MsgPurpose::PadMap => {
+            crate::paddiagram::draw(u, cx, cy);
+        }
         Body::Msg(m) => {
             let fds = u.hud.font(u.assets, "FontMenuHeaders_DS").unwrap_or(fh.clone());
             let (tx, ty, tw, th) = (cx + 20, cy + 14, win.f.cw - 40, win.f.ch - 28);
@@ -2333,8 +2573,6 @@ pub struct Menus {
     dead_t: f32,
     /// The game a confirmation box is about: (file, description to save).
     box_save: Option<(std::path::PathBuf, String)>,
-    /// The new character waiting on the autosave warning.
-    box_new_game: Option<crate::travel::NewGame>,
     applied_gen: u64,
     themes_applied: bool,
     /// Lean Updates (perf.rs): each window layer's last drawing, and the (scale, colour) the cursor was drawn at.
@@ -2407,7 +2645,7 @@ fn menu_action(b: &MenuBtn, hud: &mut ClassicHud, assets: &mut RuntimeAssets, ou
         2 => out.push(Act::Pop),
         3 => {
             // StartNewGame: ask about the training mission once.
-            if crate::settings::get("AskedToTrain") < 0.5 {
+            if setting!("AskedToTrain") < 0.5 {
                 crate::settings::set("AskedToTrain", 1.0);
                 crate::settings::save();
                 let d = assets.classes.defaults("MenuMain");
@@ -2562,15 +2800,11 @@ pub fn menu_system(
     st.clock += dt;
     if !st.built {
         st.built = true;
-        let mission = level
-            .0
-            .actors
-            .iter()
-            .find(|a| a.class == "DeusExLevelInfo")
+        let mission = level.0.level_info()
             .map(|a| pint(&a.props, "missionNumber", 0))
             .unwrap_or(0);
         MISSION.store(mission, Ordering::Relaxed);
-        if let Some(Value::Str(loc)) = level.0.actors.iter().find(|a| a.class == "DeusExLevelInfo").and_then(|a| find(&a.props, "MissionLocation")) {
+        if let Some(Value::Str(loc)) = level.0.level_info().and_then(|a| find(&a.props, "MissionLocation")) {
             if let Ok(mut l) = LOCATION.lock() {
                 *l = loc.clone();
             }
@@ -2608,13 +2842,13 @@ pub fn menu_system(
     }
     if !st.themes_applied {
         st.themes_applied = true;
-        apply_themes(&mut assets, crate::settings::get("MenuColor") as usize, crate::settings::get("HUDColor") as usize);
+        apply_themes(&mut assets, setting!("MenuColor") as usize, setting!("HUDColor") as usize);
     }
     // Live settings: themes follow the setting.
     let gen = crate::settings::generation();
     if gen != st.applied_gen {
         st.applied_gen = gen;
-        apply_themes(&mut assets, crate::settings::get("MenuColor") as usize, crate::settings::get("HUDColor") as usize);
+        apply_themes(&mut assets, setting!("MenuColor") as usize, setting!("HUDColor") as usize);
     }
 
     // ---- the logo flyby (DeusExPlayer state Interpolating): the camera rides the path, Fire shows the menu
@@ -2648,6 +2882,11 @@ pub fn menu_system(
                 st.intro_menu_shown = true;
                 let w = open_window(&mut hud, &mut assets, "MenuMain");
                 st.push(w);
+                // Ours: the welcome window over it, until "Don't Show Again".
+                if crate::welcome::due() {
+                    let w = open_window(&mut hud, &mut assets, "MenuScreenWelcome");
+                    st.push(w);
+                }
             }
         }
     }
@@ -2684,6 +2923,10 @@ pub fn menu_system(
     let dead_click = ph.dead && st.dead_t > 2.0 && binds.buttons.just_pressed(MouseButton::Left);
     if st.stack.is_empty() && st.intro.is_none() && !others && !others_before && (binds.keys.just_pressed(KeyCode::Escape) || dead_click) {
         let w = open_window(&mut hud, &mut assets, "MenuMain");
+        st.push(w);
+    }
+    if PADMAP_OPEN.swap(false, Ordering::Relaxed) {
+        let w = pad_map_box(&mut hud, &mut assets);
         st.push(w);
     }
     // A keypad was used (Keypad.ActivateKeypadWindow).
@@ -2780,30 +3023,24 @@ pub fn menu_system(
         if let Ok((mut v, mut bg)) = backdrop.get_mut(e) {
             // MaskBackground (modulated MaskTexture) / UIBackground 2 = black.
             let black = crate::settings::ui_background() == 2 && !intro_map();
-            let want = Color::srgba(0.0, 0.0, 0.0, if black { 1.0 } else { 0.5 });
-            let shown = if is_open { Visibility::Inherited } else { Visibility::Hidden };
-            // Lean Updates: written only when they differ (a write marks the node changed, every frame).
-            if !crate::perf::lean_updates() || bg.0 != want {
-                bg.0 = want;
+            let col = Color::srgba(0.0, 0.0, 0.0, if black { 1.0 } else { 0.5 });
+            if bg.0 != col {
+                bg.0 = col;
             }
-            if !crate::perf::lean_updates() || *v != shown {
-                *v = shown;
-            }
+            v.set_if_neq(if is_open { Visibility::Inherited } else { Visibility::Hidden });
         }
     }
     if !is_open {
         for l in &st.win_layers {
             if let Ok((_, mut v, _)) = nodes.get_mut(l.e) {
                 if *v != Visibility::Hidden {
-                    *v = Visibility::Hidden;
+                    v.set_if_neq(Visibility::Hidden);
                 }
             }
         }
         if let Some(c) = &st.cursor {
             if let Ok((_, mut v, _)) = nodes.get_mut(c.e) {
-                if !crate::perf::lean_updates() || *v != Visibility::Hidden {
-                    *v = Visibility::Hidden;
-                }
+                v.set_if_neq(Visibility::Hidden);
             }
         }
         // (The kept canvases go: the next menu draws its windows afresh.)
@@ -3027,7 +3264,9 @@ pub fn menu_system(
                                         sl.edit.anchor = 0;
                                     }
                                 }
-                                if double {
+                                if !sl.saving && sl.toggle(r) {
+                                    // A character's heading opens / closes (one click, like the Enhancements groups).
+                                } else if double {
                                     sl_double = Some(if sl.saving { "SAVE" } else { "LOAD" });
                                 }
                             }
@@ -3222,8 +3461,16 @@ pub fn menu_system(
                         }
                         Body::NewGame(_) | Body::Keypad(_) => {}
                         Body::SaveLoad(sl) => {
-                            let k = if sl.saving { "SAVE" } else { "LOAD" };
-                            save_load_action(st, top, k, &mut hud, &mut assets, &mut acts);
+                            let saving = sl.saving;
+                            let heading = !saving
+                                && match &mut st.stack[top].body {
+                                    Body::SaveLoad(sl) => sl.sel.is_some_and(|r| sl.toggle(r)),
+                                    _ => false,
+                                };
+                            if !heading {
+                                let k = if saving { "SAVE" } else { "LOAD" };
+                                save_load_action(st, top, k, &mut hud, &mut assets, &mut acts);
+                            }
                         }
                         _ => {
                             // Enter is OK.
@@ -3378,7 +3625,7 @@ pub fn menu_system(
                         w.focus = Some(W::MenuBtn(1));
                     }
                 }
-                let tip = class == "MenuScreenNewGame" && crate::travel::lddp() && crate::settings::get("LDDPGaveNewGameTips") == 0.0;
+                let tip = class == "MenuScreenNewGame" && crate::travel::lddp() && setting!("LDDPGaveNewGameTips") == 0.0;
                 st.push(w);
                 if tip {
                     // MenuScreenNewGame.GiveTip (once: bGaveNewGameTips).
@@ -3579,9 +3826,7 @@ pub fn menu_system(
     }
     for li in (st.stack.len() - first)..n_layers {
         if let Ok((_, mut v, _)) = nodes.get_mut(st.win_layers[li].e) {
-            if !lean || *v != Visibility::Hidden {
-                *v = Visibility::Hidden;
-            }
+            v.set_if_neq(Visibility::Hidden);
         }
     }
     // A message box keeps the clicks to itself.
@@ -3640,6 +3885,8 @@ fn scroll_by(win: &mut Win, id: u8, d: i32) {
         // The Enhancements list (list() clamps it to the end when it draws).
         Body::Enhance(en) if id == 0 => en.scroll = (en.scroll + d).max(0),
         Body::SaveLoad(sl) if id == 0 => sl.scroll = (sl.scroll + d).max(0),
+        Body::Achieve(av) if id == 0 => av.scroll = (av.scroll + d).max(0),
+        Body::Welcome(sc) if id == 0 => *sc = (*sc + d).max(0),
         Body::NewGame(ng) if id == 1 => ng.desc_scroll = (ng.desc_scroll + d).max(0),
         _ => {}
     }
@@ -3656,6 +3903,8 @@ fn set_scroll(win: &mut Win, id: u8, v: i32) {
         Body::Keys(k) if id == 0 => k.scroll = v,
         Body::Enhance(en) if id == 0 => en.scroll = v,
         Body::SaveLoad(sl) if id == 0 => sl.scroll = v,
+        Body::Achieve(av) if id == 0 => av.scroll = v,
+        Body::Welcome(sc) if id == 0 => *sc = v,
         Body::NewGame(ng) if id == 1 => ng.desc_scroll = v,
         _ => {}
     }
@@ -3685,13 +3934,6 @@ fn box_answer(st: &mut Menus, top: usize, yes: bool, _hud: &mut ClassicHud, _ass
                 acts.push(Act::Push("MenuSelectDifficulty".into()));
             }
         }
-        MsgPurpose::AutosaveWarn => {
-            if let Some(ng) = st.box_new_game.take() {
-                if yes {
-                    acts.push(Act::NewGame(ng));
-                }
-            }
-        }
         MsgPurpose::Overwrite => {
             if yes {
                 if let Some((p, d)) = st.box_save.take() {
@@ -3712,7 +3954,7 @@ fn box_answer(st: &mut Menus, top: usize, yes: bool, _hud: &mut ClassicHud, _ass
                 acts.push(Act::LoadGame(crate::save::quick_path()));
             }
         }
-        MsgPurpose::Info | MsgPurpose::NameBlank | MsgPurpose::Restart => {}
+        MsgPurpose::Info | MsgPurpose::NameBlank | MsgPurpose::Restart | MsgPurpose::PadMap => {}
     }
 }
 
@@ -3720,7 +3962,7 @@ fn box_answer(st: &mut Menus, top: usize, yes: bool, _hud: &mut ClassicHud, _ass
 fn refresh_games(st: &mut Menus) {
     for w in st.stack.iter_mut() {
         if let Body::SaveLoad(sl) = &mut w.body {
-            sl.games = crate::save::list();
+            sl.reload();
             let n = sl.rows();
             sl.sel = sl.sel.map(|r| r.min(n.saturating_sub(1))).filter(|_| n > 0);
         }
@@ -3811,6 +4053,7 @@ fn activate(st: &mut Menus, top: usize, w: W, right: bool, hud: &mut ClassicHud,
                         } else if key == "START" {
                             let lddp = crate::travel::lddp();
                             let female = lddp && ng.portrait % 2 == 1;
+                            let name_for_id = name.clone();
                             let new_game = crate::travel::NewGame {
                                 name,
                                 skin: if lddp { (ng.portrait / 2) as u8 } else { ng.portrait as u8 },
@@ -3821,26 +4064,24 @@ fn activate(st: &mut Menus, top: usize, w: W, right: bool, hud: &mut ClassicHud,
                                 skills: ng.skills.list.iter().map(|s| (s.def.class.clone(), s.level)).collect(),
                                 points_avail: ng.skills.points_avail,
                                 points_total: ng.skills.points_total,
+                                // Ours: a new character gets its own folder of saves, autosaves and achievements.
+                                char_id: crate::save::new_char_id(&name_for_id),
                             };
-                            // Ours: a new character's autosaves go into the same five slots as everyone's.
-                            if crate::save::autosaves_exist() {
-                                st.box_new_game = Some(new_game);
-                                acts.push(Act::Msg(
-                                    "Autosaves".into(),
-                                    format!(
-                                        "This game will autosave into the same {} autosave slots, overwriting the oldest autosaves of earlier games. Your own saves are kept. Continue?",
-                                        crate::save::AUTOSAVE_SLOTS
-                                    ),
-                                    true,
-                                    MsgPurpose::AutosaveWarn,
-                                ));
-                            } else {
-                                acts.push(Act::NewGame(new_game));
-                            }
+                            // (Every character has its own five autosave slots: a new game overwrites none.)
+                            acts.push(Act::NewGame(new_game));
                         }
                     }
                 }
-                10 | 11 | 12 => box_answer(st, top, action != 10, hud, assets, acts),
+                10..=12 => box_answer(st, top, action != 10, hud, assets, acts),
+                // The welcome window: OK, or Don't Show Again (welcome.rs).
+                20 | 21 => {
+                    if action == 21 {
+                        crate::settings::set("WelcomeSeen", crate::welcome::VERSION);
+                        crate::settings::save();
+                    }
+                    crate::sound::play_player("DeusExSounds.UserInterface.Menu_OK", 0.25, 0.0);
+                    acts.push(Act::Pop);
+                }
                 _ => {}
             }
         }
@@ -3969,12 +4210,28 @@ mod tests {
             return;
         };
         let root = std::path::PathBuf::from(root);
+        // The load screen's character groups: two characters' saves and one from before characters had folders.
+        let saves = std::env::temp_dir().join(format!("dxmenu-{}", std::process::id()));
+        std::env::set_var("DXVIEW_SAVE_DIR", &saves);
+        crate::save::write_for_test("JC_Denton-1", "JC Denton", "Liberty Island - the dock", 1);
+        crate::save::write_for_test("JC_Denton-1", "JC Denton", "UNATCO HQ", 2);
+        crate::save::write_for_test("Agent_Smith-2", "Agent Smith", "Battery Park", 3);
+        crate::save::write_for_test("", "JC Denton", "Old save", 4);
+        crate::travel::set_session(crate::travel::NewGame { char_id: "JC_Denton-1".into(), ..Default::default() });
+        // Two characters' achievements (and an ending reached by one of them) for the Achievements screen.
+        let _ = std::fs::create_dir_all(saves.join("Characters/JC_Denton-1"));
+        let _ = std::fs::create_dir_all(saves.join("Characters/Agent_Smith-2"));
+        let _ = std::fs::write(saves.join("Characters/JC_Denton-1/achievements.txt"), "format=2\nname=JC Denton\nlady=1793404800\ntown=1793404900\nlebedev=1793405000\nhelios=1793406000\n");
+        let _ = std::fs::write(saves.join("Characters/Agent_Smith-2/achievements.txt"), "format=2\nname=Agent Smith\nlady=1793504800\ndunkin=1793504900\n");
+        let _ = std::fs::write(saves.join("achievements_global.txt"), "helios=1793406000;JC Denton\n");
         let mut assets = RuntimeAssets {
             classes: unreal_pkg::classes::ClassDb::open(&root.join("System")),
             lib: dx_level::TexLib::new(&root),
             images: Default::default(),
             materials: Default::default(),
             fire: Vec::new(),
+            sprites: Default::default(),
+            shared_parts: Default::default(),
         };
         *crate::abilities::lock() = Some(crate::abilities::build(&mut assets.classes));
         apply_themes(&mut assets, DEFAULT_MENU_THEME, DEFAULT_HUD_THEME);
@@ -4000,6 +4257,8 @@ mod tests {
             "MenuScreenCustomizeKeys",
             "MenuScreenSaveGame",
             "MenuScreenLoadGame",
+            "MenuScreenAchievements",
+            "MenuScreenWelcome",
             "KEYPAD",
             "MSG",
         ] {

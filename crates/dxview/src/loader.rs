@@ -268,9 +268,8 @@ pub fn loader_system(world: &mut World) {
             }
             *last = key;
         }
-        unreal_pkg::paths::set_hd_textures_on(crate::settings::get("HDTextures") > 0.5);
-        unreal_pkg::paths::set_picks_on(crate::settings::get("ConfixFixes") > 0.5);
-        dx_level::skincolor::TR_FIXES.store(crate::transcended::fixes(), std::sync::atomic::Ordering::Relaxed);
+        unreal_pkg::paths::set_hd_textures_on(setting!("HDTextures") > 0.5);
+        dx_level::skincolor::OPT_FIXES.store(crate::optfixes::fixes(), std::sync::atomic::Ordering::Relaxed);
         crate::hdtp::apply_dds_filter();
         crate::hdtp::build_layer();
         crate::visattach::apply();
@@ -392,8 +391,10 @@ fn swap(world: &mut World, map: String, goal: Goal, mut level: dx_level::Level, 
     // ---- who the player is now
     let arrive = match goal {
         Goal::NewGame(ng) => {
+            crate::stamina::refill();
             crate::save::new_game();
             crate::travel::set_session(ng);
+            crate::achievements::character_changed();
             crate::save::Arrive::Fresh
         }
         Goal::Load(s) => {
@@ -428,6 +429,7 @@ fn swap(world: &mut World, map: String, goal: Goal, mut level: dx_level::Level, 
 /// Module-level state of the map being left (queues, per-map tables, open windows). What travels with the player
 /// is put back afterwards from the captured save.
 fn reset_modules() {
+    crate::stamina::reset_level();
     crate::smartai::reset_level();
     crate::diegetic::reset_level();
     crate::abilities::reset_level();
@@ -461,6 +463,8 @@ fn reset_modules() {
     crate::cinematic::reset_level();
     crate::scriptworld::reset_level();
     crate::impacts::reset_level();
+    crate::augdisplay::reset_level();
+    crate::skeletal::reset_level();
 }
 
 /// Resources the app creates once with defaults (main.rs); the map-building systems re-insert the rest.
@@ -530,7 +534,7 @@ pub fn loading_screen_system(
     }
     let Some(assets) = assets.as_mut() else { return };
     let Some(win) = windows.iter().next() else { return };
-    if let Some(e) = spawn_loading_words(&mut commands, assets, &mut images, &mut layers, win, &mut *font, 1000) {
+    if let Some(e) = spawn_loading_words(&mut commands, assets, &mut images, &mut layers, win, &mut font, 1000) {
         commands.entity(e).insert(LoadingScreen);
     }
 }
@@ -742,6 +746,7 @@ fn dev_goto(world: &mut World) {
             let lvl = &world.resource::<crate::LevelRes>().0;
             if let Some(i) = lvl.actors.iter().position(|a| a.name.eq_ignore_ascii_case(map)) {
                 let class = lvl.actors[i].class.clone();
+                let ev = crate::devices::name_prop(&lvl.actors[i].props, "Event");
                 let code = match unreal_pkg::props::find(&lvl.actors[i].props, "validCode") {
                     Some(unreal_pkg::props::Value::Str(s)) => s.clone(),
                     _ => "1234".to_string(),
@@ -752,6 +757,17 @@ fn dev_goto(world: &mut World) {
                     let b = world.resource::<crate::actors::Blockers>().list.iter().position(|c| c.actor == i);
                     if let Some(b) = b {
                         crate::menus::open_keypad(b, code, false);
+                    }
+                } else {
+                    // Anything else: as the player's frob would (fixtures toggle, DeusExDecoration.Frob's Event).
+                    let b = world.resource::<crate::actors::Blockers>().list.iter().position(|c| c.actor == i);
+                    if let Some(b) = b {
+                        if crate::fixtures::is_fixture(&class) {
+                            crate::fixtures::frob(b);
+                        }
+                    }
+                    if !ev.is_empty() {
+                        world.resource_mut::<crate::devices::GameEvents>().0.push((ev, true));
                     }
                 }
                 println!("GOTO frob {map} ({class})");

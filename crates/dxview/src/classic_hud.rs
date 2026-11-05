@@ -392,6 +392,10 @@ impl ClassicHud {
 
 impl ClassicHud {
     pub(crate) fn tex(&mut self, assets: &mut RuntimeAssets, path: &str) -> Option<Arc<UiTex>> {
+        // A hit (nearly always) costs no copy of the key.
+        if let Some(t) = self.textures.get(path) {
+            return t.clone();
+        }
         self.textures
             .entry(path.to_string())
             .or_insert_with(|| {
@@ -404,7 +408,14 @@ impl ClassicHud {
             .clone()
     }
     pub(crate) fn ui(&mut self, assets: &mut RuntimeAssets, name: &str) -> Option<Arc<UiTex>> {
-        self.tex(assets, &format!("{UI}{name}"))
+        thread_local! { static BUF: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) }; }
+        BUF.with(|b| {
+            let mut b = b.borrow_mut();
+            b.clear();
+            b.push_str(UI);
+            b.push_str(name);
+            self.tex(assets, &b)
+        })
     }
     pub(crate) fn font(&mut self, assets: &mut RuntimeAssets, name: &str) -> Option<Arc<UiFont>> {
         if let Some(f) = self.fonts.get(name) {
@@ -422,9 +433,10 @@ impl ClassicHud {
         assets: &mut RuntimeAssets,
         class: &str,
     ) -> &[unreal_pkg::props::Property] {
-        self.defaults
-            .entry(class.to_string())
-            .or_insert_with(|| assets.classes.defaults(class))
+        if !self.defaults.contains_key(class) {
+            self.defaults.insert(class.to_string(), assets.classes.defaults(class));
+        }
+        &self.defaults[class]
     }
     pub(crate) fn str_default(
         &mut self,
@@ -571,6 +583,8 @@ pub struct Snapshot {
     parts: [i32; 6],
     energy: f32,
     breath: Option<f32>,
+    /// Sprint stamina 0..1 (stamina.rs), when Sprint is on and not under water.
+    stamina: Option<f32>,
     swim_time: f32,
     /// Unreal yaw units.
     yaw: i32,
@@ -627,11 +641,7 @@ pub fn classic_hud_system(
     let _to_logical = |v: i32| v as f32 * s as f32 / window.scale_factor();
 
     if hud.true_north.is_none() {
-        let n = level
-            .0
-            .actors
-            .iter()
-            .find(|a| a.class == "DeusExLevelInfo")
+        let n = level.0.level_info()
             .and_then(|a| match find(&a.props, "TrueNorth") {
                 Some(Value::Int(n)) => Some(*n),
                 _ => None,
@@ -650,6 +660,7 @@ pub fn classic_hud_system(
     snap.parts = [P_HEAD, P_TORSO, P_ARM_L, P_ARM_R, P_LEG_L, P_LEG_R].map(|i| p[i].max(0.0).round() as i32);
     snap.energy = ph.energy;
     snap.breath = ph.breath;
+    snap.stamina = if ph.breath.is_some() { None } else { crate::stamina::fraction() };
     snap.swim_time = *swim_clock;
     snap.yaw = yaw;
     snap.dead = ph.dead;
@@ -719,13 +730,12 @@ pub fn classic_hud_system(
 
     // Player messages (ClientMessage) go to the message log; the death prompt and keypad entry line stay where
     // they are. A message is new when its text changes or its timer is set again.
-    if msg.text != hud.seen_msg.0 || msg.time_left > hud.seen_msg.1 + 0.01 {
-        if !msg.text.is_empty() && msg.time_left > 1.0 && msg.time_left <= 100.0 {
+    if (msg.text != hud.seen_msg.0 || msg.time_left > hud.seen_msg.1 + 0.01)
+        && !msg.text.is_empty() && msg.time_left > 1.0 && msg.time_left <= 100.0 {
             let t = msg.text.clone();
             hud.add_log(&t);
             msg.time_left = 0.0;
         }
-    }
     if hud.seen_msg.0 != msg.text {
         hud.seen_msg.0.clone_from(&msg.text);
     }
@@ -956,7 +966,7 @@ pub fn classic_hud_system(
             ),
             // DeusExHUD: the active items display sits at the top right, above the belt.
             Win::Active => {
-                let (aw, ah) = active_size(&snap, sh - Win::Belt.size().1);
+                let (aw, ah) = active_size(snap, sh - Win::Belt.size().1);
                 (
                     sw - aw,
                     0,
@@ -1113,6 +1123,26 @@ pub fn classic_hud_system(
                 Some(h.finish())
             }
             Win::ConCursor => Some(hkey(&(ww, wh, s))),
+            // The ammo display changes with the gun, its rounds, the pool and the lock line.
+            Win::Ammo => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                if let Some(v) = snap.held.as_ref() {
+                    (&v.class, &v.ammo_class, v.reload_count, v.loaded, v.reloading, v.can_track, v.item).hash(&mut h);
+                }
+                inv.0.ammo.hash(&mut h);
+                (&snap.lock_text, snap.lock_color).hash(&mut h);
+                (ww, wh, s).hash(&mut h);
+                Some(h.finish())
+            }
+            // The log: its lines and the age of the newest (fades by the second).
+            Win::Log => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                log_lines.hash(&mut h);
+                (ww, wh, s).hash(&mut h);
+                Some(h.finish())
+            }
             // The hit display only changes with its colours and bars.
             Win::Hit => {
                 let cols: [Rgb; 6] = std::array::from_fn(|i| hud.parts[i].color(dt, snap.parts[i]));
@@ -1122,6 +1152,7 @@ pub fn classic_hud_system(
                     cols,
                     (snap.energy.clamp(0.0, 100.0) * 0.55) as i32,
                     snap.breath.map(|b| (b.clamp(0.0, 1.0) * 55.0) as i32),
+                    snap.stamina.map(|b| (b.clamp(0.0, 1.0) * 55.0) as i32),
                     blink,
                     (ww, wh, s),
                 )))
@@ -1162,10 +1193,10 @@ pub fn classic_hud_system(
         };
         {
             match w {
-                Win::Hit => draw_hit(hud, assets, &mut canvas, tiny.as_deref(), &snap, dt),
-                Win::Compass => draw_compass(hud, assets, &mut canvas, &snap),
-                Win::Ammo => draw_ammo(hud, assets, &mut canvas, tiny.as_deref(), &snap, &inv),
-                Win::Belt => draw_belt(hud, assets, &mut canvas, tiny.as_deref(), &snap, &inv),
+                Win::Hit => draw_hit(hud, assets, &mut canvas, tiny.as_deref(), snap, dt),
+                Win::Compass => draw_compass(hud, assets, &mut canvas, snap),
+                Win::Ammo => draw_ammo(hud, assets, &mut canvas, tiny.as_deref(), snap, &inv),
+                Win::Belt => draw_belt(hud, assets, &mut canvas, tiny.as_deref(), snap, &inv),
                 Win::Log => draw_log(hud, assets, &mut canvas, log_font.as_deref(), &log_lines),
                 Win::Damage => draw_damage(hud, assets, &mut canvas),
                 Win::Received => {
@@ -1178,7 +1209,7 @@ pub fn classic_hud_system(
                     assets,
                     &mut canvas,
                     tiny.as_deref(),
-                    &snap,
+                    snap,
                     sh - Win::Belt.size().1,
                 ),
                 Win::InfoLink => {
@@ -1313,9 +1344,11 @@ pub const HUD_PARTS: &[(&str, &str)] = &[
 pub const HUD_SIZES: [(&str, f32); 6] = [("100%", 1.0), ("50%", 0.5), ("75%", 0.75), ("125%", 1.25), ("150%", 1.5), ("200%", 2.0)];
 pub const HUD_FADES: [(&str, f32); 4] = [("100%", 1.0), ("75%", 0.75), ("50%", 0.5), ("25%", 0.25)];
 
-/// (shown, size, opacity) of a HUD window: settings HUD_<Part>_Hide / _Size / _Fade.
+/// (shown, size, opacity) of a HUD window: settings HUD_<Part>_Hide / _Size / _Fade (the seven parts' values
+/// are looked up again only when the settings change).
 fn hud_part(w: Win) -> (bool, f32, f32) {
-    let i = match w {
+    static CACHE: std::sync::Mutex<(u64, [(bool, f32, f32); 7])> = std::sync::Mutex::new((0, [(true, 1.0, 1.0); 7]));
+    let slot = match w {
         Win::Hit => 0,
         Win::Compass => 1,
         Win::Ammo => 2,
@@ -1325,23 +1358,28 @@ fn hud_part(w: Win) -> (bool, f32, f32) {
         Win::Damage => 6,
         _ => return (true, 1.0, 1.0),
     };
-    // Lean Updates: the settings only change with settings::generation, so read them once per generation
-    // instead of formatting three keys per window every frame.
-    if crate::perf::lean_updates() {
-        type Parts = [(bool, f32, f32); 7];
-        static CACHE: std::sync::Mutex<(u64, Parts)> = std::sync::Mutex::new((u64::MAX, [(true, 1.0, 1.0); 7]));
-        let generation = crate::settings::generation();
-        if let Ok(mut c) = CACHE.lock() {
-            if c.0 != generation {
-                *c = (generation, std::array::from_fn(|k| read_hud_part(HUD_PARTS[k].0)));
-            }
-            return c.1[i];
+    let gen = crate::settings::generation();
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if c.0 != gen {
+        c.0 = gen;
+        for (i, part) in [Win::Hit, Win::Compass, Win::Ammo, Win::Belt, Win::Log, Win::Active, Win::Damage].into_iter().enumerate() {
+            c.1[i] = hud_part_lookup(part);
         }
     }
-    read_hud_part(HUD_PARTS[i].0)
+    c.1[slot]
 }
 
-fn read_hud_part(key: &str) -> (bool, f32, f32) {
+fn hud_part_lookup(w: Win) -> (bool, f32, f32) {
+    let key = match w {
+        Win::Hit => "Hit",
+        Win::Compass => "Compass",
+        Win::Ammo => "Ammo",
+        Win::Belt => "Belt",
+        Win::Log => "Log",
+        Win::Active => "Active",
+        Win::Damage => "Damage",
+        _ => return (true, 1.0, 1.0),
+    };
     let g = |n: &str| crate::settings::get(&format!("HUD_{key}_{n}")).round() as usize;
     (
         g("Hide") == 0,
@@ -1865,6 +1903,12 @@ fn draw_hit(
         }
         c.text(f, 61, 74, 8, 8, HAlign::Left, VAlign::Top, col, "O2");
     }
+    // Sprint stamina: a bar like the bioenergy one on the other side of the body (the breath bar's place, which
+    // takes it back under water).
+    let stamina_pct = if breath_pct.is_none() { snap.stamina.map(|b| b.clamp(0.0, 1.0)) } else { None };
+    if let (Some(b), Some(f)) = (stamina_pct, font) {
+        c.text(f, 61, 74, 8, 8, HAlign::Left, VAlign::Top, color_scaled(b), "ST");
+    }
     // Children, bottom first: the body outline, the parts, the bars.
     if let Some(t) = hud.ui(assets, "HUDHitDisplay_Body") {
         c.texture(24, 15, 34, 68, 0, 0, &t, Style::Translucent, COL_ARMOR);
@@ -1889,7 +1933,7 @@ fn draw_hit(
         c.fill(x, 20 + 55 - size, 5, size, Style::Normal, color_scaled(pct));
     };
     bar(c, 15, energy_pct);
-    if let Some(b) = breath_pct {
+    if let Some(b) = breath_pct.or(stamina_pct) {
         bar(c, 61, b);
     }
 }
@@ -1970,7 +2014,7 @@ fn draw_ammo(
             VAlign::Top,
             crate::menuui::h_col(8),
             // GMDX HUD: Accurate Ammo Display (setting AmmoTotal): the rounds left instead of the clips.
-            if crate::settings::get("AmmoTotal") > 0.5 { "TOTAL" } else { "CLIPS" },
+            if setting!("AmmoTotal") > 0.5 { "TOTAL" } else { "CLIPS" },
         );
     }
     if let Some(t) = hud.ui(assets, "HUDAmmoDisplayBorder_1") {
@@ -2016,7 +2060,7 @@ fn draw_ammo(
             _ => None,
         })
         .unwrap_or(i32::MAX);
-    let full = crate::settings::get("AmmoMaxCyan") > 0.5 && has_ammo_type && amount >= max_ammo;
+    let full = setting!("AmmoMaxCyan") > 0.5 && has_ammo_type && amount >= max_ammo;
     let col = if full {
         [0, 255, 255]
     } else if amount < low_mark {
@@ -2025,7 +2069,7 @@ fn draw_ammo(
         COL_AMMO
     };
     let (in_clip, clips_real) = ammo_counts(reload, has_ammo_type, amount, loaded);
-    let clips_left = if crate::settings::get("AmmoTotal") > 0.5 && has_ammo_type {
+    let clips_left = if setting!("AmmoTotal") > 0.5 && has_ammo_type {
         (amount - in_clip).max(0)
     } else {
         clips_real
@@ -2390,6 +2434,8 @@ mod tests {
             images: Default::default(),
             materials: Default::default(),
             fire: Vec::new(),
+            sprites: Default::default(),
+            shared_parts: Default::default(),
         };
         let mut hud = ClassicHud::default();
         hud.true_north = Some(0);
@@ -2419,6 +2465,7 @@ mod tests {
                     pos: None,
                     uid: 0,
                     data: Vec::new(),
+                    rotated: false,
                 });
                 inv.0.belt[slot] = Some(inv.0.items.len() - 1);
             };
@@ -2444,7 +2491,9 @@ mod tests {
         let snap = Snapshot {
             parts: [100, 80, 55, 30, 5, 0],
             energy: 70.0,
-            breath: Some(0.6),
+            // HUD_PREVIEW_STAMINA=1: the sprint stamina bar in the breath bar's place.
+            breath: if env_on!("HUD_PREVIEW_STAMINA") { None } else { Some(0.6) },
+            stamina: env_on!("HUD_PREVIEW_STAMINA").then_some(0.45),
             yaw: 3000,
             held: Some(HeldView {
                 class: "WeaponPistol".into(),

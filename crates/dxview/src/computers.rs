@@ -161,7 +161,6 @@ struct Node {
 
 /// One computer's or ATM's state (its properties and what's happened to it).
 struct CompData {
-    class: String,
     kind: Kind,
     pos: DVec3,
     users: Vec<User>,
@@ -221,6 +220,36 @@ fn pfloat(p: &[Property], n: &str, d: f32) -> f32 {
         Some(Value::Byte(v)) => *v as f32,
         _ => d,
     }
+}
+
+/// NodeInfo[ComputerNode] from the Computers class defaults (texture refs resolve in DeusEx.u).
+fn node_of(p: &[Property], assets: &mut RuntimeAssets) -> Node {
+    let node_i = pfloat(p, "ComputerNode", 0.0) as u32;
+    let mut node = Node::default();
+    let d = assets.classes.defaults("Computers");
+    if let Some((_, b)) = structs(&d, "NodeInfo").into_iter().find(|x| x.0 == node_i) {
+        let mut r = Reader::new(b, 0);
+        node.name = fstr(&mut r);
+        node.desc = fstr(&mut r);
+        node.address = fstr(&mut r);
+        let t = r.compact_index().unwrap_or(0);
+        if t != 0 {
+            if let Some(pkg) = assets.classes.packages.get("deusex") {
+                node.texture = pkg.object_path(t);
+            }
+        }
+    }
+    node
+}
+
+/// A terminal's network node: its name and logo texture (diegetic.rs standby screens).
+pub fn node_name_logo(lvl: &dx_level::Level, actor: usize, assets: &mut RuntimeAssets) -> (String, String) {
+    let Some(a) = lvl.actors.get(actor) else { return Default::default() };
+    if a.class == "ATM" {
+        return (String::new(), String::new());
+    }
+    let n = node_of(&a.props, assets);
+    (n.name, n.texture)
 }
 
 impl CompData {
@@ -283,25 +312,8 @@ impl CompData {
             }
         }
         // NodeInfo[ComputerNode] from the Computers class defaults (texture refs resolve in DeusEx.u).
-        let node_i = pfloat(p, "ComputerNode", 0.0) as u32;
-        let mut node = Node::default();
-        if kind != Kind::Atm {
-            let d = assets.classes.defaults("Computers");
-            if let Some((_, b)) = structs(&d, "NodeInfo").into_iter().find(|x| x.0 == node_i) {
-                let mut r = Reader::new(b, 0);
-                node.name = fstr(&mut r);
-                node.desc = fstr(&mut r);
-                node.address = fstr(&mut r);
-                let t = r.compact_index().unwrap_or(0);
-                if t != 0 {
-                    if let Some(pkg) = assets.classes.packages.get("deusex") {
-                        node.texture = pkg.object_path(t);
-                    }
-                }
-            }
-        }
+        let node = if kind != Kind::Atm { node_of(p, assets) } else { Node::default() };
         CompData {
-            class: a.class.clone(),
             kind,
             pos: DVec3::new(loc[0] as f64, loc[1] as f64, loc[2] as f64),
             users,
@@ -1010,9 +1022,9 @@ impl Term {
         let (a, p) = (acct.get().to_uppercase(), pin.get().to_uppercase());
         let d = self.d(wx);
         // ProcessLogin left userIndex at 0 for an unknown account, so account 0's PIN logged in with any number;
-        // Transcended starts it at -1.
+        // Optional Fixes start it at -1.
         let found = d.accounts.iter().position(|x| x.number.to_uppercase() == a);
-        let idx = if crate::transcended::fixes() { found.unwrap_or(usize::MAX) } else { found.unwrap_or(0) };
+        let idx = if crate::optfixes::fixes() { found.unwrap_or(usize::MAX) } else { found.unwrap_or(0) };
         let ok = d.accounts.get(idx).is_some_and(|x| x.pin.to_uppercase() == p);
         if ok {
             self.user = String::new();
@@ -1582,7 +1594,15 @@ fn draw_security(u: &mut Ui<Wid>, sc: &mut Sec, wx: &Dv, actor: usize, dx: i32, 
         let y = dy + 30 + 34 * i as i32;
         let present = if i == 3 { has_turret } else { en[i] };
         action_button(u, Wid::Choice(i as u8), dx + 13, y, 143, &action, en[i]);
-        let value = if present { enum_text(u.hud, u.assets, i, sc.values[i]) } else { String::new() };
+        // Ours: a turret locked out because the computer was hacked below Advanced (the original only greys the
+        // button) says why.
+        let value = if i == 3 && present && sc.turret_disabled {
+            "Needs Advanced".to_string()
+        } else if present {
+            enum_text(u.hud, u.assets, i, sc.values[i])
+        } else {
+            String::new()
+        };
         info_button(u, dx + 13 + 154, y, 113, &value, if en[i] { m_btn(0) } else { m_btn(3) });
         u.hit(Wid::ChoiceInfo(i as u8), (dx + 167, y, 113, 19), en[i]);
     }
@@ -1697,6 +1717,18 @@ fn draw_hack(u: &mut Ui<Wid>, h: &Hack) {
     let st = u.state(Wid::HackBtn, h.btn_enabled);
     crate::inventory_screen::draw_button(&mut u.c, u.hud, u.assets, &fh, 20, 86, bw, &label_s, st, false);
     u.hit(Wid::HackBtn, (20, 86, bw, 16), h.btn_enabled);
+    // Ours: the empty well right of the button shows the time left before the hack is detected (the bar's
+    // seconds), red and blinking for the last five and once it's caught.
+    let left = if h.detected { 0.0 } else { h.detection.max(0.0) };
+    let secs = left.ceil() as i32;
+    let blink = (h.detected || left < 5.0) && (h.detection.abs() * 2.0).fract() < 0.35;
+    if !(h.detected || left < 5.0) || !blink {
+        let col = if h.detected || left < 5.0 { HACK_RED } else { crate::uicanvas::color_scaled(pct) };
+        let s = format!("{}:{:02}", secs / 60, secs % 60);
+        let x0 = 20 + bw + 2;
+        let w = (96 - x0).max(20);
+        u.text(&fx, x0, 86, w, 16, HAlign::Center, VAlign::Center, col, &s);
+    }
 }
 
 /// ComputerScreenHackAccounts.
@@ -1913,8 +1945,8 @@ fn activate(t: &mut Term, w: Wid, right: bool, wx: &mut Wx) {
             let n = if i == 3 { 4 } else { 2 };
             // ButtonActivated / ButtonActivatedRight both cycle to the next value first (the subclasses call
             // Super.ButtonActivated either way), then act.
-            // Transcended: the turret choice's right click (ButtonActivatedRight) steps back.
-            s.values[i] = if right && i == 3 && crate::transcended::fixes() { (s.values[i] + n - 1) % n } else { (s.values[i] + 1) % n };
+            // Optional Fixes: the turret choice's right click (ButtonActivatedRight) steps back.
+            s.values[i] = if right && i == 3 && crate::optfixes::fixes() { (s.values[i] + n - 1) % n } else { (s.values[i] + 1) % n };
             let v = wx.data.get(&actor).unwrap().views[s.sel].clone();
             match i {
                 0 => {
@@ -1984,6 +2016,8 @@ struct Nodes {
     hack: Layer,
     accounts: Layer,
     cursor: Layer,
+    /// Diegetic: the terminal's desktop behind its windows (wallpaper, task bar, clock).
+    desk: Layer,
     feed_nodes: [Entity; 3],
     noise: Handle<Image>,
 }
@@ -2003,6 +2037,8 @@ pub struct Computers {
     pending: HashMap<usize, CompSave>,
     /// The UI camera the nodes render through while diegetic (diegetic.rs).
     ui_target: Option<Entity>,
+    /// What the diegetic desktop was last drawn for (redrawn when the clock or user changes).
+    desk_key: String,
 }
 
 /// What a save keeps of a terminal that has been used (save.rs).
@@ -2107,6 +2143,7 @@ fn spawn_feed(commands: &mut Commands, images: &mut Assets<Image>, j: usize, s: 
             bevy::light::cluster::ClusterConfig::Single,
             Tonemapping::None,
             Exposure { ev100: -0.263 },
+            Msaa::Off,
             FeedCam,
         ))
         .id();
@@ -2119,6 +2156,7 @@ fn spawn_feed(commands: &mut Commands, images: &mut Assets<Image>, j: usize, s: 
             Transform::default(),
             Tonemapping::None,
             Exposure { ev100: -0.263 },
+            Msaa::Off,
             FeedCam,
         ))
         .id();
@@ -2175,9 +2213,7 @@ pub fn computer_system(
         st.seed = 0x9E37_79B9_7F4A_7C15;
     }
     let mission = *st.mission.get_or_insert_with(|| {
-        lvl.actors
-            .iter()
-            .find(|a| a.class == "DeusExLevelInfo")
+        lvl.level_info()
             .map(|a| pfloat(&a.props, "MissionNumber", 0.0) as u8)
             .unwrap_or(0)
     });
@@ -2219,7 +2255,8 @@ pub fn computer_system(
         let hack = layer(&mut commands, &mut images, &mut layers, 52);
         let accounts = layer(&mut commands, &mut images, &mut layers, 52);
         let cursor = layer(&mut commands, &mut images, &mut layers, 53);
-        st.nodes = Some(Nodes { backdrop: backdrop_e, comp, overlay, hack, accounts, cursor, feed_nodes: feed_nodes_e, noise });
+        let desk = layer(&mut commands, &mut images, &mut layers, 48);
+        st.nodes = Some(Nodes { backdrop: backdrop_e, comp, overlay, hack, accounts, cursor, desk, feed_nodes: feed_nodes_e, noise });
     }
 
     // ---- the computers' own ticking: alarms run out (Computers.Tick -> EndAlarm)
@@ -2361,7 +2398,7 @@ pub fn computer_system(
     };
     {
         let nodes = st.nodes.as_ref().unwrap();
-        let all = [nodes.backdrop, nodes.comp.e, nodes.overlay.e, nodes.hack.e, nodes.accounts.e, nodes.cursor.e, nodes.feed_nodes[0], nodes.feed_nodes[1], nodes.feed_nodes[2]];
+        let all = [nodes.backdrop, nodes.comp.e, nodes.overlay.e, nodes.hack.e, nodes.accounts.e, nodes.cursor.e, nodes.desk.e, nodes.feed_nodes[0], nodes.feed_nodes[1], nodes.feed_nodes[2]];
         let want = dg.map(|v| v.cam);
         if st.ui_target != want {
             st.ui_target = want;
@@ -2394,12 +2431,49 @@ pub fn computer_system(
             mission,
         };
         t.clock += dt;
+        // Dev aid: DXVIEW_COMPTEST="user;pass;n" logs in once the login shows, then on the security screen presses
+        // the turret choice n times a second apart, printing the turret's mode each time.
+        if let Some(v) = env_val!("DXVIEW_COMPTEST") {
+            let parts: Vec<&str> = v.split(';').collect();
+            if let (Some(Screen::Login { user, pass, .. }), [u, p, ..]) = (t.screen.as_mut(), parts.as_slice()) {
+                user.text = u.chars().collect();
+                pass.text = p.chars().collect();
+                activate(t, Wid::Btn(Btn::Login), false, &mut wx);
+            } else if let Some(Screen::Security(sc)) = t.screen.as_ref() {
+                let want: u32 = parts.get(2).and_then(|n| n.parse().ok()).unwrap_or(4);
+                static DONE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let done = DONE.load(std::sync::atomic::Ordering::Relaxed);
+                let d = wx.data.get(&t.actor).unwrap();
+                let tag = d.views[sc.sel].turret.clone();
+                if done < want && (t.clock * 0.5) as u32 > done {
+                    DONE.store(done + 1, std::sync::atomic::Ordering::Relaxed);
+                    let en = choice_enabled(sc, d, wx.sec, wx.lvl);
+                    activate(t, Wid::Choice(3), false, &mut wx);
+                    let vals = match t.screen.as_ref() {
+                        Some(Screen::Security(sc)) => sc.values,
+                        _ => [9; 4],
+                    };
+                    println!("COMPTEST view turret tag {tag:?} enabled {:?} -> mode {:?} values {vals:?}", en, control::turret(wx.sec, &tag));
+                }
+            }
+        }
         // The player died (NetworkTerminal.Tick).
         if wx.ph.dead {
             t.close_screen("EXIT", &mut wx);
         }
-        // Diegetic: the mouse left the monitor for a second - walk away from it.
-        if crate::diegetic::take_leave() {
+        // Diegetic: stepping away (diegetic.rs asks; or right click off a choice, or a walk key while not typing).
+        let mut leave = crate::diegetic::take_leave();
+        if dg.is_some_and(|v| v.mouse.is_some()) {
+            let typing = matches!(t.focus, Some(Wid::Edit(_)));
+            let walk = !typing
+                && [KeyCode::KeyW, KeyCode::KeyA, KeyCode::KeyS, KeyCode::KeyD, KeyCode::ArrowUp, KeyCode::ArrowDown]
+                    .iter()
+                    .any(|k| binds.keys.just_pressed(*k));
+            let over_choice = t.hits.iter().rev().find(|(_, r, _)| crate::inventory_screen::inside(mouse, *r)).is_some_and(|h| matches!(h.0, Wid::Choice(_)));
+            let right = binds.buttons.just_pressed(MouseButton::Right) && !over_choice;
+            leave |= walk || right;
+        }
+        if leave {
             t.close_screen("EXIT", &mut wx);
         }
         // Walked away is impossible (no input reaches the game); the computer blown up closes it.
@@ -2446,11 +2520,10 @@ pub fn computer_system(
                             } else {
                                 let pkg = wx.data.get(&t.actor).unwrap().text_package.clone();
                                 match t.screen.as_mut() {
-                                    Some(Screen::Email(m)) | Some(Screen::Bulletins(m)) => {
-                                        if m.sel != Some(r) {
+                                    Some(Screen::Email(m)) | Some(Screen::Bulletins(m))
+                                        if m.sel != Some(r) => {
                                             select_doc(m, r, &pkg, &mut wx);
                                         }
-                                    }
                                     _ => {}
                                 }
                                 t.focus = Some(Wid::Row(L_LIST, r));
@@ -2714,9 +2787,7 @@ pub fn computer_system(
         }
         despawn_feeds(st, &mut commands);
         cursor_opts.visible = !st.grabbed_before;
-        if st.grabbed_before {
-            cursor_opts.grab_mode = bevy::window::CursorGrabMode::Locked;
-        }
+        cursor_opts.grab_mode = if st.grabbed_before { bevy::window::CursorGrabMode::Locked } else { bevy::window::CursorGrabMode::None };
     }
 
     let is_open = st.term.is_some();
@@ -2727,19 +2798,21 @@ pub fn computer_system(
     }
     let nodes = st.nodes.as_mut().unwrap();
     if let Ok(mut v) = backdrop.get_mut(nodes.backdrop) {
-        *v = if is_open { Visibility::Inherited } else { Visibility::Hidden };
+        // (Diegetic: the desktop stands in for the black backdrop.)
+        v.set_if_neq(if is_open && dg.is_none() { Visibility::Inherited } else { Visibility::Hidden });
     }
     if !is_open {
-        for e in [nodes.comp.e, nodes.overlay.e, nodes.hack.e, nodes.accounts.e, nodes.cursor.e] {
+        st.desk_key.clear();
+        for e in [nodes.comp.e, nodes.overlay.e, nodes.hack.e, nodes.accounts.e, nodes.cursor.e, nodes.desk.e] {
             if let Ok((_, mut v, _)) = layer_nodes.get_mut(e) {
                 if *v != Visibility::Hidden {
-                    *v = Visibility::Hidden;
+                    v.set_if_neq(Visibility::Hidden);
                 }
             }
         }
         for e in nodes.feed_nodes {
             if let Ok((_, mut v, _)) = feed_nodes.get_mut(e) {
-                *v = Visibility::Hidden;
+                v.set_if_neq(Visibility::Hidden);
             }
         }
         if !close {
@@ -2779,6 +2852,29 @@ pub fn computer_system(
     let (pressed, focus) = (t.pressed, t.focus);
     let dv = Dv { data: &st.data, sec: &sec, movers: &movers, lvl };
     let nodes = st.nodes.as_mut().unwrap();
+    // Diegetic: the terminal's desktop behind its windows (desktop.rs), redrawn as the clock ticks.
+    match dg {
+        Some(_) => {
+            let d0 = st.data.get(&t.actor).unwrap();
+            let hint = crate::desktop::leave_hint();
+            let key = format!("{}|{}|{}|{}|{sw}x{sh}|{}", d0.node.name, t.user, crate::desktop::clock(now, true), (now * 1.6).fract() < 0.6, hint);
+            if st.desk_key != key {
+                st.desk_key = key;
+                let logo = if d0.node.texture.is_empty() { None } else { hud.tex(&mut assets, &d0.node.texture) };
+                let mut c = Canvas::new(sw, sh, 1);
+                crate::desktop::desk(&mut c, &fonts.small, &fonts.headers, logo.as_ref(), &d0.node.name, &t.user, now, &hint);
+                place(&mut nodes.desk, &c, (0, 0), d, sf, &mut images, &mut layers, &mut layer_nodes);
+            }
+        }
+        None => {
+            if let Ok((_, mut v, _)) = layer_nodes.get_mut(nodes.desk.e) {
+                if *v != Visibility::Hidden {
+                    v.set_if_neq(Visibility::Hidden);
+                }
+            }
+            st.desk_key.clear();
+        }
+    }
     // Computer window.
     let mut sec_sel: Option<(usize, [f32; 3])> = None;
     if t.screen.is_some() {
@@ -2790,7 +2886,7 @@ pub fn computer_system(
             sec_sel = Some((sc.sel, sc.fov));
         }
     } else if let Ok((_, mut v, _)) = layer_nodes.get_mut(nodes.comp.e) {
-        *v = Visibility::Hidden;
+        v.set_if_neq(Visibility::Hidden);
     }
     // Camera feeds and the selection border above them.
     let client = (pos.0 + TITLE_LEFT_BOTTOM.0, pos.1 + TITLE_H + g.voff);
@@ -2834,19 +2930,30 @@ pub fn computer_system(
                         let vfov = 2.0 * ((fov[j].to_radians() / 2.0).tan() / (FEED_SIZE.0 as f32 / FEED_SIZE.1 as f32)).atan();
                         for (k, c) in f.cams.iter().enumerate() {
                             if let Ok((mut tf, mut pr)) = feed_cams.get_mut(*c) {
-                                tf.rotation = rot;
-                                tf.translation = if k == 0 { Vec3::ZERO } else { eye };
-                                if let Projection::Perspective(pp) = &mut *pr {
-                                    pp.fov = vfov;
+                                let want = Transform { rotation: rot, translation: if k == 0 { Vec3::ZERO } else { eye }, ..*tf };
+                                tf.set_if_neq(want);
+                                let same = matches!(&*pr, Projection::Perspective(pp) if pp.fov == vfov);
+                                if !same {
+                                    if let Projection::Perspective(pp) = &mut *pr {
+                                        pp.fov = vfov;
+                                    }
                                 }
                             }
                         }
                         f.img.clone()
                     }
-                    None => nodes.noise.clone(),
+                    None => {
+                        // NO SIGNAL: the slot's cameras (if any) would draw into an image nobody shows.
+                        if let Some(f) = st.feeds[j].take() {
+                            for c in f.cams {
+                                commands.entity(c).despawn();
+                            }
+                        }
+                        nodes.noise.clone()
+                    }
                 };
                 if let Ok((mut n, mut v, mut im)) = feed_nodes.get_mut(nodes.feed_nodes[j]) {
-                    *v = Visibility::Inherited;
+                    v.set_if_neq(Visibility::Inherited);
                     if im.image != img {
                         im.image = img;
                     }
@@ -2860,11 +2967,11 @@ pub fn computer_system(
         }
         None => {
             if let Ok((_, mut v, _)) = layer_nodes.get_mut(nodes.overlay.e) {
-                *v = Visibility::Hidden;
+                v.set_if_neq(Visibility::Hidden);
             }
             for e in nodes.feed_nodes {
                 if let Ok((_, mut v, _)) = feed_nodes.get_mut(e) {
-                    *v = Visibility::Hidden;
+                    v.set_if_neq(Visibility::Hidden);
                 }
             }
             if st.feeds.iter().any(|f| f.is_some()) {
@@ -2889,7 +2996,7 @@ pub fn computer_system(
         }
         None => {
             if let Ok((_, mut v, _)) = layer_nodes.get_mut(nodes.hack.e) {
-                *v = Visibility::Hidden;
+                v.set_if_neq(Visibility::Hidden);
             }
         }
     }
@@ -2905,16 +3012,19 @@ pub fn computer_system(
         }
         None => {
             if let Ok((_, mut v, _)) = layer_nodes.get_mut(nodes.accounts.e) {
-                *v = Visibility::Hidden;
+                v.set_if_neq(Visibility::Hidden);
             }
         }
     }
     t.hits = hits;
-    // Diegetic: the system pointer shows while the mouse is off the monitor (where it is, to come back or leave).
+    // Diegetic: the pointer stays locked and hidden; diegetic.rs moves the terminal's own cursor by the mouse's
+    // motion, kept on the monitor (no wandering off it).
     if dg.is_some() {
-        let want = dg.is_some_and(|v| v.mouse.is_none());
-        if cursor_opts.visible != want {
-            cursor_opts.visible = want;
+        if cursor_opts.grab_mode != bevy::window::CursorGrabMode::Locked {
+            cursor_opts.grab_mode = bevy::window::CursorGrabMode::Locked;
+        }
+        if cursor_opts.visible {
+            cursor_opts.visible = false;
         }
     }
     if dg.is_none() {
@@ -2937,7 +3047,7 @@ pub fn computer_system(
     place(&mut nodes.cursor, &cc, cp, d, sf, &mut images, &mut layers, &mut layer_nodes);
     if (dg.is_none() && window.cursor_position().is_none()) || dg.is_some_and(|v| v.mouse.is_none()) {
         if let Ok((_, mut v, _)) = layer_nodes.get_mut(nodes.cursor.e) {
-            *v = Visibility::Hidden;
+            v.set_if_neq(Visibility::Hidden);
         }
     }
     let _ = &player;
@@ -3032,7 +3142,6 @@ mod tests {
     #[test]
     fn atm_balances_sync_and_hack_sum() {
         let mk = |n: &str, b: i32| CompData {
-            class: "ATM".into(),
             kind: Kind::Atm,
             pos: DVec3::ZERO,
             users: vec![],
@@ -3076,6 +3185,8 @@ mod tests {
             images: Default::default(),
             materials: Default::default(),
             fire: Vec::new(),
+            sprites: Default::default(),
+            shared_parts: Default::default(),
         };
         let lvl = dx_level::load_level(&root, "01_NYC_UNATCOIsland.dx").unwrap();
         let mut hud = ClassicHud::default();

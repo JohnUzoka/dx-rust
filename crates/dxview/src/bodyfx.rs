@@ -65,6 +65,74 @@ pub fn wound(blocker: usize, at: DVec3, dir: DVec3, kind: &'static str) {
     }
 }
 
+/// A wound that's still bleeding (Fluid Blood): drops run out of it and fall, faster once the body is dead.
+#[derive(Component)]
+pub struct Bleeder {
+    /// The body it's on, seconds of bleeding left, drops owed.
+    owner: Entity,
+    left: f32,
+    acc: f32,
+    dead_seen: bool,
+}
+
+/// Wounds bleed: drops leave each one along its outward face and a little down (gore.rs flies them).
+pub fn bleed_system(
+    time: Res<Time>,
+    mut bleeders: Query<(&mut Bleeder, &GlobalTransform)>,
+    npcs: Query<&crate::ai::Npc>,
+    mut seed: Local<u64>,
+) {
+    if !crate::gore::enabled() {
+        return;
+    }
+    if *seed == 0 {
+        *seed = 0xB1EED;
+    }
+    let dt = time.delta_secs().min(0.1);
+    let mut rnd = || {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*seed >> 40) as f64) / (1u64 << 24) as f64
+    };
+    for (mut b, g) in &mut bleeders {
+        if b.left <= 0.0 {
+            continue;
+        }
+        let dead = npcs.get(b.owner).is_ok_and(|n| n.state == crate::ai::NpcState::Dead);
+        if dead && !b.dead_seen {
+            // The heart's stopped but the blood still runs out (and pools under the body).
+            b.dead_seen = true;
+            b.left = b.left.max(16.0);
+        }
+        b.left -= dt;
+        let rate = if dead { 3.5 } else { 2.0 } * (b.left / 12.0).clamp(0.25, 1.0);
+        b.acc += rate * dt;
+        while b.acc >= 1.0 {
+            b.acc -= 1.0;
+            let at = Vec3::from(dx_level::bevy_to_ue(g.translation().to_array()));
+            // The wound decal faces into the body (looking along the shot): out is its back.
+            let out_b = -g.forward().as_vec3();
+            let out = Vec3::from(dx_level::bevy_to_ue((g.translation() + out_b).to_array())) - at;
+            let out = out.normalize_or(Vec3::Z).as_dvec3();
+            let vel = out * (14.0 + rnd() * 26.0) + DVec3::new(rnd() - 0.5, rnd() - 0.5, 0.0) * 12.0;
+            crate::gore::drip(at.as_dvec3() + out * 1.0, vel, 1.6 + rnd() as f32 * 2.4);
+        }
+    }
+}
+
+/// A wound's inner part: dark in the middle, a raw red ring, ragged at the edge (drawn over the splat mark, so a
+/// wound looks like an opening and not only a stain).
+fn wound_hole(assets: &mut crate::weapons::RuntimeAssets, images: &mut Assets<Image>) -> Handle<Image> {
+    crate::gore::synth_decal(assets, images, "Synth.WoundHole", 32, 32, |u, v| {
+        let (dx, dy) = (u - 0.5, v - 0.5);
+        let r = (dx * dx + dy * dy).sqrt() * 2.0;
+        let ang = dy.atan2(dx);
+        let edge = 0.78 + 0.12 * (ang * 5.0).sin() * (ang * 3.0 + 1.3).cos();
+        let a = 1.0 - ((r - edge * 0.85) / (edge * 0.15)).clamp(0.0, 1.0);
+        let dark = 1.0 - ((r - 0.12) / 0.4).clamp(0.0, 1.0);
+        (a, dark)
+    })
+}
+
 /// The wound marks on one body (oldest first).
 #[derive(Component, Default)]
 pub struct Wounds(VecDeque<Entity>);
@@ -155,7 +223,7 @@ pub fn wounds_system(
             Some(m) => m.clone(),
             None => {
                 let Some(img) = crate::weapons::modulated_image_for(&mut assets, &mut images, tex) else { continue };
-                let m = materials.add(crate::impacts::decal_material(img, true));
+                let m = assets.sprites.decal(&mut materials, img, true);
                 mat_cache.insert(tex, m.clone());
                 m
             }
@@ -169,17 +237,41 @@ pub fn wounds_system(
         let w = commands
             .spawn((Mesh3d(q.clone()), MeshMaterial3d(mat), local, bevy::light::NotShadowCaster, RenderLayers::layer(0), ChildOf(bone)))
             .id();
+        let mut extra = None;
+        // Fluid Blood: the opening itself (a smaller, deeper mark on top) and blood running out of it.
+        if crate::gore::enabled() && !matches!(kind, "Burned" | "Flamed") {
+            let img = wound_hole(&mut assets, &mut images);
+            let hole = assets.sprites.decal(&mut materials, img, true);
+            let inner = Transform::from_translation(hit - d * 0.007)
+                .looking_to(d, if d.y.abs() > 0.9 { Vec3::X } else { Vec3::Y })
+                .with_scale(Vec3::splat(size * 0.5));
+            let local = Transform::from_matrix(g.inverse() * inner.to_matrix());
+            let left = if kind == "Exploded" { 6.0 } else { 9.0 + (*seed >> 40) as f32 / (1u64 << 24) as f32 * 7.0 };
+            let ie = commands
+                .spawn((
+                    Mesh3d(q.clone()),
+                    MeshMaterial3d(hole),
+                    local,
+                    bevy::light::NotShadowCaster,
+                    RenderLayers::layer(0),
+                    ChildOf(bone),
+                    Bleeder { owner: e, left, acc: 0.0, dead_seen: false },
+                ))
+                .id();
+            extra = Some(ie);
+        }
         match wounds {
             Some(mut ws) => {
                 ws.0.push_back(w);
-                while ws.0.len() > 10 {
+                ws.0.extend(extra);
+                while ws.0.len() > 20 {
                     if let Some(old) = ws.0.pop_front() {
                         commands.entity(old).despawn();
                     }
                 }
             }
             None => {
-                commands.entity(e).insert(Wounds(VecDeque::from([w])));
+                commands.entity(e).insert(Wounds(VecDeque::from_iter(std::iter::once(w).chain(extra))));
             }
         }
     }
@@ -212,6 +304,8 @@ pub struct FpState {
     /// How much further back than FP_BACK the body stands this frame (m): enough to keep the cut chest out of view
     /// whatever the pose (walking and aiming lean it forward), eased back when the pose allows.
     extra: f32,
+    /// Frames to wait after the third-person camera before measuring again (its last place lingers a frame).
+    skip: u8,
 }
 
 /// The bones round the cut (chest, shoulders): kept behind and below the view.
@@ -225,10 +319,6 @@ const FP_VIEW_BACK: f32 = 0.45;
 
 /// Which body part the medkit would treat (aim ray against the first-person body): None = the head.
 static AIMED: Mutex<Option<usize>> = Mutex::new(None);
-
-pub fn aimed_part() -> Option<usize> {
-    AIMED.lock().ok().and_then(|g| *g)
-}
 
 /// Diegetic Healing is on and a medkit is in hand.
 pub fn diegetic_heal() -> bool {
@@ -292,7 +382,7 @@ pub fn fp_body_system(
     if !want {
         if let Some(r) = st.root {
             if let Ok(mut v) = vis.get_mut(r) {
-                *v = Visibility::Hidden;
+                v.set_if_neq(Visibility::Hidden);
             }
         }
         if let Ok(mut g) = AIMED.lock() {
@@ -345,7 +435,14 @@ pub fn fp_body_system(
         // The pose (last frame's bones, in the body's own space) decides how much further back: the coat's front
         // at the chest must stay behind the view even looking straight down (walking, running and the aiming poses
         // lean the chest forward into the eye).
-        if let (Some(c), Ok(rg)) = (cam.iter().next(), gts.get(root)) {
+        // (Not while the camera is back over the shoulder: measured from there the chest was metres "ahead of the
+        // eye", and back in first person the body then eased in from far behind - out of sight for seconds.)
+        if crate::thirdperson::active() || crate::consys::third_person() || crate::cinematic::active() {
+            st.extra = 0.0;
+            st.skip = 3;
+        } else if st.skip > 0 {
+            st.skip -= 1;
+        } else if let (Some(c), Ok(rg)) = (cam.iter().next(), gts.get(root)) {
             let eye = c.translation();
             // Along the view (the body can turn away from it in the aiming poses).
             let cf = c.forward().as_vec3();
@@ -353,15 +450,18 @@ pub fn fp_body_system(
             let inv = rg.affine().inverse();
             let m = dx_level::METERS_PER_UNIT;
             let mut need = 0.0f32;
+            // A wider Field of View sees further back and down past the eye.
+            let k = ((crate::weapons::base_fov().to_radians() * 0.5).tan() / 37.5f32.to_radians().tan()).max(1.0);
             for name in FP_CHEST {
                 let Some(i) = s.rig.names.iter().position(|n| n == name) else { continue };
                 let Ok(bg) = gts.get(s.nodes[i]) else { continue };
                 let p = tf.transform_point(inv.transform_point3(bg.translation())) + flat * (FP_CHEST_FRONT * m);
                 let ahead = (p - eye).dot(flat);
                 let below = (eye.y - p.y).max(0.0);
-                need = need.max(ahead + below * FP_VIEW_BACK + FP_CHEST_CLEAR * m);
+                need = need.max(ahead + below * FP_VIEW_BACK * k + FP_CHEST_CLEAR * m);
             }
             let dt = time.delta_secs().min(0.1);
+            let need = need.min(0.6 * k);
             st.extra = if need > st.extra { need } else { (st.extra - dt * 0.4).max(need) };
             tf.translation -= flat * st.extra.max(0.0);
         }
@@ -411,45 +511,6 @@ pub fn fp_body_system(
 
 // ------------------------------------------------------------------------------------------------ heal label
 
-#[derive(Component)]
-pub struct HealLabel;
-
-pub fn heal_label_system(
-    mut commands: Commands,
-    weapons: Res<crate::weapons::Weapons>,
-    ph: Res<crate::ai::PlayerHealth>,
-    mut q: Query<(&mut Text, &mut Visibility), With<HealLabel>>,
-) {
-    let medkit = weapons.held.as_ref().is_some_and(|h| h.stats.class == "MedKit");
-    // (The aimed "Treat <part>" label gave way to the Alt body overlay, healui.rs.)
-    let show = false && medkit && FP_SHOWN.load(std::sync::atomic::Ordering::Relaxed);
-    if q.is_empty() {
-        commands.spawn((
-            Text::new(""),
-            TextFont { font_size: bevy::text::FontSize::Px(15.0), ..default() },
-            TextColor(Color::srgb(0.75, 1.0, 0.8)),
-            Node { position_type: PositionType::Absolute, top: Val::Percent(56.0), width: Val::Percent(100.0), justify_content: JustifyContent::Center, ..default() },
-            bevy::text::TextLayout::justify(bevy::text::Justify::Center),
-            Visibility::Hidden,
-            HealLabel,
-            GlobalZIndex(20),
-        ));
-        return;
-    }
-    for (mut t, mut v) in &mut q {
-        *v = if show { Visibility::Inherited } else { Visibility::Hidden };
-        if !show {
-            continue;
-        }
-        let part = aimed_part().unwrap_or(crate::ai::P_HEAD);
-        let name = ["Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"][part];
-        let s = format!("Treat {name}  {}%", ph.parts[part].max(0.0).round() as i32);
-        if t.0 != s {
-            t.0 = s;
-        }
-    }
-}
-
 // ------------------------------------------------------------------------------------------------ glows
 
 /// A glow on JC's body (aug or healing), riding a bone.
@@ -458,6 +519,8 @@ pub struct FpGlow {
     t: f32,
     life: Option<f32>,
     aug: Option<&'static str>,
+    /// Its size before the pulse.
+    base: f32,
 }
 
 static HEALED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
@@ -587,10 +650,9 @@ pub struct HealLeaf {
 #[derive(Default)]
 pub struct GlowAssets {
     quad: Handle<Mesh>,
-    cone: Handle<Mesh>,
     leaf: Handle<StandardMaterial>,
     soft: Handle<Image>,
-    /// One material per aug colour (soft glow), and one for the eye light streaming forward.
+    /// One material per aug colour (soft glow), and a faint one for the halo round the glasses.
     by_aug: HashMap<&'static str, (Handle<StandardMaterial>, Handle<StandardMaterial>)>,
 }
 
@@ -617,8 +679,6 @@ pub fn glow_system(
         let leaf_tex = images.add(leaf_image());
         GlowAssets {
             quad: meshes.add(Rectangle::new(1.0, 1.0)),
-            // The eye light: a cone pointing forward from the eye (tip at the eye, opening ahead), drawn additively.
-            cone: meshes.add(Cone { radius: 1.0, height: 1.0 }.mesh().resolution(12)),
             leaf: materials.add(StandardMaterial {
                 base_color: Color::WHITE,
                 base_color_texture: Some(leaf_tex),
@@ -668,34 +728,22 @@ pub fn glow_system(
                         want.push(((s.root, *aug, k), b, Vec3::splat(0.07), Vec3::ZERO, Quat::IDENTITY, layer, false));
                         continue;
                     }
-                    // The eyes: a bright iris and the aug's light streaming forward out of each one.
+                    // The eyes: the aug glows through JC's glasses - a small bright spot on each lens and a faint
+                    // soft halo round the pair (no beams: the light itself is the flashlight's own).
                     let (Ok(rg), Ok(hg)) = (gts.get(s.root), gts.get(b)) else { continue };
                     let a = rg.affine();
                     let fwd = a.transform_vector3(Vec3::Z).normalize_or_zero();
                     let up = a.transform_vector3(Vec3::Y).normalize_or_zero();
                     let lat = a.transform_vector3(Vec3::X).normalize_or_zero();
                     let inv = hg.affine().inverse();
-                    let hrot = hg.compute_transform().rotation;
+                    // On the lenses: a touch in front of the eyes, where the glasses sit.
+                    let lens = |side: f32| hg.translation() + fwd * 0.094 + up * 0.06 + lat * 0.032 * side;
+                    let bright = if *aug == "AugLight" { 1.0 } else { 0.8 };
                     for (j, side) in [-1.0f32, 1.0].iter().enumerate() {
-                        let eye = hg.translation() + fwd * 0.082 + up * 0.06 + lat * 0.032 * side;
-                        let local = inv.transform_point3(eye);
-                        // The iris: a small soft spot facing the way the head does.
-                        want.push(((s.root, *aug, k * 4 + j), b, Vec3::splat(0.022), local, hrot.inverse() * Quat::from_rotation_arc(Vec3::Z, fwd), layer, false));
-                        // The light: a cone with its tip at the eye, 0.32 m long, opening forward (Bevy's cone points
-                        // up its +Y with the tip at +height/2: turned to point back at the eye from ahead).
-                        let len = if *aug == "AugLight" { 0.42 } else { 0.3 };
-                        let rot_w = Quat::from_rotation_arc(Vec3::Y, -fwd);
-                        let centre = eye + fwd * (len * 0.5);
-                        want.push((
-                            (s.root, *aug, k * 4 + 2 + j),
-                            b,
-                            Vec3::new(0.035, len, 0.035),
-                            inv.transform_point3(centre),
-                            hrot.inverse() * rot_w,
-                            layer,
-                            true,
-                        ));
+                        want.push(((s.root, *aug, k * 4 + j), b, Vec3::splat(0.026 * bright), inv.transform_point3(lens(*side)), Quat::IDENTITY, layer, false));
                     }
+                    let mid = (lens(-1.0) + lens(1.0)) * 0.5 + fwd * 0.004;
+                    want.push(((s.root, *aug, k * 4 + 2), b, Vec3::splat(0.11 * bright), inv.transform_point3(mid), Quat::IDENTITY, layer, true));
                 }
             }
         }
@@ -724,7 +772,7 @@ pub fn glow_system(
                 commands.spawn((
                     Mesh3d(ga.quad.clone()),
                     MeshMaterial3d(ga.leaf.clone()),
-                    Transform::from_translation(at + off).with_rotation(cam_rot * Quat::from_rotation_z(rnd() * 6.28)).with_scale(Vec3::splat(0.0)),
+                    Transform::from_translation(at + off).with_rotation(cam_rot * Quat::from_rotation_z(rnd() * std::f32::consts::TAU)).with_scale(Vec3::splat(0.0)),
                     HealLeaf {
                         vel: Vec3::Y * (0.35 + rnd() * 0.35) + out * (0.05 + rnd() * 0.12),
                         spin: Vec3::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5) * 6.0,
@@ -752,10 +800,6 @@ pub fn glow_system(
             // Keep the eye pieces where the eyes are (the head turns under them).
             if let Ok((_, _, mut t, _)) = glows.get_mut(*e) {
                 t.translation = at;
-                t.rotation = rot;
-                if beam {
-                    t.scale = scale;
-                }
             }
             continue;
         }
@@ -766,27 +810,27 @@ pub fn glow_system(
             .or_insert_with(|| {
                 let c = aug_colour(k.1);
                 let col = Color::LinearRgba(LinearRgba::rgb(c.x, c.y, c.z));
-                let beam_c = c * 0.18;
+                // The halo round the glasses: the same colour, faint.
+                let beam_c = c * 0.22;
                 (
                     materials.add(StandardMaterial { base_color: col, base_color_texture: Some(soft), unlit: true, alpha_mode: AlphaMode::Add, ..default() }),
                     materials.add(StandardMaterial {
                         base_color: Color::LinearRgba(LinearRgba::rgb(beam_c.x, beam_c.y, beam_c.z)),
+                        base_color_texture: Some(ga.soft.clone()),
                         unlit: true,
                         alpha_mode: AlphaMode::Add,
-                        double_sided: true,
-                        cull_mode: None,
                         ..default()
                     }),
                 )
             })
             .clone();
-        let (mesh, mat) = if beam { (ga.cone.clone(), beam_mat) } else { (ga.quad.clone(), glow_mat) };
+        let (mesh, mat) = if beam { (ga.quad.clone(), beam_mat) } else { (ga.quad.clone(), glow_mat) };
         let e = commands
             .spawn((
                 Mesh3d(mesh),
                 MeshMaterial3d(mat),
                 Transform::from_translation(at).with_rotation(rot).with_scale(scale),
-                FpGlow { t: 0.0, life: None, aug: Some(k.1) },
+                FpGlow { t: 0.0, life: None, aug: Some(k.1), base: scale.x },
                 bevy::light::NotShadowCaster,
                 RenderLayers::layer(layer),
                 ChildOf(bone),
@@ -796,14 +840,13 @@ pub fn glow_system(
     }
     for (_e, mut g, mut t, parent) in &mut glows {
         g.t += dt;
-        if g.life.is_none() && t.scale.y == t.scale.x {
-            // The round glows: a slow pulse, facing the camera.
+        if g.life.is_none() {
+            // The round glows: a slow pulse (the eye glows a soft shimmer), facing the camera.
             if let Ok(pg) = gts.get(parent.parent()) {
                 t.rotation = pg.compute_transform().rotation.inverse() * cam_rot;
             }
-            let p = 0.85 + 0.15 * (g.t * 3.0).sin();
-            let base = if g.aug.is_some_and(eye_aug) && t.scale.x < 0.05 { 0.022 } else { 0.07 };
-            t.scale = Vec3::splat(base * p);
+            let p = if g.aug.is_some_and(eye_aug) { 0.92 + 0.05 * (g.t * 2.1).sin() + 0.03 * (g.t * 7.3).sin() } else { 0.85 + 0.15 * (g.t * 3.0).sin() };
+            t.scale = Vec3::splat(g.base * p);
         }
     }
     // Leaves: rise, spread, turn, grow in and shrink away.
@@ -820,7 +863,7 @@ pub fn glow_system(
         l.vel *= 1.0 - 0.6 * dt;
         t.translation += l.vel * dt;
         let spin = l.spin * dt;
-        t.rotation = t.rotation * Quat::from_euler(EulerRot::XYZ, spin.x, spin.y, spin.z);
+        t.rotation *= Quat::from_euler(EulerRot::XYZ, spin.x, spin.y, spin.z);
         let grow = (k / 0.15).min(1.0) * (1.0 - ((k - 0.6) / 0.4).max(0.0));
         t.scale = Vec3::splat(l.size * grow.max(0.0));
     }

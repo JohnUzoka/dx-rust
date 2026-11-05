@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub fn on() -> bool {
-    crate::settings::get("Bloom") > 0.5
+    setting!("Bloom") > 0.5
 }
 
 /// Glowing textures by (part of their) name, and how far past white they go.
@@ -36,6 +36,7 @@ const GLOWS: &[(&str, f32)] = &[
     ("wepn_nesword_sfx", 3.5),
     ("wavyblade", 3.0),
     ("wepn_empg_sfx", 3.0),
+    ("wepn_prod_fx", 3.0),
     ("wepn_prifle_sfx", 3.0),
     ("ambrosia_sfx", 2.0),
 ];
@@ -102,6 +103,8 @@ pub fn glow_system(
                 high_pass_frequency: 0.9,
                 prefilter: BloomPrefilter { threshold: 1.0, threshold_softness: 0.25 },
                 composite_mode: BloomCompositeMode::Additive,
+                // The blur chain starts at 256 px (Bevy's 512 doubles the work for a glow this soft).
+                max_mip_dimension: 256,
                 ..default()
             });
         }

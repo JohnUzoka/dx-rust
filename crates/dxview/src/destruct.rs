@@ -47,6 +47,9 @@ pub struct Loose {
     pub life: Option<f32>,
     pub parts: Vec<(Handle<Mesh>, MeshPart)>,
     pub lit_at: DVec3,
+    /// The lights it was last lit by (dynlight::light_sig): resting pieces relight when that changes (a flashlight, a
+    /// muzzle flash, a lamp switched off).
+    pub sig: u64,
 }
 
 impl Loose {
@@ -64,6 +67,7 @@ impl Loose {
             life: None,
             parts: Vec::new(),
             lit_at: DVec3::ZERO,
+            sig: 0,
         }
     }
 }
@@ -206,15 +210,17 @@ pub fn spawn_loose(
     };
     let at = loose.pos.as_vec3().to_array();
     let mut loose = loose;
-    for (h, part) in handles.iter().zip(parts) {
-        if let Some(mut m) = meshes.get_mut(h) {
-            m.insert_attribute(
-                Mesh::ATTRIBUTE_COLOR,
-                light_part(&part, at, [0, 0, 0], 1.0, &level.lights),
-            );
+    // Lit as decorations are: the static lights it's in sight of (not through walls) plus the dynamic ones.
+    let half = loose.extent.z.max(4.0) as f32;
+    crate::dynlight::with_lights_at(level, at, half, |lights| {
+        for (h, part) in handles.iter().zip(parts) {
+            if let Some(mut m) = meshes.get_mut(h) {
+                m.insert_attribute(Mesh::ATTRIBUTE_COLOR, light_part(&part, at, [0, 0, 0], 1.0, lights));
+            }
+            loose.parts.push((h.clone(), part));
         }
-        loose.parts.push((h.clone(), part));
-    }
+        loose.sig = crate::dynlight::light_sig(lights, at, 0) & !1;
+    });
     loose.lit_at = loose.pos;
     commands.entity(root).insert(loose);
     Some(root)
@@ -303,6 +309,7 @@ pub fn deco_damage_system(
                 life: Some(life + rng.f() as f32 * 2.0),
                 parts: Vec::new(),
                 lit_at: DVec3::ZERO,
+                sig: 0,
             };
             if let Some(fe) = spawn_loose(
                 &mut commands,
@@ -379,9 +386,9 @@ pub fn deco_damage_system(
         ) {
             continue;
         }
-        // Transcended: the riot prod's 'Stunned' doesn't break crates (except explosive ones). (Its own list
+        // Optional Fixes: the riot prod's 'Stunned' doesn't break crates (except explosive ones). (Its own list
         // drops 'Shocked', a slip in the mod; it stays ignored here.)
-        if hit.damage_type == "Stunned" && crate::transcended::fixes() && !flag(p, "bExplosive") {
+        if hit.damage_type == "Stunned" && crate::optfixes::fixes() && !flag(p, "bExplosive") {
             continue;
         }
         let max = fv(p, "HitPoints", 20.0).max(1.0);
@@ -429,7 +436,7 @@ pub fn deco_damage_system(
         // The pad feels it break when close (ours): bigger things harder, gone by 400 units.
         let near = 1.0 - (center.distance(player.body.location) / 400.0).min(1.0);
         if near > 0.0 {
-            let size = (fv(p, "Mass", 20.0) / 60.0).clamp(0.3, 1.0) as f32;
+            let size = (fv(p, "Mass", 20.0) / 60.0).clamp(0.3, 1.0);
             crate::dualsense::event(crate::dualsense::Haptic::Smash(size * near as f32));
         }
         blockers.list[b].radius = 0.0;
@@ -568,6 +575,7 @@ pub fn deco_damage_system(
                     life: Some(life + rng.f() as f32 * 2.0),
                     parts: Vec::new(),
                     lit_at: DVec3::ZERO,
+                    sig: 0,
                 };
                 if let Some(fe) = spawn_loose(
                     &mut commands,
@@ -624,6 +632,7 @@ pub fn deco_damage_system(
                         life: None,
                         parts: Vec::new(),
                         lit_at: DVec3::ZERO,
+                        sig: 0,
                     };
                     if let Some(ent) = spawn_loose(
                         &mut commands,
@@ -657,11 +666,17 @@ pub fn loose_physics(
     mut meshes: ResMut<Assets<Mesh>>,
     mut q: Query<(Entity, &mut Loose, &mut Transform, Option<&LooseSound>, Option<&LandSound>, Has<ThrownByPlayer>)>,
     mut noises: ResMut<crate::stealth::Noises>,
+    mut relight_t: Local<f32>,
 ) {
     let _prof = crate::prof::scope("destruct::loose_physics");
     let dt = time.delta_secs_f64().min(0.05);
     let lvl = &level.0;
     let thrown_noise = crate::stealth::thrown_noise();
+    *relight_t -= dt as f32;
+    let relight_tick = *relight_t <= 0.0;
+    if relight_tick {
+        *relight_t = 0.1;
+    }
     for (e, mut l, mut tf, lsnd, land, thrown) in &mut q {
         if let Some(t) = l.life.as_mut() {
             *t -= dt as f32;
@@ -670,7 +685,30 @@ pub fn loose_physics(
                 continue;
             }
         }
-        if !l.resting {
+        // At rest nothing moves: only relit when a dynamic light comes near (checked a few times a second).
+        if l.resting {
+            // (Bit 0 of the signature = it was last lit with a dynamic light near: check once more when it's gone.)
+            let near = relight_tick && crate::dynlight::dynamic_near(l.pos.as_vec3().to_array(), 64.0);
+            if relight_tick && (near || l.sig & 1 == 1) {
+                let at = l.pos.as_vec3().to_array();
+                let r = [l.rot[0] as i32, l.rot[1] as i32, l.rot[2] as i32];
+                let half = l.extent.z.max(4.0) as f32;
+                let l = &mut *l;
+                crate::dynlight::with_lights_at(lvl, at, half, |lights| {
+                    let sig = (crate::dynlight::light_sig(lights, at, 0) & !1) | near as u64;
+                    if sig != l.sig {
+                        l.sig = sig;
+                        for (h, part) in &l.parts {
+                            if let Some(mut m) = meshes.get_mut(h) {
+                                m.insert_attribute(Mesh::ATTRIBUTE_COLOR, light_part(part, at, r, 1.0, lights));
+                            }
+                        }
+                    }
+                });
+            }
+            continue;
+        }
+        {
             l.vel.z -= 950.0 * dt;
             let mut remaining = dt;
             for _ in 0..3 {
@@ -753,17 +791,20 @@ pub fn loose_physics(
                 Vec3::from(m[1]),
                 Vec3::from(m[2]),
             ));
+            // Relit every 24 units on the way and once more where it comes to rest.
             if l.pos.distance(l.lit_at) > 24.0 || l.resting {
                 l.lit_at = l.pos;
                 let at = l.pos.as_vec3().to_array();
-                for (h, part) in &l.parts {
-                    if let Some(mut m) = meshes.get_mut(h) {
-                        m.insert_attribute(
-                            Mesh::ATTRIBUTE_COLOR,
-                            light_part(part, at, r, 1.0, &lvl.lights),
-                        );
+                let half = l.extent.z.max(4.0) as f32;
+                let l = &mut *l;
+                crate::dynlight::with_lights_at(lvl, at, half, |lights| {
+                    l.sig = crate::dynlight::light_sig(lights, at, 0) & !1;
+                    for (h, part) in &l.parts {
+                        if let Some(mut m) = meshes.get_mut(h) {
+                            m.insert_attribute(Mesh::ATTRIBUTE_COLOR, light_part(part, at, r, 1.0, lights));
+                        }
                     }
-                }
+                });
             }
         }
     }
@@ -850,9 +891,10 @@ pub fn shell_system(
             ),
             resting: false,
             // Enhancement "Casings And Blood Stay": no LifeSpan.
-            life: (crate::settings::get("PersistentDebris") < 0.5).then(|| fv(&d, "LifeSpan", 10.0)),
+            life: (setting!("PersistentDebris") < 0.5).then(|| fv(&d, "LifeSpan", 10.0)),
             parts: Vec::new(),
             lit_at: DVec3::ZERO,
+            sig: 0,
         };
         if let Some(e) = spawn_loose(
             &mut commands,
@@ -926,6 +968,7 @@ pub fn weapon_drop_system(
             life: None,
             parts: Vec::new(),
             lit_at: DVec3::ZERO,
+            sig: 0,
         };
         let props = Arc::new(d.clone());
         if let Some(ent) = spawn_loose(
@@ -994,8 +1037,8 @@ pub fn flare_system(
     if *seed == 0 {
         *seed = 0xF1A2E;
     }
-    // Transcended (setting TrLongFlares): a flare burns 360 s.
-    let burn = if crate::transcended::long_flares() { 360.0 } else { 30.0 };
+    // Optional (setting LongFlares): a flare burns 360 s.
+    let burn = if crate::optfixes::long_flares() { 360.0 } else { 30.0 };
     for (pos, vel) in throws.0.drain(..) {
         let d = assets.classes.defaults("Flare");
         let Some(mesh) = path(&d, "Mesh") else {
@@ -1017,6 +1060,7 @@ pub fn flare_system(
             life: Some(burn),
             parts: Vec::new(),
             lit_at: DVec3::ZERO,
+            sig: 0,
         };
         let Some(ent) = spawn_loose(
             &mut commands,
@@ -1034,16 +1078,8 @@ pub fn flare_system(
         };
         let img = crate::weapons::image_for(&mut assets, &mut images, "Effects.Corona.Corona_G");
         // LightHue 16: orange.
-        let mat = materials.add(StandardMaterial {
-            base_color_texture: img,
-            base_color: Color::linear_rgb(1.6, 0.7, 0.2),
-            unlit: true,
-            double_sided: true,
-            cull_mode: None,
-            alpha_mode: AlphaMode::Add,
-            ..default()
-        });
-        let quad = meshes.add(Rectangle::new(1.0, 1.0));
+        let mat = assets.sprites.material_tinted(&mut materials, img, crate::sprite::Blend::Add, [1.6, 0.7, 0.2]);
+        let quad = assets.sprites.quad(&mut meshes);
         commands.spawn((
             Mesh3d(quad),
             MeshMaterial3d(mat),

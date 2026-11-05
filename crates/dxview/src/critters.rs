@@ -52,7 +52,7 @@ pub fn trace_birds(start: DVec3, end: DVec3) -> Option<(Entity, f64)> {
         };
         if let Some(hit) = dx_level::collision::trace_cylinder(&cyl, start, end, DVec3::splat(0.5))
         {
-            if best.map_or(true, |b| hit.fraction < b.1) {
+            if best.is_none_or(|b| hit.fraction < b.1) {
                 best = Some((e, hit.fraction));
             }
         }
@@ -110,6 +110,7 @@ pub struct Critters {
     init: bool,
     gens: Vec<Generator>,
     seed: u64,
+    frame_no: usize,
 }
 
 impl Critters {
@@ -486,7 +487,9 @@ pub fn critter_system(
         })
         .collect();
 
-    for (e, mut b, mut tf) in &mut birds {
+    let frame_no = st.frame_no.wrapping_add(1);
+    st.frame_no = frame_no;
+    for (i, (e, mut b, mut tf)) in (&mut birds).into_iter().enumerate() {
         let b = &mut *b;
         let mut rnd = || st.rand();
         b.fright = (b.fright - dt).max(0.0);
@@ -781,31 +784,13 @@ pub fn critter_system(
             b.anim_rate
         };
         b.clip.t += dt * rate;
-        let f = b.clip.frame();
-        // Lean Updates: like actors::animate, only a bird drawn last frame is posed (its clock above still runs),
-        // and into the positions it already has.
-        let lean = crate::perf::lean_updates();
-        let drawn = !lean
-            || kids
-                .get(e)
-                .map_or(true, |k| k.iter().any(|c| seen.get(c).map_or(true, |v| v.get())));
-        if drawn {
-            for (pi, hm) in b.handles.iter().enumerate() {
-                if let Some(mut mm) = meshes.get_mut(hm) {
-                    let ids = &b.parts[pi].vert_ids;
-                    let pos = ids
-                        .iter()
-                        .map(|&v| ue_to_bevy(b.mesh.sample(b.clip.start, b.clip.frames, f, v as usize)));
-                    match mm.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
-                        Some(bevy::mesh::VertexAttributeValues::Float32x3(dst)) if lean && dst.len() == ids.len() => {
-                            for (d, p) in dst.iter_mut().zip(pos) {
-                                *d = p;
-                            }
-                        }
-                        _ => mm.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.collect::<Vec<[f32; 3]>>()),
-                    }
-                }
-            }
+        // Far birds are posed every third frame (as actors::animate does for far pawns). Lean Updates: like
+        // actors::animate, only a bird drawn last frame is posed (its clock above still runs).
+        let far = b.pos.distance(player.body.location) > 1500.0;
+        let drawn = !crate::perf::lean_updates()
+            || kids.get(e).map_or(true, |k| k.iter().any(|c| seen.get(c).map_or(true, |v| v.get())));
+        if drawn && (!far || (frame_no + i).is_multiple_of(3)) {
+            crate::actors::pose_parts_in_place(&mut meshes, &b.mesh, b.clip.start, b.clip.frames, b.clip.frame(), &b.parts, &b.handles);
         }
         let rot = [
             (b.pitch / std::f64::consts::TAU * 65536.0) as i32,

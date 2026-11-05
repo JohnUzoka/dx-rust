@@ -23,7 +23,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 pub fn on() -> bool {
-    crate::settings::get("RemasteredLighting") > 0.5
+    setting!("RemasteredLighting") > 0.5
 }
 
 /// 0 off, 1 normal maps, 2 normal + parallax maps (only with remastered lighting: the lightmap alone has no
@@ -32,15 +32,15 @@ pub fn relief_level() -> u8 {
     if !on() {
         return 0;
     }
-    crate::settings::get("ReliefMaps").round().clamp(0.0, 2.0) as u8
+    setting!("ReliefMaps").round().clamp(0.0, 2.0) as u8
 }
 
 fn specular_on() -> bool {
-    on() && crate::settings::get("MaterialSpecular") > 0.5
+    on() && setting!("MaterialSpecular") > 0.5
 }
 
 pub fn emissive_on() -> bool {
-    crate::settings::get("EmissiveSurfaces") > 0.5
+    setting!("EmissiveSurfaces") > 0.5
 }
 
 /// The settings that are built into the level's materials (a change reloads the map when switched in play).
@@ -70,7 +70,7 @@ pub fn surface(name: &str) -> Surface {
         0.0
     };
     let mut s = if has(&["glass", "window", "wndow", "mirror"]) {
-        Surface { roughness: 0.08, spec: 1.6, metal: 0.0, emissive: 0.0 }
+        Surface { roughness: 0.16, spec: 1.0, metal: 0.0, emissive: 0.0 }
     } else if has(&["chrome", "steel", "alum", "brass", "copper", "polish"]) {
         Surface { roughness: 0.25, spec: 1.4, metal: 0.9, emissive: 0.0 }
     } else if has(&["metal", "pipe", "grate", "grill", "vent", "plate", "rail", "door", "panel", "rust"]) {
@@ -145,13 +145,6 @@ fn mip_image(w: u32, h: u32, mips: &[Vec<u8>]) -> Image {
 /// How deep relief maps look (Unreal units).
 const RELIEF_DEPTH: f32 = 2.5;
 
-pub fn apply_relief(m: &mut StandardMaterial, t: &dx_level::TextureImage, images: &mut Assets<Image>) -> bool {
-    if relief_level() == 0 {
-        return false;
-    }
-    apply_relief_maps(m, t, dx_level::relief::maps_for(t, true), images)
-}
-
 /// The relief maps of many textures at once, on every core (reading / generating them one by one took seconds
 /// of each map's load with HD textures). None when relief maps are off.
 pub fn relief_maps_parallel(textures: &[dx_level::TextureImage], wanted: &[usize]) -> std::collections::HashMap<usize, dx_level::relief::Relief> {
@@ -188,7 +181,9 @@ pub fn apply_relief_maps(m: &mut StandardMaterial, t: &dx_level::TextureImage, r
             // (a texel a unit): a fixed 0.035 was 9 units deep on a 256 wall and 36 on a 1024 one - the bricks slid
             // and smeared as you moved. RELIEF_DEPTH units deep on every texture, as the addon's renderer shows it.
             m.parallax_depth_scale = (RELIEF_DEPTH / t.width.max(16) as f32).clamp(0.001, 0.02);
-            m.max_parallax_layer_count = 24.0;
+            // 16 layers at grazing angles (fewer face on, Bevy scales them by the view): 24 cost a third more
+            // for steps you can only see on the steepest walls.
+            m.max_parallax_layer_count = 16.0;
             m.parallax_mapping_method = bevy::pbr::ParallaxMappingMethod::Relief { max_steps: 5 };
         }
     }
@@ -198,14 +193,15 @@ pub fn apply_relief_maps(m: &mut StandardMaterial, t: &dx_level::TextureImage, r
 /// The remastered-lighting parameters of a BSP material for its texture.
 pub fn params(name: Option<&str>, p: &mut crate::shadowlight::BspShadowParams) {
     let s = name.map(surface).unwrap_or(MATTE);
-    let gain = crate::settings::get("RemasterGain");
+    let gain = setting!("RemasterGain");
     let gain = if gain > 0.0 { gain } else { 1.0 };
     p.r = Vec4::new(if on() { 1.0 } else { 0.0 }, if specular_on() { s.spec } else { 0.0 }, s.roughness, s.metal);
     p.s = Vec4::new(
         if on() { gain } else { 1.0 },
-        if on() { crate::settings::get("RemasterAmbient").max(0.0) } else { 0.0 },
+        if on() { setting!("RemasterAmbient").max(0.0) } else { 0.0 },
         if emissive_on() { s.emissive } else { 0.0 },
-        if emissive_on() { 1.2 } else { 0.0 },
+        // Glass never glows (an unlit pane is still a window).
+        if emissive_on() && !name.is_some_and(crate::glass::is_glass) { 1.2 } else { 0.0 },
     );
 }
 

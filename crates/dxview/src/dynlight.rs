@@ -46,11 +46,7 @@ impl Spec {
     fn info(&self, pos: DVec3, scale: f32) -> LightInfo {
         let c = hsv_white(self.hue, self.saturation);
         let b = self.brightness as f32 / 255.0 * scale;
-        LightInfo {
-            pos: pos.as_vec3().to_array(),
-            color: [c[0] * b, c[1] * b, c[2] * b],
-            radius: 25.0 * (self.radius + 1.0),
-        }
+        LightInfo::omni(pos.as_vec3().to_array(), [c[0] * b, c[1] * b, c[2] * b], 25.0 * (self.radius + 1.0))
     }
 }
 
@@ -168,7 +164,7 @@ pub fn explosion(pos: DVec3, size: f32, hue: u8, saturation: u8) {
 /// A light that shines this frame. `flicker` 0..1 dims it at random (fire).
 pub fn hold(key: u64, pos: DVec3, spec: Spec, flicker: f32) {
     // GMDX Lighting Accessibility (setting NoStrobeLights): no flickering lights.
-    let flicker = if crate::settings::get("NoStrobeLights") > 0.5 { 0.0 } else { flicker };
+    let flicker = if setting!("NoStrobeLights") > 0.5 { 0.0 } else { flicker };
     if let Ok(mut h) = HELD.lock() {
         h.push((key, pos, spec, flicker));
     }
@@ -218,18 +214,22 @@ pub fn lights_at_into(level: &dx_level::Level, center: [f32; 3], half_h: f32, v:
         (center[2] / 32.0).floor() as i32,
         (half_h / 16.0).round() as i32,
     );
-    {
+    // The middle of the cell, so every actor in it gets the same answer - unless a wall stands between the actor
+    // and it (someone close to a wall, JC at a mirror): then the middle can be inside or behind the wall, where no
+    // light reaches, and the actor went black. Then its own place is used (not cached).
+    let mid = [(key.0 as f32 + 0.5) * 32.0, (key.1 as f32 + 0.5) * 32.0, (key.2 as f32 + 0.5) * 32.0];
+    let dv = |p: [f32; 3]| bevy::math::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+    let mid_ok = level.collision.trace(dv(center), dv(mid), bevy::math::DVec3::ZERO).fraction >= 0.995;
+    if mid_ok {
         let mut g = SHADOW_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         let map = g.get_or_insert_with(HashMap::new);
         if map.len() > 200_000 {
             map.clear();
         }
-        let statics = map.entry(key).or_insert_with(|| {
-            // The middle of the cell, so every actor in it gets the same answer.
-            let c = [(key.0 as f32 + 0.5) * 32.0, (key.1 as f32 + 0.5) * 32.0, (key.2 as f32 + 0.5) * 32.0];
-            std::sync::Arc::new(dx_level::actors::shadowed_lights(&level.collision, &level.lights, c, half_h))
-        });
+        let statics = map.entry(key).or_insert_with(|| std::sync::Arc::new(dx_level::actors::shadowed_lights(&level.collision, &level.lights, mid, half_h)));
         v.extend_from_slice(statics);
+    } else {
+        dx_level::actors::shadowed_lights_into(&level.collision, &level.lights, center, half_h, v);
     }
     with_current_copy(|cur| {
         if !cur.is_empty() {
@@ -259,7 +259,7 @@ fn flash_spot_on(level: &dx_level::Level, center: [f32; 3]) -> Option<LightInfo>
     let c = DVec3::new(center[0] as f64, center[1] as f64, center[2] as f64);
     let to = c - f.eye;
     let d = to.length();
-    if d < 1.0 || d > 2048.0 {
+    if !(1.0..=2048.0).contains(&d) {
         return None;
     }
     let cos = to.dot(f.dir) / d;
@@ -297,7 +297,7 @@ pub struct FlashSpill;
 
 /// Enhancement: a flashlight cone with soft spill instead of the beam light (setting FlashlightCone).
 pub fn flashlight_cone() -> bool {
-    crate::settings::get("FlashlightCone") > 0.5
+    setting!("FlashlightCone") > 0.5
 }
 
 /// The flashlight's light this frame (with the Flashlight Cone): where it shines from, its direction and how far
@@ -330,6 +330,16 @@ pub fn with_current_copy<R>(f: impl FnOnce(&[LightInfo]) -> R) -> R {
     })
 }
 
+/// Whether a dynamic light (flash, flare, flashlight beam...) reaches within `margin` of `p` this frame.
+pub fn dynamic_near(p: [f32; 3], margin: f32) -> bool {
+    with_current(|c| {
+        c.iter().any(|l| {
+            let d = ((l.pos[0] - p[0]).powi(2) + (l.pos[1] - p[1]).powi(2) + (l.pos[2] - p[2]).powi(2)).sqrt();
+            d < l.radius + margin
+        })
+    })
+}
+
 /// This frame's dynamic lights, read in place (no copy). `f` must not call back into this module's light lookups
 /// (`lights_at`, `current`): the list is locked while it runs.
 pub fn with_current<R>(f: impl FnOnce(&[LightInfo]) -> R) -> R {
@@ -345,7 +355,6 @@ pub struct DynLightSlot;
 #[derive(Resource)]
 pub struct DynLights {
     transients: Vec<Transient>,
-    pool: Vec<Entity>,
     gain: f32,
     seed: u32,
     flicker: HashMap<u64, (f32, f32)>,
@@ -356,30 +365,24 @@ pub struct DynLights {
 const POOL: usize = 24;
 
 pub fn setup_dynlights(mut commands: Commands) {
-    let mut pool = Vec::new();
     for _ in 0..POOL {
-        pool.push(
-            commands
-                .spawn((
-                    PointLight {
-                        intensity: 0.0,
-                        range: 1.0,
-                        shadow_maps_enabled: false,
-                        ..default()
-                    },
-                    Transform::default(),
-                    Visibility::Hidden,
-                    DynLightSlot,
-                ))
-                .id(),
-        );
+        commands.spawn((
+            PointLight {
+                intensity: 0.0,
+                range: 1.0,
+                shadow_maps_enabled: false,
+                ..default()
+            },
+            Transform::default(),
+            Visibility::Hidden,
+            DynLightSlot,
+        ));
     }
     let gain = env_val!("DXVIEW_DYNLIGHT_GAIN")
         .and_then(|v| v.parse().ok())
         .unwrap_or(1.0);
     commands.insert_resource(DynLights {
         transients: Vec::new(),
-        pool,
         gain,
         seed: 0x1234_5678,
         flicker: HashMap::new(),
@@ -493,18 +496,10 @@ pub fn dynlight_system(
         cam.translation.y as f64,
     ) / dx_level::METERS_PER_UNIT as f64;
     if let Some(list) = st.actor_lights.as_ref() {
-        let toggled = TOGGLED
-            .lock()
-            .ok()
-            .and_then(|t| t.clone())
-            .unwrap_or_default();
-        let suppressed = SUPPRESSED
-            .lock()
-            .ok()
-            .and_then(|t| t.clone())
-            .unwrap_or_default();
+        let toggled = TOGGLED.lock().unwrap_or_else(|e| e.into_inner());
+        let suppressed = SUPPRESSED.lock().unwrap_or_else(|e| e.into_inner());
         for (i, spec, flicker, blocker, initially_on) in list {
-            if *initially_on == toggled.contains(i) || suppressed.contains(i) {
+            if *initially_on == toggled.as_ref().is_some_and(|t| t.contains(i)) || suppressed.as_ref().is_some_and(|t| t.contains(i)) {
                 continue;
             }
             let pos = match blocker {
@@ -589,11 +584,11 @@ pub fn dynlight_system(
                 pl.range = r_m;
                 pl.shadow_depth_bias = -b;
                 tf.translation = Vec3::from(ue_to_bevy(l.pos));
-                *vis = Visibility::Inherited;
+                vis.set_if_neq(Visibility::Inherited);
             }
             None => {
                 pl.intensity = 0.0;
-                *vis = Visibility::Hidden;
+                vis.set_if_neq(Visibility::Hidden);
             }
         }
     }
@@ -629,10 +624,12 @@ pub fn relight_system(
     mut map_gen: Local<u64>,
     mut lit: Local<HashMap<Entity, u64>>,
     mut timer: Local<f32>,
+    mut pre_sig: Local<HashMap<Entity, u64>>,
 ) {
     // A new map (loader.rs): start this system's per-map state over.
     if crate::loader::new_map(&mut map_gen) {
         lit.clear();
+        pre_sig.clear();
     }
     let _prof = crate::prof::scope("dynlight::relight_system");
     *timer -= time.delta_secs();
@@ -640,23 +637,52 @@ pub fn relight_system(
         return;
     }
     *timer = 1.0 / 30.0;
-    let dyn_lights = current();
+    with_current_copy(|dyn_lights| {
     if dyn_lights.is_empty() && lit.is_empty() {
         return;
     }
     let lvl = &level.0;
     let mut now = HashMap::new();
+    let mut pre_now = HashMap::new();
     for (e, d) in &decos {
         let draw = d.body.location + d.pre;
         let p = draw.as_vec3().to_array();
-        let near = dyn_lights.iter().any(|l| {
-            let dd =
-                ((l.pos[0] - p[0]).powi(2) + (l.pos[1] - p[1]).powi(2) + (l.pos[2] - p[2]).powi(2))
-                    .sqrt();
-            dd < l.radius + 96.0
-        });
+        // The dynamic lights in reach, and a signature of them before any trace: while they, the deco and its
+        // pose are as they were, nothing can have changed (the held lamps of a map keep this running all the time).
+        let mut near = false;
+        let pre = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for l in dyn_lights {
+                let dd = ((l.pos[0] - p[0]).powi(2) + (l.pos[1] - p[1]).powi(2) + (l.pos[2] - p[2]).powi(2)).sqrt();
+                if dd < l.radius + 96.0 {
+                    near = true;
+                    for k in 0..3 {
+                        (l.pos[k].round() as i32).hash(&mut h);
+                        ((l.color[k] * 64.0).round() as i32).hash(&mut h);
+                    }
+                    (l.radius.round() as i32).hash(&mut h);
+                }
+            }
+            for k in 0..3 {
+                (p[k].round() as i32).hash(&mut h);
+            }
+            d.rotation.hash(&mut h);
+            ((d.scale_glow * 64.0).round() as i32).hash(&mut h);
+            h.finish()
+        };
         let was = lit.get(&e).copied();
         if !near && was.is_none() {
+            continue;
+        }
+        if near {
+            pre_now.insert(e, pre);
+        }
+        if near && pre_sig.get(&e) == Some(&pre) {
+            // Unchanged since the last look: keep what it had.
+            if let Some(w) = was {
+                now.insert(e, w);
+            }
             continue;
         }
         // The lights that reach it as the spawn lighting sees them (static lights it is in sight of, plus the
@@ -691,6 +717,8 @@ pub fn relight_system(
         }
     }
     *lit = now;
+    *pre_sig = pre_now;
+    });
 }
 
 /// AugLight, the flashlight augmentation JC starts with (F12 through `abilities`, which also drains its 10 energy
@@ -711,7 +739,7 @@ pub fn aug_light_system(
     if !cone_on {
         for (mut sl, _, mut vis, _) in &mut cone {
             sl.intensity = 0.0;
-            *vis = Visibility::Hidden;
+            vis.set_if_neq(Visibility::Hidden);
         }
     }
     if let Ok(mut c) = CPU_ONLY.lock() {
@@ -792,7 +820,7 @@ pub fn aug_light_system(
             sl.shadow_depth_bias = -(192.0 / 255.0) * if spill { 0.22 } else { 1.0 };
             sl.color = Color::srgb(c[0], c[1], c[2]);
             *t = tf;
-            *vis = Visibility::Inherited;
+            vis.set_if_neq(Visibility::Inherited);
         }
     } else {
         hold(crate::sound::key_of("aug-light-beam"), beam_at, beam, 0.0);
@@ -937,7 +965,7 @@ pub fn glow_lights_system(
     cam: Single<&Transform, (With<FlyCam>, Without<SkyCam>)>,
     actors: Query<(&crate::actors::MeshActorRef, &GlobalTransform, &InheritedVisibility)>,
 ) {
-    if crate::settings::get("EmissiveSurfaces") < 0.5 {
+    if setting!("EmissiveSurfaces") < 0.5 {
         return;
     }
     let eye = DVec3::from(dx_level::bevy_to_ue(cam.translation.to_array()).map(|v| v as f64));

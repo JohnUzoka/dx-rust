@@ -1,6 +1,173 @@
 # Changelog
 
-## Unreleased
+## v0.11.0
+
+The highlights since v0.10.0 (the detailed notes for each day follow):
+- **Skeletal characters and ragdolls**: the Machine God team's rebuilt human bodies on a real skeleton (blended
+  moves, talking faces, coat cloth, hurt poses, aiming and looking), ragdolls for the dead and knocked out, fluid
+  blood that runs down walls, wound marks and blood on your weapon.
+- **Remastered lighting**: per-pixel relighting of the walls with relief maps (the Parallax Occlusion addon, read
+  from the launcher's Mods page) and highlights; real-time shadows reworked; emissive lamps and screens; modern
+  glass.
+- **Modern Water rebuilt**: one wave grid round the eye, storms with whitecaps, indoor water done right, and
+  screen-space reflections worked out on the graphics card (Planar is still there as an option).
+- **New enhancements**: sprinting with stamina, grass and grown trees, upscaling (AMD FSR 1), Combat HUD fade, live
+  terminals in the world, a diegetic rifle scope, diegetic healing on the body, item rotation and Pack, optional
+  gameplay fixes, a Field of View slider and a frame rate cap.
+- **Achievements**: per character, spoilers hidden, endings shared across characters, a main-menu screen.
+- **Saves per character**, and a welcome screen for players of the original.
+- **Performance**: GPU-driven drawing (bindless materials, multi-draw, GPU culling), a CPU pass and an allocation
+  pass - Modern with every mod went from about 41 to 70 fps on a Ryzen 5 3600 + RTX 3050; Classic from 72 to about
+  96 fps at default settings.
+- **Mods**: one Mod Assets folder for all of them, Helios texture packs, GMDX perks and quality-of-life options,
+  Augmentique outfits.
+- Many fixes from playtests and GitHub reports (#2, #4, #6, #7, #8), the training courses (the stealth maze's alarm,
+  the toxic pool's radiation, the holograms) and Mission 1 among them.
+
+### Training, holograms and a processor pass (November 4)
+- The training's stealth maze works as it should: the soldiers run for the alarm when they see you (failing the
+  test), and the reset switch at the top starts it over. Unarmed guards now raise the alarm or flee instead of
+  ignoring you.
+- The holograms at the end of training show their animated effect instead of flat purple.
+- The training's toxic swimming pool hurts again: pain zones deal their damage every second (radiation there),
+  more the deeper you are in, as in the original.
+- The flashlight and vision augs glow softly through JC's glasses instead of shining two cones from his eyes.
+- New Water Reflections setting (Enhancements > Visuals): Screen-Space, the default, reflects what is on screen and
+  is worked out on the graphics card from the picture already drawn - the processor no longer draws the whole world
+  a second time for the water; Planar keeps the old full reflection. The water also bends what lies under it.
+- The level's surfaces are kept on the graphics card only (less memory).
+
+### Welcome screen, frame rate cap and fixes (November 3, night)
+- A welcome window on the main menu for players of the original: what's new, what to try, what to look out for,
+  and a note that Modern with everything on is still a work in progress for performance. OK closes it; Don't Show
+  Again keeps it closed.
+- New Frame Rate Cap in Settings > Enhancements > Display: Off, 30, 60, 120, 144, 200 or 240 fps.
+- Footsteps no longer splash on every step whenever it rains: the splash comes in as the ground gets wet, only in
+  the open, and stays quiet on hard floors.
+- The GEP gun's lock-on stops beeping during conversations, cut scenes and at computers.
+- Pieces of broken boxes are lit like everything else, including by dynamic lights.
+- People and objects are lit only on the sides facing a light, as in the original: the clone in the intro's tank has
+  his face in shadow again. Spotlights light objects all round as the original does, which brings back the training
+  range's wall switches (they had gone black).
+- Third-person crouching: JC sinks into the crouch and holds it, then walks in it; Lay D Denton's crouch is deeper and
+  leans forward like the male one.
+- Security computers: if you hacked in without Advanced Computer skill the turret choice stays locked, as in the
+  original, and now says why ("Needs Advanced"); a turret's attack mode is kept in saves.
+
+### Bug reports, item rotation, blood and achievements (November 3, evening)
+- Classic lighting matches the original again where it was too bright, as in the training halls: spotlights now
+  light only inside their cones (they lit all round like bulbs), and lights marked as flat or cylindrical work as
+  the original's do. Thanks to RevengeRip for the report.
+- Bodies no longer drop the moment you pick them up (the click that lifted a body could also throw it). Thanks to
+  RevengeRip.
+- New Field of View slider in Settings > Enhancements > Display (60-130, default 75 as the original). The weapon in
+  hand keeps its own view so wide angles never show the ends of the models, and JC's body in first person stands
+  back further at wide angles. Thanks to RevengeRip for the suggestion.
+- The hacking window's empty box is now a countdown of the time left before the hack is detected; it turns red and
+  blinks in the last five seconds.
+- Ragdolls: knees and elbows bend the way the limb points instead of twisting, and hips swing less.
+- New enhancement, Item Rotation (Interface; in the Modern mix): items can lie turned in the inventory grid - R or
+  a right click while dragging turns one, R turns the selected item where it lies - and pickups that only fit
+  turned go in turned. A Pack button turns and rearranges everything to leave the most room, and Shift-click puts
+  an item in the first free belt slot. With a controller on the inventory and persona screens: LB / RB change
+  screens, Y uses or equips the item under the cursor, LT drops it, X turns what you're dragging.
+- Fluid Blood: blood on walls runs down in trickles with a bead at the tip, slowing as it goes, following the wall
+  and dripping off its edge; wounds are openings rather than stains and keep bleeding, pouring for a while from the
+  dead; blood from point-blank shots and melee spatters the weapon in hand.
+- Achievements: those that give the story away are blurred with a lock over them until unlocked; the endings (and
+  Area 51) count for every character once any character has reached them, so all three can be had over several
+  playthroughs; and a new Achievements screen on the main menu shows what's unlocked and by which characters.
+
+### Sprint, Classic water and a GPU pass (November 3, afternoon)
+- New enhancement, Sprint and Stamina (Gameplay; in the Modern mix): your old running pace becomes the normal
+  pace, and holding Walk (Shift) or clicking the left stick sprints about 45% faster. Sprinting uses stamina,
+  shown as a bar on the right of the body display, opposite the bioenergy bar (the breath bar takes its place
+  under water). It comes back slowly once you stop; candy bars, soy food and soda top it up. No sprinting while
+  crouched, carrying something, swimming or in the air; crouching keeps its pace. Run it dry and you're winded
+  for a while.
+- Classic water moves again: the harbour's water picture was only ever drawn on its first frame, and its ripples
+  were too weak to see.
+- Augmentique outfit boxes open from every side (from some angles they said you couldn't lift them).
+- GPU pass: ambient occlusion, bloom and anti-aliasing cost less (ambient occlusion was the most expensive
+  single pass of a Modern frame), clouds skip the work where there's no cloud, relief walls use fewer depth
+  layers, and the grass only draws the blades in use (it ran every blade's vertices every frame).
+
+### Playtest fixes (November 3, morning)
+- Gunther's cell window really is clear now: frosted glass picked up the level's per-surface light data as a colour
+  and drew solid white. The frost itself is fainter on panes that are bright all over.
+- JC is back in third-person conversations with Skeletal Characters (he had vanished, so Paul talked to thin air).
+- Achievement popups show again after a map change (they unlocked but never appeared after the first map).
+- The ATM screen is a little taller and covers the blue screen under it.
+- Smoother cut scenes and conversation camera moves: reflections are no longer switched off and back on during a
+  scene (each time one came back on the whole level was re-filed for drawing, a hitch in the middle of a pan).
+  hitch.log now records the frame times of every cut scene and conversation.
+
+### Characters, achievements test and playtest fixes (November 3, overnight)
+- Each new character (named on the New Game screen) keeps its own saves, quick save, five autosaves and
+  achievements. The load screen lists every character under a heading of their own that opens and closes like the
+  Enhancements groups; the in-game save screen shows only the character you're playing, so nobody else's saves
+  can be overwritten. Saves made before this are listed together as "(earlier saves)".
+- An achievement test run checks that everything each of the fifty achievements waits for exists in the game and
+  that every one can unlock. It found No Thanks, Mean Joe waiting on a misspelt flag (never set): fixed.
+- Animated screens and monitors (the med lab's heart monitors, news and observation screens, TV noise) animate
+  again, with or without New Vision.
+- Gunther's cell glass (and other glass under bloom) no longer glows blinding white.
+- Modern Water: indoor water - the pool under Castle Clinton, the subway's - was drawn black; it now shows its
+  surface, lit by the room's light.
+- The ATM's screen fills its recess; computer screens sit in their monitor even when the terminal settled onto its
+  desk or another model replaces it.
+- Things resting on a moving part ride it: the items on the shelves of Paul's swinging closet walls.
+- Outfit boxes drop to the floor.
+- Battery Park: the blue laser in the subway switches off once the hostages are out or the terrorists are dead;
+  with the Ambrosia tagged, Anna Navarre waits out front of Castle Clinton instead of wherever the fight left her.
+- Liberty Island: once the statue is cleared, every turret still standing stands down.
+- JC wears the same face in third-person conversations as in play (Skeletal Characters).
+- The first-person body no longer vanishes for a while after the third-person camera.
+
+
+### Deep optimization and clean-up pass (November 2, night)
+- Measured on an RTX 3050 / Ryzen 5 3600 with every mod: Modern about 17.5 -> 16.5 ms a frame, Classic 11.5 -> 10.4 ms
+  (96 fps); every part of the frame got shorter.
+- Frame rate: effect sprites (smoke, fire, rings, bubbles, muzzle flashes, gas clouds) share one material per
+  picture and fade by swapping between its steps, so nothing is re-prepared for the GPU every frame; bullet holes,
+  blood splats and wounds share their decal materials and the one quad (they batch into single draws); particle
+  generators (faucets, drips, steam, sparks) draw as one mesh each instead of one entity per particle; tracers,
+  shock rings, sparks and water rings reuse one built mesh instead of allocating a new one per shot; shell
+  casings, fragments and other loose objects stop being relit and moved once at rest; animated textures step only
+  while something on screen shows them; the water reflection renders only while a water sheet is in view; the
+  electricity bolts, blob shadows, coronas and light halos rewrite their meshes in place and only when they changed;
+  the fog's drifting density is refilled at most 20 times a second and only near you; the grass material no longer
+  changes every frame; hidden menus (spawn menu, key editor) are out of the UI layout; a hundred-odd places that
+  wrote the same visibility, node or transform every frame (forcing Bevy to re-propagate whole subtrees) now write
+  only on change; the shadow light layering, splash checks, conversation line-of-sight, coronas' sight traces, the
+  decoration relighting and the mesh-actor weapon models skip the work when nothing moved; settings read in
+  per-pawn code are cached per call site; several per-frame string copies (NPC weapon stats, ammo names, HUD
+  texture keys, sound ambients, key dedup) are gone.
+- Clean-up: dead code and unread fields removed (old tessellated water, HUD text leftovers, unused struct fields),
+  two latent bugs fixed (the spy drone's state and the skeletal body table survived map changes), the clippy
+  backlog taken down from ~390 warnings to a few dozen, `Level::level_info()` / `mission_number()` replace nine
+  copies of the same scan, `uinode` / `sprite` helper modules.
+
+### Live terminals, controller layout, ladders and playtest fixes (November 2, evening)
+- Diegetic Screens: computers are now used like a live machine. The view stays at your own field of view with the
+  monitor filling most of it and the room still around it; the mouse moves the terminal's own cursor, which stays
+  on the monitor; the terminal shows a desktop (wallpaper, task bar with the user and a clock, status line). Step
+  away with Escape, right click or a walk key. Idle terminals near you show a live standby screen.
+- Controller Layout: a picture of the pad with what every button does (Settings > Enhancements > Controller), shown
+  once on Liberty Island the first time you play with a controller.
+- Ladders (Grab Ladders on): looking at a ladder shows "Climb Ladder" with the key or button; use it to take hold.
+- Conversations with many choices (Gunther's weapon request) show every choice.
+- Newspapers and other flat two-sided items are no longer black.
+- The riot prod glows in your hand (Emissive Surfaces).
+- The helicopter outside UNATCO HQ no longer repeats its take-off; throwing things near friendly people no longer
+  sends them running to investigate (Manderley left his office).
+- New Vision / HD monitors and screens animate again; ladders and vent grates line up with Relief Maps on, and
+  guards see through grate vents.
+- Battery Park: the grey slab in front of the harbour wall is gone (the mist there now thins out as it should);
+  no more ring pattern in the clouds overhead.
+- Grate and chain-link vents are see-through again: you can look between the bars into the duct behind (a solid
+  face hidden in each vent cover's brush closed it off).
+- JC no longer turns black in a mirror when standing close to it (people and objects against a wall are lit right).
 
 ### Faster loading and frame rate, water crests, glass, hostages (November 2, afternoon)
 - Frame rate: water reflections draw the level, the sky and JC but not every decoration and person (the biggest single
@@ -50,18 +217,16 @@
 - Linux: starting in fullscreen no longer crashes when the window opens before the monitor is known (it opens
   windowed and switches to fullscreen a moment later).
 
-### Mods folder, Confix and Transcended, healing by body part (November 2)
+### Mods folder, optional fixes, healing by body part (November 2)
 - One folder for all your mods: on the launcher's Mods page, Mod Assets Folder... takes a folder holding each mod in
   its own folder (Lay D Denton, HDTP, New Vision, Helios, the Parallax Occlusion addon, Augmentique, Visible
-  Attachments, GMDX: Augmented Edition (and its Precipitation), Confix and Transcended) and sets them all up.
-- Confix support: with Confix installed, Confix Conversation Fixes (Settings > Enhancements, on in Modern) uses its
-  corrected conversations and speech - typos, wrong flags, broken item transfers and missing lines fixed.
-- Transcended Fixes (Fixes, on in Modern): bugs fixed the way the Transcended mod fixes them - misnamed mission flags
+  Attachments, GMDX: Augmented Edition and its Precipitation) and sets them all up.
+- Optional Fixes (Fixes, on in Modern): misnamed mission flags
   (the Hong Kong ROM, the ship breach, the Vandenberg hazlab troops, Aimee's goal, the Karkian tank, Jock in Area 51),
   the ATM accepting any account number with the first account's PIN, EMP'd robots still attacked, bot screens
   staying open after the bot is destroyed, the laser left on in conversations, the riot prod breaking crates, people
   set alight dying "unconscious", barks under water, leather chair and couch colours, and more.
-- Transcended's bigger changes as separate options (all off): Unconscious Bodies Can Die, Using Things Makes Noise,
+- Bigger changes as separate options (all off): Unconscious Bodies Can Die, Using Things Makes Noise,
   People Mind A Pointed Gun, Thermoptic Camo Fools Machines, Wounded Legs Slow People, Stronger Gunther And Simons,
   Long-Burning Flares.
 - Diegetic Healing: with a medkit in hand, hold Alt (controller: LT) to bring up your body; move the little medkit

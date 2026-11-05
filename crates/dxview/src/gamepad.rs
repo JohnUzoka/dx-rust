@@ -92,7 +92,6 @@ pub enum PadAction {
     AugWheel,
     /// The pause menu (Escape).
     Menu,
-    None,
 }
 
 /// Every pad action with its default button (the modern shooter layout, user decision 2026-10-27).
@@ -153,7 +152,7 @@ pub fn connected() -> bool {
 
 /// The connected pad's glyph family, or the one picked in Enhancements.
 pub fn glyph_kind() -> PadKind {
-    match crate::settings::get("PadGlyphs") as i32 {
+    match setting!("PadGlyphs") as i32 {
         1 => PadKind::Xbox,
         2 => PadKind::PlayStation,
         _ => frame().kind,
@@ -245,7 +244,7 @@ fn read_pad(mut g: NonSendMut<GilrsRes>, f: &mut PadFrame, any_event: &mut bool)
         f.connected = true;
         f.name = "DualSense".into();
         f.kind = PadKind::PlayStation;
-        let dz = [0.06, 0.1, 0.15, 0.22, 0.3][(crate::settings::get("PadDeadzone") as usize).min(4)];
+        let dz = [0.06, 0.1, 0.15, 0.22, 0.3][(setting!("PadDeadzone") as usize).min(4)];
         f.ls = dead(ds.ls, dz);
         f.rs = dead(ds.rs, dz);
         f.lt = ds.lt;
@@ -271,7 +270,7 @@ fn read_pad(mut g: NonSendMut<GilrsRes>, f: &mut PadFrame, any_event: &mut bool)
         f.connected = true;
         f.name = p.name().to_string();
         f.kind = kind_of(p.name(), p.vendor_id());
-        let dz = [0.06, 0.1, 0.15, 0.22, 0.3][(crate::settings::get("PadDeadzone") as usize).min(4)];
+        let dz = [0.06, 0.1, 0.15, 0.22, 0.3][(setting!("PadDeadzone") as usize).min(4)];
         f.ls = dead(Vec2::new(p.value(gilrs::Axis::LeftStickX), p.value(gilrs::Axis::LeftStickY)), dz);
         f.rs = dead(Vec2::new(p.value(gilrs::Axis::RightStickX), p.value(gilrs::Axis::RightStickY)), dz);
         let trig = |b: gilrs::Button| p.button_data(b).map_or(0.0, |d| d.value());
@@ -355,11 +354,6 @@ fn any_kbm() -> bool {
 }
 
 // ------------------------------------------------------------------------------------------------ bindings
-
-pub struct PadBindings {
-    /// The button for each PAD_ACTIONS entry.
-    pub map: Vec<Option<PadBtn>>,
-}
 
 fn save_path() -> PathBuf {
     std::env::current_exe()
@@ -454,6 +448,8 @@ pub const DIALOGUE_HOTKEYS: [(PadBtn, KeyCode); 4] =
 
 /// Y in a menu: type the keypad code found in the notes (menus.rs takes it).
 pub static PAD_NOTES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// LT pressed this frame in a free-cursor screen (the inventory drops the item under the cursor).
+pub static PAD_LT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The pad was the last thing used (glyphs instead of keys in prompts).
 pub fn pad_in_use() -> bool {
@@ -466,6 +462,7 @@ pub fn outputs(key_map: &[Input], dt: f32, ui: bool, snap_ok: bool) -> PadOut {
     let mut out = PadOut { inputs: Vec::new(), scroll: 0.0, cursor: Vec2::ZERO, snap: None };
     // Y's "code from notes" lasts one frame (whoever is open takes it; nobody keeps it for later).
     PAD_NOTES.store(false, std::sync::atomic::Ordering::Relaxed);
+    PAD_LT.store(false, std::sync::atomic::Ordering::Relaxed);
     if !f.connected {
         return out;
     }
@@ -498,7 +495,7 @@ pub fn outputs(key_map: &[Input], dt: f32, ui: bool, snap_ok: bool) -> PadOut {
         }
         // Ours: with Dialogue Hotkeys on, conversation choices 1-4 are X / Y / LB / RB (A still takes the
         // highlighted one); elsewhere Y is Tab (a keypad code from the notes).
-        let hotkeys = crate::consys::choosing() && crate::settings::get("DialogueHotkeys") > 0.5;
+        let hotkeys = crate::consys::choosing() && setting!("DialogueHotkeys") > 0.5;
         if hotkeys {
             for (b, k) in DIALOGUE_HOTKEYS {
                 if just(b) {
@@ -511,6 +508,18 @@ pub fn outputs(key_map: &[Input], dt: f32, ui: bool, snap_ok: bool) -> PadOut {
             }
             if just(PadBtn::North) {
                 PAD_NOTES.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if just(PadBtn::LT) {
+                PAD_LT.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Ours: on the inventory / persona screens LB / RB step through the screens (the Left / Right keys).
+            if crate::inventory_screen::persona_open() {
+                if just(PadBtn::LB) {
+                    h.taps.push((Input::Key(KeyCode::ArrowLeft), 2));
+                }
+                if just(PadBtn::RB) {
+                    h.taps.push((Input::Key(KeyCode::ArrowRight), 2));
+                }
             }
         }
         // Start on the menus closes them all (back to the game); elsewhere it's Escape like B.
@@ -590,6 +599,8 @@ pub fn outputs(key_map: &[Input], dt: f32, ui: bool, snap_ok: bool) -> PadOut {
     for (i, (_, act, _)) in PAD_ACTIONS.iter().enumerate() {
         let Some(b) = map[i] else { continue };
         match act {
+            // Sprint (stamina.rs): the stick click starts / stops a sprint instead of holding Walk.
+            PadAction::Game("Walk (hold)") if crate::stamina::enabled() => crate::stamina::pad_button(held(b)),
             PadAction::Game(name) => {
                 if held(b) {
                     if let Some(k) = bound(key_map, name) {
@@ -678,7 +689,7 @@ pub fn outputs(key_map: &[Input], dt: f32, ui: bool, snap_ok: bool) -> PadOut {
                     out.inputs.push(Input::Key(KeyCode::Escape));
                 }
             }
-            PadAction::AugWheel | PadAction::None => {}
+            PadAction::AugWheel => {}
         }
     }
     // Hotkey pages (augwheel.rs) use the D-pad when that mode is on.
@@ -687,6 +698,7 @@ pub fn outputs(key_map: &[Input], dt: f32, ui: bool, snap_ok: bool) -> PadOut {
             h.taps.push((inp, 2));
         }
     }
+
     // The stick also presses the movement keys (swimming, the spy drone, ladders read them).
     for (cond, action) in [
         (f.ls.y > 0.35, "Move forward"),
@@ -727,11 +739,11 @@ pub fn look_delta(dt: f32) -> Vec2 {
     }
     let curved = f.rs / m * m.powf(2.0);
     let table = [0.5, 0.75, 1.0, 1.4, 1.9];
-    let sens_h = table[(crate::settings::get("PadLookSensitivityH") as usize).min(4)];
-    let sens_v = table[(crate::settings::get("PadLookSensitivityV") as usize).min(4)];
-    let inv = if crate::settings::get("PadInvertLook") > 0.5 { -1.0 } else { 1.0 };
+    let sens_h = table[(setting!("PadLookSensitivityH") as usize).min(4)];
+    let sens_v = table[(setting!("PadLookSensitivityV") as usize).min(4)];
+    let inv = if setting!("PadInvertLook") > 0.5 { -1.0 } else { 1.0 };
     // Aim slowdown (Enhancement): 40% slower while the crosshair is on an enemy.
-    let slow = if crate::settings::get("PadAimSlowdown") > 0.5 && crate::hud::on_enemy() { 0.6 } else { 1.0 };
+    let slow = if setting!("PadAimSlowdown") > 0.5 && crate::hud::on_enemy() { 0.6 } else { 1.0 };
     Vec2::new(
         curved.x * 220f32.to_radians() * sens_h * slow * dt,
         curved.y * 150f32.to_radians() * sens_v * slow * inv * dt,

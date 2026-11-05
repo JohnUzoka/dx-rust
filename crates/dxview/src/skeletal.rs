@@ -178,7 +178,6 @@ fn parse_rig(b: &[u8]) -> Rig {
 }
 
 pub struct Section {
-    pub material: String,
     pub slot: usize,
     pub style: String,
     pub positions: Vec<[f32; 3]>,
@@ -233,7 +232,7 @@ fn parse_body(name: &str, b: &[u8]) -> Body {
         let mut it = material.splitn(3, '_');
         let slot = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         let style = it.next().unwrap_or("NORMAL").to_string();
-        sections.push(Section { material, slot, style, positions, normals, uvs, joints, weights, indices, morphs: morph_d });
+        sections.push(Section { slot, style, positions, normals, uvs, joints, weights, indices, morphs: morph_d });
     }
     Body { joint_names, ibm, morphs, sections, female: name.starts_with("GF") }
 }
@@ -291,7 +290,7 @@ fn log_on() -> bool {
 }
 
 pub fn enabled() -> bool {
-    crate::settings::get("SkeletalCharacters") > 0.5
+    setting!("SkeletalCharacters") > 0.5
 }
 
 // ------------------------------------------------------------------------------------------------ sampling
@@ -595,7 +594,7 @@ pub fn spawn_system(
             for (p, c) in &hidden_parts {
                 if c.parent() == e {
                     if let Ok(mut v) = vis.get_mut(p) {
-                        *v = Visibility::Inherited;
+                        v.set_if_neq(Visibility::Inherited);
                     }
                     commands.entity(p).remove::<HiddenPart>();
                 }
@@ -633,7 +632,7 @@ pub fn spawn_system(
                 }
             }
             if let Ok(mut v) = vis.get_mut(c) {
-                *v = Visibility::Hidden;
+                v.set_if_neq(Visibility::Hidden);
             }
             commands.entity(c).insert(HiddenPart);
         }
@@ -992,7 +991,7 @@ pub fn pose_system(
             s.pose_now = want;
         }
     }
-    if log_on() && tick % 120 == 0 {
+    if log_on() && tick.is_multiple_of(120) {
         for (e, s, a, gt, ..) in q.iter() {
             let seen_any = s.meshes.iter().any(|m| seen.get(*m).is_ok_and(|v| v.get()));
             let d = eye.map_or(-1.0, |c| c.distance(gt.translation()));
@@ -1066,7 +1065,7 @@ pub fn pose_system(
             face_weights(s, &anim.mesh, face.as_ref(), a.face.talking, dt, w.weights_mut());
             wmax = w.weights().iter().fold(0.0f32, |m, x| m.max(x.abs()));
         }
-        if log_on() && tick % 10 == 0 && eye.is_some_and(|c| c.distance(gt.translation()) < 12.0) {
+        if log_on() && tick.is_multiple_of(10) && eye.is_some_and(|c| c.distance(gt.translation()) < 12.0) {
             let hips: f32 = s.pose.iter().map(|p| p.r.x.abs() + p.r.y.abs() + p.t.y).sum();
             bevy::log::info!(
                 "SKELPOSE actor {} seq {seq} start {start} frames {frames} f {f:.2} clip {} face {:?} talking {} weights {} max {wmax:.2} posesum {:.4}",
@@ -1081,7 +1080,7 @@ pub fn pose_system(
             for c in ch.iter() {
                 if let Ok(mut v) = hidden.get_mut(c) {
                     if *v != Visibility::Hidden {
-                        *v = Visibility::Hidden;
+                        v.set_if_neq(Visibility::Hidden);
                     }
                 }
             }
@@ -1311,16 +1310,15 @@ fn face_weights(s: &mut SkelBody, mesh: &dx_level::actors::AnimMesh, face: Optio
     let mut speaking = false;
     if let Some((a, b, k, blink)) = face {
         let k = *k as f32 / 64.0;
-        let shape = |fr: usize| seq_name(mesh, fr).map(|n| n.to_string());
-        if let Some(n) = shape(*a) {
+        if let Some(n) = seq_name(mesh, *a) {
             if !n.eq_ignore_ascii_case("MouthClosed") {
-                set(&n, 1.0 - k, w);
+                set(n, 1.0 - k, w);
                 speaking = true;
             }
         }
-        if let Some(n) = shape(*b) {
+        if let Some(n) = seq_name(mesh, *b) {
             if !n.eq_ignore_ascii_case("MouthClosed") {
-                set(&n, k, w);
+                set(n, k, w);
                 speaking = true;
             }
         }
@@ -1387,6 +1385,14 @@ pub fn mirror_weapon() -> Option<[[f32; 3]; 4]> {
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+/// JC's face state for the mirror / third-person / conversation body.
+static JC_FACE: std::sync::LazyLock<std::sync::Mutex<crate::actors::Face>> = std::sync::LazyLock::new(Default::default);
+
+/// JC's rebuilt body is up (his mirror / third-person / conversation body is the skeletal one).
+pub fn mirror_on() -> bool {
+    MIRROR_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn mirror_skel_system(
     mut commands: Commands,
     time: Res<Time>,
@@ -1424,7 +1430,7 @@ pub fn mirror_skel_system(
                 for c in ch.iter() {
                     if hidden.contains(c) {
                         if let Ok(mut v) = vis.get_mut(c) {
-                            *v = Visibility::Inherited;
+                            v.set_if_neq(Visibility::Inherited);
                         }
                         commands.entity(c).remove::<HiddenPart>();
                     }
@@ -1461,7 +1467,15 @@ pub fn mirror_skel_system(
                 *g = s.weapon;
             }
             if let Some(mut w) = w {
-                face_weights(&mut s, &b.mesh, None, false, dt, w.weights_mut());
+                // JC's lip sync in third-person conversations (the same FaceKeys the vertex puppet used, so his
+                // face in a conversation is this body's, not a second model's).
+                let key = JC_FACE.lock().ok().and_then(|mut f| {
+                    f.talking = crate::consys::third_person();
+                    f.phoneme = crate::consys::mouth(crate::consys::Who::Player);
+                    crate::actors::update_face(&mut f, &b.mesh, dt)
+                });
+                let talking = key.is_some() && crate::consys::third_person();
+                face_weights(&mut s, &b.mesh, key.as_ref(), talking, dt, w.weights_mut());
             }
         }
         // Keep the vertex parts hidden.
@@ -1470,7 +1484,7 @@ pub fn mirror_skel_system(
                 if hidden.contains(c) {
                     if let Ok(mut v) = vis.get_mut(c) {
                         if *v != Visibility::Hidden {
-                            *v = Visibility::Hidden;
+                            v.set_if_neq(Visibility::Hidden);
                         }
                     }
                 }
@@ -1498,7 +1512,7 @@ pub fn mirror_skel_system(
             slot_tex.entry(*sl).or_insert(tex.clone());
         }
         if let Ok(mut v) = vis.get_mut(c) {
-            *v = Visibility::Hidden;
+            v.set_if_neq(Visibility::Hidden);
         }
         commands.entity(c).insert(HiddenPart);
     }
@@ -1529,7 +1543,9 @@ fn relight(s: &mut SkelBody, lvl: &dx_level::Level, ue: [f32; 3], scale_glow: f3
 }
 
 fn relight_from(s: &mut SkelBody, lights: &[dx_level::lighting::LightInfo], ue: [f32; 3], scale_glow: f32, mats: &mut Assets<ActorMaterial>) {
-    let sig = crate::dynlight::light_sig(lights, [0.0; 3], 0) ^ ((scale_glow * 64.0) as u64);
+    // (Under a spotlight the light depends on where the body stands: 32-unit steps.)
+    let at = if lights.iter().any(|l| l.cone > 0.0) { [(ue[0] / 32.0).round(), (ue[1] / 32.0).round(), (ue[2] / 32.0).round()] } else { [0.0; 3] };
+    let sig = crate::dynlight::light_sig(lights, at, 0) ^ ((scale_glow * 64.0) as u64);
     if sig == s.light_sig {
         return;
     }
@@ -1558,6 +1574,7 @@ fn relight_from(s: &mut SkelBody, lights: &[dx_level::lighting::LightInfo], ue: 
     for (i, (_, l)) in best.iter().enumerate() {
         let bp = Vec3::from(dx_level::ue_to_bevy(l.pos));
         lt.pos[i] = bp.extend(l.radius * dx_level::METERS_PER_UNIT);
+        // Spotlights light actors all round, as dx-level's light_part.
         lt.col[i] = Vec3::from(l.color).extend(0.0);
     }
     lt.amb = amb.extend(0.0);
@@ -1627,24 +1644,6 @@ impl BuildParams<'_, '_> {
                 m.base.double_sided = false;
             }
         }
-    }
-
-    /// Nothing of this body drawn above world height `y` (None = all of it).
-    pub fn set_cut(&mut self, s: &SkelBody, y: Option<f32>) {
-        for h in &s.mats {
-            if let Some(mut m) = self.mats.get_mut(h) {
-                let (z, w) = y.map_or((0.0, 0.0), |y| (y, 1.0));
-                if m.extension.lights.wet.z != z || m.extension.lights.wet.w != w {
-                    m.extension.lights.wet.z = z;
-                    m.extension.lights.wet.w = w;
-                }
-            }
-        }
-    }
-
-    /// A rebuilt body under `parent` with the textures JC's mirror body wears (None until its parts exist).
-    pub fn build_from_mirror(&mut self, commands: &mut Commands, b: &crate::mirror::MirrorBody, body: &'static Body, parent: Entity, layers: RenderLayers) -> Option<SkelBody> {
-        self.build_mirror(commands, b, body, parent, Some(layers), &[], None)
     }
 
     fn build_mirror(&mut self, commands: &mut Commands, b: &crate::mirror::MirrorBody, body: &'static Body, parent: Entity, layers: Option<RenderLayers>, drop: &[&str], cut: Option<f32>) -> Option<SkelBody> {
@@ -2089,6 +2088,13 @@ pub fn hit_fraction(mesh_actor: usize) -> Option<f32> {
 /// Mesh actors wearing a rebuilt body (and whether it's the female rig).
 static SKEL_ACTORS: std::sync::Mutex<Option<HashMap<usize, bool>>> = std::sync::Mutex::new(None);
 
+/// A new map: the mesh-actor indices start over, so the old map's table must go (loader::reset_modules).
+pub fn reset_level() {
+    if let Ok(mut m) = SKEL_ACTORS.lock() {
+        *m = None;
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ coat cloth
 
 /// The coat's bones per rig, in hierarchy order: (node, length in rig units).
@@ -2312,6 +2318,6 @@ fn leg_bones(rig: &Rig) -> [(Option<usize>, Option<usize>); 4] {
 }
 
 pub fn cloth_on() -> bool {
-    crate::settings::get("CoatCloth") > 0.5
+    setting!("CoatCloth") > 0.5
 }
 

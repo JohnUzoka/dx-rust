@@ -44,6 +44,9 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("AdjustBrightness", 0.5),
     // HUD size (ours): 0 small, 1 medium (the original's rule), 2 large.
     ("HUDScale", 1.0),
+    ("FOV", 75.0),
+    ("FPSLimit", 0.0),
+    ("WelcomeSeen", 0.0),
     // Sound.
     ("MusicVolume", 153.0),
     ("SoundVolume", 204.0),
@@ -97,6 +100,7 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("NotesAutofill", 0.0),
     ("DialogueHotkeys", 0.0),
     ("InventorySort", 0.0),
+    ("InventoryRotate", 0.0),
     ("PersistentDebris", 0.0),
     ("DiscordPresence", 1.0),
     // v2 medium enhancements (all off unless noted).
@@ -115,6 +119,7 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("FlashlightCone", 0.0),
     ("MaterialSheen", 0.0),
     ("ModernGlass", 0.0),
+    ("PadLayoutShown", 0.0),
     ("BulletPenetration", 0.0),
     ("SmoothLean", 0.0),
     ("MeleeArc", 0.0),
@@ -124,17 +129,15 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("FixBlastDoors", 0.0),
     ("FixGibLoot", 0.0),
     ("FixCarryJump", 0.0),
-    // Confix's conversation packages in place of the game's (needs the mod; on in the Modern preset).
-    ("ConfixFixes", 0.0),
-    // Transcended's bug fixes (on in the Modern preset) and its bigger changes (all off).
-    ("TranscendedFixes", 0.0),
-    ("TrUnconsciousDeath", 0.0),
-    ("TrNoisyObjects", 0.0),
-    ("TrWeaponPointing", 0.0),
-    ("TrRadarCloak", 0.0),
-    ("TrNpcLimp", 0.0),
-    ("TrBossResist", 0.0),
-    ("TrLongFlares", 0.0),
+    // Optional bug fixes (on in the Modern preset); the bigger gameplay changes below are all off.
+    ("OptionalFixes", 0.0),
+    ("UnconsciousDeath", 0.0),
+    ("NoisyObjects", 0.0),
+    ("WeaponPointing", 0.0),
+    ("RadarCloak", 0.0),
+    ("NpcLimp", 0.0),
+    ("BossResist", 0.0),
+    ("LongFlares", 0.0),
     // GMDX quality of life (all off).
     ("ToolCounts", 0.0),
     ("ItemCounts", 0.0),
@@ -156,6 +159,7 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("ModernWater", 0.0),
     // Classic water on to the horizon (water.rs open_sea): off; the Switch build starts with it on.
     ("OpenSea", 0.0),
+    ("WaterReflections", 0.0),
     ("RealtimeShadows", 0.0),
     ("ModernAim", 0.0),
     ("DiegeticScope", 0.0),
@@ -178,6 +182,7 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("BodyWounds", 0.0),
     ("Elements", 0.0),
     ("Mantling", 0.0),
+    ("Sprint", 0.0),
     ("CarryCover", 0.0),
     ("ThirdPerson", 0.0),
     ("ThirdPersonCamera", 0.0),
@@ -255,7 +260,8 @@ fn ensure() {
         for line in t.lines() {
             if let Some((k, v)) = line.split_once('=') {
                 if let Ok(v) = v.trim().parse::<f32>() {
-                    m.insert(k.trim().to_string(), v);
+                    let k = k.trim();
+                    m.insert(k.to_string(), v);
                 }
             }
         }
@@ -321,81 +327,76 @@ pub fn save() {
 
 // ---------------------------------------------------------------- typed views
 
-fn enabled(key: &str) -> bool {
-    get(key) < 0.5
-}
-fn on(key: &str) -> bool {
-    get(key) >= 0.5
-}
+// (Each reads its key through the per-call-site cache: these run every frame.)
 
 pub fn object_names() -> bool {
-    enabled("ObjectNames")
+    setting!("ObjectNames") < 0.5
 }
 pub fn auto_reload() -> bool {
-    enabled("WeaponAutoReload")
+    setting!("WeaponAutoReload") < 0.5
 }
 pub fn subtitles() -> bool {
-    on("Subtitles")
+    setting!("Subtitles") >= 0.5
 }
 pub fn crosshairs() -> bool {
-    get("Crosshairs") < 0.5
+    setting!("Crosshairs") < 0.5
 }
 pub fn head_bob() -> bool {
-    enabled("HeadBob")
+    setting!("HeadBob") < 0.5
 }
 pub fn log_timeout() -> f32 {
-    get("LogTimeoutValue")
+    setting!("LogTimeoutValue")
 }
 pub fn always_run() -> bool {
-    enabled("AlwaysRun")
+    setting!("AlwaysRun") < 0.5
 }
 pub fn toggle_crouch() -> bool {
-    enabled("ToggleCrouch")
+    setting!("ToggleCrouch") < 0.5
 }
 pub fn invert_mouse() -> bool {
-    enabled("InvertMouse")
+    setting!("InvertMouse") < 0.5
 }
 /// PlayerPawn.MouseSensitivity (default 3).
 pub fn mouse_sensitivity() -> f32 {
-    get("MouseSensitivity")
+    setting!("MouseSensitivity")
 }
 pub fn menu_translucent() -> bool {
-    on("MenuTranslucency")
+    setting!("MenuTranslucency") >= 0.5
 }
 pub fn hud_borders() -> bool {
-    on("HUDBordersVisible")
+    setting!("HUDBordersVisible") >= 0.5
 }
 pub fn hud_border_translucent() -> bool {
-    on("HUDBorderTranslucency")
+    setting!("HUDBorderTranslucency") >= 0.5
 }
 pub fn hud_translucent() -> bool {
-    on("HUDTranslucency")
+    setting!("HUDTranslucency") >= 0.5
 }
 /// UIBackground: 0 render the game (masked), 1 snapshot, 2 black.
 pub fn ui_background() -> u8 {
-    get("UIBackground") as u8
+    setting!("UIBackground") as u8
 }
 /// Volumes 0..1.
 pub fn music_volume() -> f32 {
-    get("MusicVolume") / 255.0
+    setting!("MusicVolume") / 255.0
 }
 pub fn sound_volume() -> f32 {
-    get("SoundVolume") / 255.0
+    setting!("SoundVolume") / 255.0
 }
 pub fn speech_volume() -> f32 {
-    get("SpeechVolume") / 255.0
+    setting!("SpeechVolume") / 255.0
 }
 /// Renderer gamma for the Brightness slider (0..1, default 0.5 = 1.15).
 pub fn gamma() -> f32 {
-    0.8 + 0.7 * get("AdjustBrightness")
+    0.8 + 0.7 * setting!("AdjustBrightness")
 }
 /// Debug Mode (Enhancements): the spawn menu, debug unlock, god mode and the corner readout.
 pub fn debug_mode() -> bool {
-    on("DebugMode")
+    setting!("DebugMode") >= 0.5
 }
 /// HUD size step: -1 small, 0 medium, +1 large.
 pub fn hud_scale_step() -> i32 {
-    get("HUDScale").round() as i32 - 1
+    setting!("HUDScale").round() as i32 - 1
 }
 
 #[cfg(test)]

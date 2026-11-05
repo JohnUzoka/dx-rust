@@ -216,6 +216,9 @@ pub struct Level {
     pub nano_keys: Vec<(String, String, String)>,
     /// Per BSP zone: water (WaterZone / bWaterZone) and its fluid friction.
     pub zone_water: Vec<Option<f32>>,
+    /// Per BSP zone: a pain zone (ZoneInfo bPainZone) - its DamagePerSec and DamageType (the training's toxic pool:
+    /// 20 'Radiation').
+    pub zone_pain: Vec<Option<(f32, String)>>,
     /// Per BSP zone: open to the sky (it has fake-backdrop faces looking into the sky room; the sky room itself
     /// excluded) - where weather falls.
     pub zone_sky: Vec<bool>,
@@ -843,11 +846,25 @@ impl Level {
                 continue;
             }
             let off = (n[0] * pos[0] + n[1] * pos[1] + n[2] * pos[2] - w.dist).abs();
-            if off < 3.0 && best.map_or(true, |(b, _)| off < b) {
+            if off < 3.0 && best.is_none_or(|(b, _)| off < b) {
                 best = Some((off, w.group));
             }
         }
         best.and_then(|(_, g)| self.floor_groups.get(g as usize)).map(|s| s.as_str())
+    }
+
+    /// The map's DeusExLevelInfo actor (mission number, location, map name, true north, song).
+    pub fn level_info(&self) -> Option<&actors::ActorInfo> {
+        self.actors.iter().find(|a| a.class == "DeusExLevelInfo")
+    }
+
+    /// DeusExLevelInfo.missionNumber (0 when the map has none).
+    pub fn mission_number(&self) -> i32 {
+        match self.level_info().and_then(|a| unreal_pkg::props::find(&a.props, "missionNumber")) {
+            Some(unreal_pkg::props::Value::Int(n)) => *n,
+            Some(unreal_pkg::props::Value::Byte(n)) => *n as i32,
+            _ => 0,
+        }
     }
 
     /// DeusExPlayer.GetFloorMaterial: the texture group of the floor under `pos`, searching `down` units below.
@@ -867,7 +884,7 @@ impl Level {
             if !point_in_xy(&f.points, pos[0], pos[1]) {
                 continue;
             }
-            if best.map_or(true, |(b, _)| below < b) {
+            if best.is_none_or(|(b, _)| below < b) {
                 best = Some((below, f.group));
             }
         }
@@ -1006,6 +1023,29 @@ pub fn build_level(
             })
         })
         .collect();
+    let zone_pain: Vec<Option<(f32, String)>> = model
+        .zone_actors
+        .iter()
+        .map(|&za| {
+            if za <= 0 {
+                return None;
+            }
+            let e = pkg.exports.get(za as usize - 1)?;
+            let ps = classes.actor_properties(pkg, e).unwrap_or_default();
+            if !matches!(props::find(&ps, "bPainZone"), Some(Value::Bool(true))) {
+                return None;
+            }
+            let dps = match props::find(&ps, "DamagePerSec") {
+                Some(Value::Int(v)) => *v as f32,
+                _ => 0.0,
+            };
+            let ty = match props::find(&ps, "DamageType") {
+                Some(Value::Name(n)) => n.clone(),
+                _ => String::new(),
+            };
+            Some((dps, ty))
+        })
+        .collect();
     // Zone ambient light (ZoneInfo AmbientBrightness / Hue / Saturation; the level's own LevelInfo for zone 0),
     // which the engine starts every lightmap texel from.
     let level_info = pkg.exports.iter().find(|e| pkg.class_name(e.class_index) == "LevelInfo");
@@ -1088,7 +1128,7 @@ pub fn build_level(
         let Some(surf) = model.surfaces.get(node.surf as usize) else { continue };
         // Ladders: any face whose texture sits in a group called "Ladder" (CoreTexMetal.Ladder.ladder_a ...).
         let is_ladder = *ladder_mat.entry(surf.material).or_insert_with(|| {
-            surf.material != 0 && pkg.object_path(surf.material).split('.').rev().nth(1).map_or(false, |g| g.eq_ignore_ascii_case("Ladder"))
+            surf.material != 0 && pkg.object_path(surf.material).split('.').rev().nth(1).is_some_and(|g| g.eq_ignore_ascii_case("Ladder"))
         });
         if is_ladder {
             let pts: Vec<[f64; 3]> = (0..node.num_vertices as usize)
@@ -1220,17 +1260,29 @@ pub fn build_level(
             None => false,
         } };
 
-        let cached = tex_cache
+        let cached = *tex_cache
             .entry(surf.material)
             .or_insert_with(|| {
                 let path = pkg.object_path(surf.material);
-                let Some((t, mips)) = lib.load_gpu(&path, false) else {
+                let Some((t, mips)) = lib.load_gpu(&path, surf.poly_flags & pf::MASKED != 0) else {
                     // Procedural textures (water, fire, wet) have no pixel data in the package: the original
                     // engine animates them at runtime. A WetTexture (the water surfaces) is its SourceTexture
                     // rippled; the viewer's water shader does the rippling, so take the source picture.
                     if let Some(img) = lib.load_wet(&path) {
                         let idx = textures.len();
                         textures.push(img);
+                        return Some((idx, false));
+                    }
+                    // A FireTexture on the BSP (the training's hologram tubes, BobPage.BP_FX_03): a warmed-up frame
+                    // stands in, and dxview animates it by name (as on meshes).
+                    if let Some(mut f) = lib.load_fire(&path) {
+                        for _ in 0..40 {
+                            f.step();
+                        }
+                        let mut data = Vec::new();
+                        f.rgba(&mut data);
+                        let idx = textures.len();
+                        textures.push(TextureImage { name: path.clone(), width: f.width as u32, height: f.height as u32, mips: vec![data], bc1: false, bc3: false });
                         return Some((idx, false));
                     }
                     if path.to_ascii_lowercase().contains("water") {
@@ -1248,12 +1300,30 @@ pub fn build_level(
                 }
                 textures.push(TextureImage { name: path.clone(), width: t.width(), height: t.height(), mips: mips.mips, bc1: mips.bc1, bc3: mips.bc3 });
                 Some((idx, t.masked))
-            })
-            .clone();
+            });
+        // A PF_Masked face on a texture first loaded for an unmasked one (or not flagged bMasked): load it again
+        // masked, in place, so its holes show (chain-link vent grates drew solid).
+        let cached = match cached {
+            Some((i, false)) if surf.poly_flags & pf::MASKED != 0 => {
+                let path = pkg.object_path(surf.material);
+                match lib.load_gpu(&path, true) {
+                    Some((_, mips)) if mips.width == textures[i].width && mips.height == textures[i].height => {
+                        textures[i] = TextureImage { name: path, width: mips.width, height: mips.height, mips: mips.mips, bc1: mips.bc1, bc3: mips.bc3 };
+                        tex_cache.insert(surf.material, Some((i, true)));
+                        Some((i, true))
+                    }
+                    _ => cached,
+                }
+            }
+            c => c,
+        };
         let (tex_idx, tex_masked) = match cached {
             Some((i, m)) => (Some(i), m),
             None => {
                 stats.missing_textures += 1;
+                if std::env::var_os("DXL_MISSINGLOG").is_some() {
+                    eprintln!("MISSING texture {} (surface {}, flags {:#x})", pkg.object_path(surf.material), node.surf, surf.poly_flags);
+                }
                 (None, false)
             }
         };
@@ -1405,10 +1475,24 @@ pub fn build_level(
     let (mesh_actors, actor_list) = actors::build(pkg, classes, &mut lib, &mut textures);
     let nav = nav::NavGraph::build(pkg, classes);
     let movers = {
-        let mut resolve = |material: i32| -> Option<(usize, bool, f32, f32)> {
+        let mut resolve = |material: i32, masked_face: bool| -> Option<(usize, bool, f32, f32)> {
+            // A face drawn PF_Masked needs the picture's see-through texels even when the texture isn't flagged
+            // bMasked (chain-link vent grates drew solid): load it again masked, in place.
+            if masked_face {
+                if let Some(Some((i, false))) = tex_cache.get(&material).copied() {
+                    let path = pkg.object_path(material);
+                    if let Some((_, mips)) = lib.load_gpu(&path, true) {
+                        let old = &textures[i];
+                        if mips.width == old.width && mips.height == old.height {
+                            textures[i] = TextureImage { name: path.clone(), width: mips.width, height: mips.height, mips: mips.mips, bc1: mips.bc1, bc3: mips.bc3 };
+                            tex_cache.insert(material, Some((i, true)));
+                        }
+                    }
+                }
+            }
             let entry = tex_cache.entry(material).or_insert_with(|| {
                 let path = pkg.object_path(material);
-                let (t, mips) = lib.load_gpu(&path, false)?;
+                let (t, mips) = lib.load_gpu(&path, masked_face)?;
                 let idx = textures.len();
                 let (lw, lh) = TexLib::logical_size(&t);
                 logical.insert(idx, (lw as f32, lh as f32));
@@ -1500,6 +1584,7 @@ pub fn build_level(
         movers,
         nav,
         zone_water,
+        zone_pain,
         zone_sky,
         sky_area,
         lights,

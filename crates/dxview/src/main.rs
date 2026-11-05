@@ -1,4 +1,6 @@
 //! dxview: free-fly viewer for Deus Ex levels, reading the user's own game install at runtime.
+// Bevy systems take many parameters and long query types by nature; the lints that count them are noise here.
+#![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::needless_range_loop, clippy::doc_lazy_continuation)]
 use bevy::{
     app::AppExit,
     asset::RenderAssetUsages,
@@ -17,6 +19,9 @@ use bevy::{
 mod env;
 mod queue;
 mod util;
+mod uinode;
+mod sprite;
+mod stamina;
 mod abilities;
 mod weather;
 mod shadowlight;
@@ -127,13 +132,18 @@ mod trash;
 mod triggers;
 mod smartai;
 mod achievements;
+#[cfg(test)]
+mod achtest;
 mod diegetic;
 mod skeletal;
 mod ragdoll;
 mod gore;
+mod viewblood;
+mod framecap;
+mod welcome;
 mod bodyfx;
 mod healui;
-mod transcended;
+mod optfixes;
 mod alertui;
 mod hudfade;
 mod upscale;
@@ -147,6 +157,8 @@ mod gpudrive;
 mod batches;
 mod scope;
 mod seethrough;
+mod paddiagram;
+mod desktop;
 mod glass;
 
 use actors::{Blockers, Deco, World};
@@ -161,7 +173,7 @@ pub struct LevelRes(pub Level);
 
 /// Materials whose UVs scroll over time (auto-panning surfaces, water).
 #[derive(Resource, Default)]
-struct UvScroll(Vec<(Handle<StandardMaterial>, Vec2, bool)>, Vec<(Handle<shadowlight::BspMaterial>, Vec2)>);
+struct UvScroll(Vec<(Handle<StandardMaterial>, Vec2, bool)>);
 
 #[derive(Component)]
 pub struct FlyCam {
@@ -672,7 +684,7 @@ fn main() {
         }
         // SecondRevision's height maps for New Vision's textures: only while New Vision's textures are on (they are
         // made from them; SecondRevision's terms). Looked for where SecondRevision installs them and beside the exe.
-        if let Some(nv) = unreal_pkg::mods::active("newvision").filter(|_| settings::get("HDTextures") > 0.5) {
+        if let Some(nv) = unreal_pkg::mods::active("newvision").filter(|_| setting!("HDTextures") > 0.5) {
             let game = PathBuf::from(&root);
             let mut hdirs = vec![
                 game.join("Revision").join("NewVision").join("Textures"),
@@ -689,10 +701,9 @@ fn main() {
             }
         }
     }
-    unreal_pkg::paths::set_hd_textures_on(settings::get("HDTextures") > 0.5);
-    unreal_pkg::paths::set_picks_on(settings::get("ConfixFixes") > 0.5);
+    unreal_pkg::paths::set_hd_textures_on(setting!("HDTextures") > 0.5);
     consys::warm_db(PathBuf::from(&root).join("System"));
-    dx_level::skincolor::TR_FIXES.store(crate::transcended::fixes(), std::sync::atomic::Ordering::Relaxed);
+    dx_level::skincolor::OPT_FIXES.store(crate::optfixes::fixes(), std::sync::atomic::Ordering::Relaxed);
     hdtp::apply_dds_filter();
     travel::init_lddp();
     hdtp::init(&PathBuf::from(&root));
@@ -752,12 +763,12 @@ fn main() {
                 title: "DX RUST".into(),
                 // Settings > Display: the saved resolution and display mode (Windowed by default).
                 resolution: menus::RESOLUTIONS
-                    .get(settings::get("Resolution").max(-1.0) as isize as usize)
+                    .get(setting!("Resolution").max(-1.0) as isize as usize)
                     .copied()
                     .unwrap_or((1600, 900))
                     .into(),
-                mode: menus::start_window_mode(settings::get("DisplayMode")),
-                present_mode: menus::present_mode(settings::get("VSync")),
+                mode: menus::start_window_mode(setting!("DisplayMode")),
+                present_mode: menus::present_mode(setting!("VSync")),
                 ..default()
             }),
             ..default()
@@ -807,6 +818,7 @@ fn main() {
         .add_systems(Update, (loader::settle_system, loader::loading_screen_system).chain())
         .add_systems(Startup, fps::spawn_fps_text)
         .add_systems(Update, fps::fps_system)
+        .add_systems(Update, movers::mover_riders_system.after(movers::tick_movers).before(actors::deco_physics))
         .add_systems(
             Update,
             (
@@ -949,7 +961,7 @@ fn main() {
         )
         .add_systems(Update, keybinds::bind_menu_system.before(cursor_grab))
         .add_systems(Last, drop_texture_pixels.run_if(texture_pixels_due))
-        .add_systems(Last, (prof::prof_report_system, prof::scene_stats_system, prof::prof_ab_system, prof::prof_features_system, prof::mesh_owner_system, prof::camera_report_system, prof::bounds_report_system, prof::census_system))
+        .add_systems(Last, (prof::prof_report_system, prof::scene_frames_system, prof::scene_stats_system, prof::prof_ab_system, prof::prof_features_system, prof::mesh_owner_system, prof::camera_report_system, prof::bounds_report_system, prof::census_system))
         .init_resource::<consys::ConSetup>()
         .init_resource::<triggers::Triggers>()
         .init_resource::<logic::LogicActors>()
@@ -994,6 +1006,7 @@ fn main() {
         .add_plugins(trees::TreesPlugin)
         .add_systems(PostUpdate, upscale::upscale_system.before(bevy::camera::CameraUpdateSystems))
         .add_systems(Update, achievements::achievements_system.after(ai::npc_system))
+        .add_systems(Update, paddiagram::first_time_system)
         .add_systems(First, (diegetic::restore_system, thirdperson::restore_system).chain())
         .add_systems(PostUpdate, (thirdperson::place_system, diegetic::place_system).chain().before(bevy::transform::TransformSystems::Propagate).before(bevy::camera::CameraUpdateSystems))
         // Reflections from the camera as it is drawn: after the third-person / terminal camera moves (in Update
@@ -1011,6 +1024,7 @@ fn main() {
         .add_systems(PostUpdate, skyfollow::follow_system.after(mirror::mirror_system).before(bevy::transform::TransformSystems::Propagate).before(bevy::camera::CameraUpdateSystems))
         .add_systems(Update, diegetic::diegetic_system.after(computers::computer_system).after(menus::menu_system))
         .add_systems(Update, diegetic::hide_glass_system.after(diegetic::diegetic_system))
+        .add_systems(Update, diegetic::standby_system.after(diegetic::diegetic_system))
         .add_systems(Update, (elements::shock_system.before(ai::npc_system), elements::fire_system.after(ai::npc_system)))
         .add_systems(Update, aimmode::aim_mode_system.after(hud::aim_system).before(weapons::weapon_system).before(hud::crosshair_system))
         .add_systems(Update, (eggs::matrix_system, eggs::warren_system))
@@ -1058,10 +1072,9 @@ fn main() {
             (
                 bodyfx::fp_body_system.after(skeletal::mirror_skel_system),
                 bodyfx::glow_system.after(bodyfx::fp_body_system),
-                bodyfx::heal_label_system,
                 healui::heal_ui_system.before(weapons::weapon_system),
-                transcended::weapon_pointing_system.before(ai::npc_system),
-                transcended::unconscious_death_system.after(explosion::explosion_system),
+                optfixes::weapon_pointing_system.before(ai::npc_system),
+                optfixes::unconscious_death_system.after(explosion::explosion_system),
                 bodyfx::wounds_system.after(ai::npc_system),
             ),
         )
@@ -1084,6 +1097,8 @@ fn main() {
                 skeletal::spawn_system.after(gpuanim::gpuanim_setup).before(actors::animate),
                 skeletal::pose_system.after(actors::animate).before(ai::npc_weapon_models),
                 gore::gore_system.after(ai::npc_system),
+                bodyfx::bleed_system.after(bodyfx::wounds_system).before(gore::gore_system),
+                viewblood::view_blood_system.after(gore::gore_system).after(weapons::weapon_system),
             ),
         )
         .add_systems(Startup, classic_hud::setup_hud_shader)
@@ -1188,6 +1203,8 @@ fn main() {
         .add_systems(Update, classic_hud::ui_gamma_system)
         .add_systems(First, save::save_first_system)
         .add_systems(Last, save::save_last_system)
+        // The frame rate cap waits last of all (framecap.rs).
+        .add_systems(Last, framecap::frame_cap_system.after(save::save_last_system))
         .init_resource::<menus::Menus>()
         .add_systems(
             Update,
@@ -1422,7 +1439,7 @@ fn setup(
         let mut want: Vec<usize> = level
             .batches
             .iter()
-            .filter(|b| !b.sky && b.mirror.is_none() && matches!(b.class, SurfaceClass::Opaque | SurfaceClass::Masked))
+            .filter(|b| !b.sky && b.mirror.is_none() && b.class == SurfaceClass::Opaque)
             .filter_map(|b| b.texture)
             .collect();
         want.sort_unstable();
@@ -1474,8 +1491,10 @@ fn setup(
                     },
                     ..default()
                 });
-                // Relief maps for the solid world (remastered lighting).
-                if !b.sky && b.mirror.is_none() && matches!(b.class, SurfaceClass::Opaque | SurfaceClass::Masked) {
+                // Relief maps for the solid world (remastered lighting). Not on masked faces (ladders, grates, chain
+                // link): parallax slid the picture off its holes - the ladder no longer lined up with itself - and the
+                // depth prepass filled the holes in.
+                if !b.sky && b.mirror.is_none() && b.class == SurfaceClass::Opaque {
                     if let Some(t) = b.texture.map(|i| &level.textures[i]) {
                         if let Some(mut m) = materials.get_mut(&h) {
                             let r = b.texture.and_then(|i| relief_maps.get(&i).cloned());
@@ -1494,9 +1513,11 @@ fn setup(
                 h
             })
             .clone();
+        // The level's surfaces live on the GPU only: nothing reads their Bevy meshes back (the game works from the
+        // level's own batches), so the main world's copy of every vertex is dropped once uploaded.
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
+            RenderAssetUsages::RENDER_WORLD,
         );
         if b.class == SurfaceClass::Water && !b.sky {
             sheet_pts.extend_from_slice(&b.positions);
@@ -1532,6 +1553,10 @@ fn setup(
         let glass_img = (b.class == SurfaceClass::Translucent && !b.sky && b.mirror.is_none())
             .then(|| b.texture.and_then(|i| glass_imgs.get(&i).map(|h| (i, h.clone()))))
             .flatten();
+        if glass_img.is_some() {
+            // A plain StandardMaterial multiplies the vertex colour in: the light ids made the pane blinding white.
+            mesh.remove_attribute(Mesh::ATTRIBUTE_COLOR);
+        }
         let mut e = match b.mirror {
             // Modern Glass: a frosted pane.
             _ if glass_img.is_some() => {
@@ -1564,7 +1589,7 @@ fn setup(
                 // Water isn't lightmapped: the shadow pairs (shadowlight.rs) would black it out under a shadow.
                 // On the mirror faces' layer: only the world camera draws water (the reflection cameras would only clip
                 // it away again).
-                commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(wm), bevy::light::NotShadowReceiver, RenderLayers::layer(mirror::LAYER)))
+                commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(wm), bevy::light::NotShadowReceiver, bevy::light::NotShadowCaster, RenderLayers::layer(mirror::LAYER)))
             }
             // PF_Mirrored: the same surface with the reflection added (mirror.rs).
             Some(plane) => {
@@ -1591,7 +1616,7 @@ fn setup(
                         if let Some(Some((d, scale))) = b.texture.and_then(|i| level.texture_detail.get(i)) {
                             bm.extension.detail = Some(handles[*d].clone());
                             bm.extension.params.q.y = *scale;
-                            bm.extension.params.q.z = if settings::get("DetailTextures") > 0.5 { 1.0 } else { 0.0 };
+                            bm.extension.params.q.z = if setting!("DetailTextures") > 0.5 { 1.0 } else { 0.0 };
                         }
                         if let Some((mask, lights)) = relight_imgs.as_ref() {
                             bm.extension.mask = Some(mask.clone());
@@ -1684,12 +1709,34 @@ fn setup(
     }
     // Modern Water's wave grid over the map's water (water::grid_mesh), cut to it by the mask.
     {
-        let sheets: Vec<(&[[f32; 3]], &[u32])> = level
+        // Only water under the open sky gets the waves: indoor water (the pool under Castle Clinton, the subway's)
+        // stays a flat sheet, which the water shader draws with its own lit picture (water::is_indoor) - under the
+        // grid there it came out black (a dark room's reflection over an unlit body).
+        let outdoor: Vec<(Vec<[f32; 3]>, Vec<u32>)> = level
             .batches
             .iter()
             .filter(|b| b.class == SurfaceClass::Water && !b.sky)
-            .map(|b| (&b.positions[..], &b.indices[..]))
+            .map(|b| {
+                let idx: Vec<u32> = b
+                    .indices
+                    .chunks_exact(3)
+                    .filter(|t| {
+                        let c = t.iter().fold([0.0f32; 3], |a, &i| {
+                            let p = b.positions[i as usize];
+                            [a[0] + p[0] / 3.0, a[1] + p[1] / 3.0, a[2] + p[2] / 3.0]
+                        });
+                        let u = dx_level::bevy_to_ue(c);
+                        let z = level.collision.zone_at(glam::DVec3::new(u[0] as f64, u[1] as f64, u[2] as f64 + 8.0));
+                        z <= 0 || level.zone_sky.get(z as usize).copied().unwrap_or(false)
+                    })
+                    .flatten()
+                    .copied()
+                    .collect();
+                (b.positions.clone(), idx)
+            })
+            .filter(|(_, i)| !i.is_empty())
             .collect();
+        let sheets: Vec<(&[[f32; 3]], &[u32])> = outdoor.iter().map(|(p, i)| (&p[..], &i[..])).collect();
         let ring = ocean_geom.as_ref().map(|(p, i)| (&p[..], &i[..]));
         if let Some((img, rect, heights)) = water::build_mask(&sheets, ring) {
             let mask = images.add(img);
@@ -1783,6 +1830,8 @@ fn setup(
         images: Default::default(),
         materials: Default::default(),
         fire: Vec::new(),
+        sprites: Default::default(),
+        shared_parts: Default::default(),
     };
     hud::spawn_crosshair(&mut commands, &mut runtime_assets, &mut images);
     hud::spawn_scope_overlay(&mut commands, &mut runtime_assets, &mut images);
@@ -1832,8 +1881,12 @@ fn setup(
                 min_filter: ImageFilterMode::Linear,
                 ..default()
             });
-            if let Some(mut im) = images.get_mut(&handles[i]) {
-                *im = img;
+            // (Level textures are made for the render world only, so by now the main world may no longer hold
+            // this one: insert it again, kept on both sides, or the fire texture system has nothing to write -
+            // the Classic water stood still.)
+            let _ = images.insert(&handles[i], img);
+            if env_on!("DXVIEW_FIRELOG") {
+                println!("FIRELOG level fire {} = {}", runtime_assets.fire.len(), t.name);
             }
             runtime_assets.fire.push((f, handles[i].clone()));
         }
@@ -2070,7 +2123,7 @@ fn fly(
     let mut test_forward = false;
     let mut test_dt = None;
     let mut test_frob = false;
-    let test_crouch = walk_test.as_ref().map_or(false, |w| w.crouch);
+    let test_crouch = walk_test.as_ref().is_some_and(|w| w.crouch);
     if let Some(wt) = walk_test.as_deref_mut() {
         if wt.t == 0.0 {
             player.noclip = false;
@@ -2114,7 +2167,7 @@ fn fly(
     let free_cam = thirdperson::free();
     let mut looked = false;
     // While the Diegetic Healing overlay is up, the mouse / right stick move its medkit cursor instead.
-    if cursor.grab_mode == CursorGrabMode::Locked && !healui::active() {
+    if cursor.grab_mode == CursorGrabMode::Locked && !healui::active() && !computers::open() && !diegetic::virtual_cursor() {
         // MouseSensitivity (default 3) scales the look; Invert Mouse flips the pitch.
         let k = 0.0022 * crate::settings::mouse_sensitivity() / 3.0;
         let inv = if crate::settings::invert_mouse() { -1.0 } else { 1.0 };
@@ -2311,7 +2364,7 @@ fn fly(
                     let climbing = player.body.physics == Physics::Climbing;
                     // Enhancement "Grab Ladders": Use takes hold, Jump lets go (pushing off), and on the ladder
                     // forward / back climb up / down; otherwise walking into one does nothing special.
-                    let grab = settings::get("LadderGrab") > 0.5;
+                    let grab = setting!("LadderGrab") > 0.5;
                     frobui::LADDER_GRAB.store(grab && !climbing, std::sync::atomic::Ordering::Relaxed);
                     if grab && !climbing {
                         if mouse.just_pressed(MouseButton::Right) {
@@ -2349,15 +2402,57 @@ fn fly(
                     if player.body.physics == Physics::Climbing {
                         player.body.physics = Physics::Falling;
                     }
+                    // Grab Ladders: "Climb Ladder" is highlighted (in reach along the view, not yet touching): Use
+                    // steps up to it and takes hold.
+                    if setting!("LadderGrab") > 0.5
+                        && frobui::LADDER_AIM.load(std::sync::atomic::Ordering::Relaxed)
+                        && mouse.just_pressed(MouseButton::Right)
+                    {
+                        let fv = tf.forward().as_vec3();
+                        let dir = DVec3::new(fv.x as f64, fv.z as f64, fv.y as f64).normalize_or_zero();
+                        let eye_ue = dx_level::bevy_to_ue(tf.translation.to_array());
+                        let eye = DVec3::new(eye_ue[0] as f64, eye_ue[1] as f64, eye_ue[2] as f64);
+                        let hit = level.0.ladders.iter().filter_map(|l| {
+                            let n = DVec3::from_array(l.normal);
+                            let den = n.dot(dir);
+                            if den.abs() < 1e-4 {
+                                return None;
+                            }
+                            let t = (l.dist - n.dot(eye)) / den;
+                            (t > 0.0 && t < 112.0 && l.touches((eye + dir * t).to_array(), 0.0, 0.0, 1.0)).then_some((t, n, l))
+                        }).min_by(|a, b| a.0.total_cmp(&b.0));
+                        if let Some((t, n, l)) = hit {
+                            let p = eye + dir * t;
+                            let n = if n.dot(c - p) < 0.0 { -n } else { n };
+                            let nf = DVec3::new(n.x, n.y, 0.0).normalize_or_zero();
+                            let mut to = DVec3::new(p.x, p.y, c.z) + nf * (r + 1.0);
+                            // Not below the ladder's foot or above its top.
+                            let (zlo, zhi) = l.points.iter().fold((f64::MAX, f64::MIN), |a, q| (a.0.min(q[2]), a.1.max(q[2])));
+                            to.z = to.z.clamp(zlo + hh, (zhi + hh).max(zlo + hh));
+                            let world = World {
+                                level: &level.0,
+                                blockers: &blockers.list,
+                                ignore: None,
+                                pushable: Some(&blockers.pushable_mass),
+                                movers: Some(&movers_res.rt),
+                            };
+                            if imsim_core::movement::CollisionWorld::trace(&world, c, to, DVec3::new(r, r, hh)).fraction >= 1.0 {
+                                player.body.location = to;
+                                player.body.physics = Physics::Climbing;
+                                player.body.velocity = DVec3::ZERO;
+                            }
+                        }
+                    }
                 }
             }
+            frobui::LADDER_HELD.store(player.body.physics == Physics::Climbing, std::sync::atomic::Ordering::Relaxed);
         }
         let carried_mass = carrying.held.as_ref().map(|h| h.mass).unwrap_or(0.0);
         // Can't jump with anything heavier than 20 in your arms; carrying slows you by Mass * 2.
         // DoJump: nothing heavier than 20 in your arms. GMDX fix (setting FixCarryJump): the Muscle aug, which the
         // original read only after giving up, lets you jump with up to (CurrentLevel + 3) x 50 (150-300).
         let carry_limit = match crate::abilities::aug_level("AugMuscle") {
-            Some(l) if crate::settings::get("FixCarryJump") > 0.5 && crate::abilities::aug_active("AugMuscle") => {
+            Some(l) if setting!("FixCarryJump") > 0.5 && crate::abilities::aug_active("AugMuscle") => {
                 (l as f64 + 3.0) * 50.0
             }
             _ => 20.0,
@@ -2470,7 +2565,7 @@ fn fly(
                     < 1.0;
                 (!blocked && floor).then_some(to)
             };
-            if crate::settings::get("SmoothLean") > 0.5 {
+            if setting!("SmoothLean") > 0.5 {
                 // Enhancement (Smooth Leaning): eases in and out instead of the fixed 80 units/s slide, works while
                 // crouch-walking, and where the body can't slide any further (a wall at the corner) the eyes go on
                 // as far as there's room for them, so you can peek past it.
@@ -2562,10 +2657,27 @@ fn fly(
         params.ground_speed *= leg_speed;
         // Modern Aiming: walking pace down the sights.
         params.ground_speed *= crate::aimmode::speed_mult();
-        // A stick push decides. Otherwise Always Run: Shift walks; off, you walk unless Shift is held.
-        let walk_key = stick_walk.unwrap_or_else(|| keys.pressed(KeyCode::ShiftLeft) != !crate::settings::always_run());
-        if walk_key || player.crouched {
-            params.ground_speed *= 0.3;
+        if crate::stamina::enabled() {
+            // Sprint (stamina.rs): the run pace is the normal pace; Walk held (or the pad's stick click) sprints.
+            let can = !player.crouched
+                && !player.swimming
+                && player.body.physics == Physics::Walking
+                && wish.length() > 0.1
+                && carrying.held.is_none()
+                && weapons_res.corpse.is_none();
+            let sprint = crate::stamina::tick(time.delta_secs(), keys.pressed(KeyCode::ShiftLeft), can);
+            // A light push of the pad's stick walks.
+            if player.crouched || stick_walk == Some(true) {
+                params.ground_speed *= 0.3;
+            } else if sprint {
+                params.ground_speed *= crate::stamina::SPRINT_MULT;
+            }
+        } else {
+            // A stick push decides. Otherwise Always Run: Shift walks; off, you walk unless Shift is held.
+            let walk_key = stick_walk.unwrap_or_else(|| keys.pressed(KeyCode::ShiftLeft) != !crate::settings::always_run());
+            if walk_key || player.crouched {
+                params.ground_speed *= 0.3;
+            }
         }
         // WaterSpeed = Default.WaterSpeed x SkillSwimming (untrained 1.0).
         params.water_speed =
@@ -2893,6 +3005,7 @@ fn overlay_update(
     player: Res<Player>,
     mut text: Single<(&mut Text, &mut Visibility), With<Overlay>>,
     mut show: Local<Option<bool>>,
+    mut refresh: Local<f32>,
 ) {
     let _prof = crate::prof::scope("main::overlay_update");
     let on = show.get_or_insert(true);
@@ -2901,22 +3014,17 @@ fn overlay_update(
     }
     // The corner readout is a Debug Mode feature (Settings > Enhancements).
     let debug = crate::settings::debug_mode() || env_on!("DXVIEW_SHOT");
-    let vis = if *on && debug && !inventory_screen::screen_open() && !consys::third_person() && !cinematic::active() {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    // Lean Updates (perf.rs): while hidden the readout is left alone (rewriting it re-lays out the text every frame).
-    if perf::lean_updates() {
-        if *text.1 != vis {
-            *text.1 = vis;
-        }
-        if vis == Visibility::Hidden {
-            return;
-        }
-    } else {
-        *text.1 = vis;
+    let shown = *on && debug && !inventory_screen::screen_open() && !consys::third_person() && !cinematic::active();
+    text.1.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
+    // Hidden: nothing to lay out. Shown: the readout refreshes 5 times a second (text shaping isn't free).
+    if !shown {
+        return;
     }
+    *refresh -= time.delta_secs();
+    if *refresh > 0.0 {
+        return;
+    }
+    *refresh = 0.2;
     let s = &level.0.stats;
     let p = cam.0.translation;
     let mode = if player.noclip {
@@ -2951,12 +3059,10 @@ fn uv_scroll(
     time: Res<Time>,
     scroll: Res<UvScroll>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    bsp_mats: ResMut<Assets<shadowlight::BspMaterial>>,
     used: Query<&MeshMaterial3d<StandardMaterial>>,
     mut in_use: Local<(u64, std::collections::HashSet<AssetId<StandardMaterial>>, u32)>,
 ) {
     let _prof = crate::prof::scope("main::uv_scroll");
-    let _ = bsp_mats;
     let t = time.elapsed_secs();
     // The level's own surfaces pan in their shader (BspShadowParams.u). These are the plain materials they were
     // made from: only the ones something still draws are moved (changing a material every frame costs the render

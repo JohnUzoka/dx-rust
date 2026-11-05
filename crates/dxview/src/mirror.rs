@@ -121,6 +121,13 @@ pub struct Mirrors {
     pub slots: Vec<Slot>,
     /// Some plane is reflecting (JC's body is drawn for the reflections then).
     pub active: Option<usize>,
+    /// Game time a water sheet was last in the main view (the water reflection runs only while one is, with
+    /// half a second's grace: the camera is a whole extra render of the scene).
+    pub water_seen: f32,
+    /// When each plane was last wanted: a plane keeps its slot for HOLD seconds after (a reflection camera that
+    /// comes back on has the level's GPU-culled surfaces re-filed - gpudrive::refile_system - a hitch; panning past
+    /// mirrors and water switched them on and off and the cut scenes juddered).
+    pub wanted_at: std::collections::HashMap<usize, f32>,
 }
 
 /// A reflection camera (world, or the sky room with `sky`) of slot `0`.
@@ -300,6 +307,9 @@ pub fn spawn_camera(commands: &mut Commands, mirrors: &Mirrors) {
 
 /// Each frame: pick the planes to reflect, place their cameras, keep their images the window's size and tell the
 /// materials which plane shows which image.
+/// How long a reflection keeps its camera after it stops being wanted (seconds).
+const HOLD: f32 = 6.0;
+
 #[allow(clippy::type_complexity)]
 pub fn mirror_system(
     mut mirrors: ResMut<Mirrors>,
@@ -310,10 +320,20 @@ pub fn mirror_system(
     sky_main: Query<&Projection, (With<crate::SkyCam>, Without<MirrorCam>)>,
     mut cams: Query<(&MirrorCam, &mut Camera, &mut Transform, &mut Projection, &mut RenderTarget, &mut RenderLayers)>,
     mut water_mats: ResMut<Assets<crate::water::WaterMaterial>>,
+    water_sheets: Query<&ViewVisibility, (With<MeshMaterial3d<crate::water::WaterMaterial>>, Without<crate::water::WaterGrid>, Without<crate::water::OceanRing>, Without<crate::water::WaterBacking>)>,
+    time: Res<Time<Real>>,
 ) {
     if mirrors.planes.is_empty() {
         return;
     }
+    let now = time.elapsed_secs();
+    if water_sheets.iter().any(|v| v.get()) {
+        mirrors.water_seen = now;
+    }
+    // In a cut scene or conversation nothing is let go: every camera coming back on re-files the level's surfaces
+    // (gpudrive::refile_system), a hitch that showed as jitter in the camera moves.
+    let hold = if crate::cinematic::active() || crate::consys::third_person() { f32::MAX } else { HOLD };
+    let water_wanted = mirrors.water_seen > 0.0 && now - mirrors.water_seen < hold;
     if crate::credits::open() {
         for (_, mut cam, ..) in &mut cams {
             cam.is_active = false;
@@ -341,7 +361,7 @@ pub fn mirror_system(
         // Water goes on past its sheet (the open sea shares its material): reflect it whenever the eye is above it,
         // or the reflection pops in and out with the view's pitch.
         if p.water {
-            return eye.y > p.d;
+            return eye.y > p.d && water_wanted;
         }
         let (lo, hi) = (p.min - Vec3::splat(0.5), p.max + Vec3::splat(0.5));
         let inside = eye.cmpge(lo).all() && eye.cmple(hi).all();
@@ -373,7 +393,7 @@ pub fn mirror_system(
         .planes
         .iter()
         .enumerate()
-        .filter(|(_, p)| (!p.water || crate::water::modern()) && (p.n.dot(eye) - p.d).abs() >= 0.01 && visible(p))
+        .filter(|(_, p)| (!p.water || crate::water::planar()) && (p.n.dot(eye) - p.d).abs() >= 0.01 && visible(p))
         .map(|(i, p)| (i, eye.clamp(p.min, p.max).distance(eye)))
         .filter(|(_, d)| *d <= 40.0)
         .collect();
@@ -391,7 +411,18 @@ pub fn mirror_system(
     // At most two reflections at once (each is the whole scene drawn again); DXVIEW_MIRROR_SLOTS=n for comparisons.
     let max = env_val!("DXVIEW_MIRROR_SLOTS").map(str::to_owned).and_then(|v| v.parse().ok()).unwrap_or(2).min(SLOTS);
     near.truncate(max);
-    let want: Vec<usize> = near.iter().map(|x| x.0).collect();
+    let mut want: Vec<usize> = near.iter().map(|x| x.0).collect();
+    for p in &want {
+        mirrors.wanted_at.insert(*p, now);
+    }
+    // Planes wanted a moment ago stay in their slots while there's room (no off-and-on).
+    for s in mirrors.slots.iter() {
+        if let Some(p) = s.plane {
+            if !want.contains(&p) && want.len() < max && mirrors.wanted_at.get(&p).is_some_and(|t| now - t < hold) {
+                want.push(p);
+            }
+        }
+    }
     // DXVIEW_PROF: a line when the reflected planes change, for the pop-in check. A plane gets a reflection only within 40 m
     // and in view; until then its face shows its texture, or the 16x16 placeholder.
     if crate::prof::on() {
@@ -568,6 +599,8 @@ pub struct MirrorBody {
     held: Option<(String, Entity, f32, Vec<dx_level::actors::MeshPart>, Vec<Handle<Mesh>>)>,
     /// augmentique::generation() when built (a new outfit rebuilds him).
     gen: u64,
+    /// Seconds crouched (0 standing): Human.PlayDuck drops into the crouch once (Crouch), then holds CrouchWalk.
+    crouch_t: f32,
 }
 
 #[derive(Resource, Default)]
@@ -612,7 +645,12 @@ pub fn mirror_body_system(
     // Augmentique's outfits screen shows him too (outfit_view.rs).
     let outfits = crate::outfit_view::open();
     // Third person (thirdperson.rs): the main camera draws him too.
-    let show = (outfits || crate::thirdperson::active() || crate::bodyfx::fp_on() || mirrors.active.is_some() && (test || !player.noclip)) && !crate::consys::third_person() && !crate::cinematic::active() && !ph.dead;
+    // A third-person conversation shows him too when he has a rebuilt body (consys then leaves out its vertex puppet).
+    let conv = crate::consys::third_person() && crate::skeletal::enabled() && crate::skeletal::body_for(&crate::travel::jc_mesh()).is_some();
+    let show = (outfits || conv || crate::thirdperson::active() || crate::bodyfx::fp_on() || mirrors.active.is_some() && (test || !player.noclip))
+        && (!crate::consys::third_person() || conv)
+        && !crate::cinematic::active()
+        && !ph.dead;
     if let Some(b) = body.0.as_ref() {
         if b.gen != crate::augmentique::generation() {
             commands.entity(b.root).despawn();
@@ -622,7 +660,7 @@ pub fn mirror_body_system(
     if !show {
         if let Some(b) = body.0.as_ref() {
             if let Ok(mut v) = vis.get_mut(b.root) {
-                *v = Visibility::Hidden;
+                v.set_if_neq(Visibility::Hidden);
             }
         }
         return;
@@ -650,6 +688,7 @@ pub fn mirror_body_system(
                     root,
                     mesh: std::sync::Arc::new({
                         let mut am = dx_level::actors::anim_mesh(&lm);
+                        dx_level::actors::deepen_crouch(&mut am);
                         dx_level::actors::synth_crouch_walk(&mut am);
                         am
                     }),
@@ -661,6 +700,7 @@ pub fn mirror_body_system(
                     lit_at: -1.0,
                     held: None,
                     gen: crate::augmentique::generation(),
+                    crouch_t: 0.0,
                 });
             }
             None => {
@@ -677,7 +717,7 @@ pub fn mirror_body_system(
     }
     let Some(b) = body.0.as_mut() else { return };
     if let Ok(mut v) = vis.get_mut(b.root) {
-        *v = Visibility::Inherited;
+        v.set_if_neq(Visibility::Inherited);
     }
     let yaw = cams.iter().next().map_or(0.0, |c| c.0.yaw);
     // FlyCam yaw 0 looks along Bevy -Z (Unreal -Y): JC's Unreal yaw is the view's.
@@ -728,6 +768,17 @@ pub fn mirror_body_system(
     let aiming = ranged && !reloading && (keys.pressed(KeyCode::KeyZ) || keys.pressed(KeyCode::BracketLeft) || crate::aimmode::ads() > 0.3);
     let shooting = firing || aiming;
     // (sequence, loops: else held on its last frame / frame 0 for aim poses, rate x)
+    if player.crouched {
+        b.crouch_t += time.delta_secs();
+    } else {
+        b.crouch_t = 0.0;
+    }
+    let crouch_len = b
+        .mesh
+        .seqs
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case("Crouch"))
+        .map_or(0.0, |s| s.num_frames.max(1) as f32 / s.rate.max(1.0));
     let (want, looped, rate_k): (&str, bool, f32) = if player.swimming {
         (if firing { "TreadShoot" } else { "Tread" }, true, 1.0)
     } else if falling {
@@ -743,8 +794,14 @@ pub fn mirror_body_system(
             // PlayCrawling: LoopAnim('CrouchWalk'), its legs in step with the ground covered. Meshes without it
             // (the women's GFM_Trench: Lay D Denton) get one made up (dx_level::actors::synth_crouch_walk).
             ("CrouchWalk", true, (speed as f32 / (player.params.ground_speed as f32 * 0.3).max(1.0)).clamp(0.6, 2.0))
-        } else {
+        } else if b.crouch_t < crouch_len && !b.seq.starts_with("CrouchWalk") && !b.seq.starts_with("CrouchShoot") {
+            // PlayDuck from standing: PlayAnim('Crouch') - the drop - once.
             ("Crouch", false, 1.0)
+        } else {
+            // Crouched and still: Human.PlayDuck / TweenToWaiting's TweenAnim('CrouchWalk'): its first frame, held
+            // (the end of Crouch is a lower, folded pose than the crouch he walks in - standing on it looked like
+            // he'd sat on his heels).
+            ("CrouchWalk", false, 1.0)
         }
     } else if reloading && ranged && !moving {
         ("Reload", true, 1.0)
@@ -789,8 +846,10 @@ pub fn mirror_body_system(
         Some(f) => (f, true, 1.0),
         None => (want, looped, rate_k),
     };
-    // Aim pose: frame 0 of Shoot / CrouchShoot held while aiming and not firing.
-    let aim_pose = aiming && !firing && (!moving || player.crouched) && !falling && !player.swimming;
+    // Aim pose: frame 0 of Shoot / CrouchShoot held while aiming and not firing; frame 0 of CrouchWalk crouched and
+    // still.
+    let crouch_still = want == "CrouchWalk" && !looped;
+    let aim_pose = (aiming && !firing && (!moving || player.crouched) && !falling && !player.swimming) || crouch_still;
     if env_on!("DXVIEW_BODYLOG") {
         static T: std::sync::Mutex<f32> = std::sync::Mutex::new(0.0);
         if let Ok(mut t) = T.lock() {

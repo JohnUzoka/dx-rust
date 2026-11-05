@@ -50,6 +50,8 @@ pub struct Trash {
     rnd: f64,
     time: f32,
     stopped: bool,
+    /// The one-frame Still clip has been posed (nothing to pose again).
+    posed_still: bool,
     life: f32,
     die_in: f32,
     height: f64,
@@ -162,25 +164,7 @@ fn pose(
     parts: &[MeshPart],
     handles: &[Handle<Mesh>],
 ) {
-    let lean = crate::perf::lean_updates();
-    let f = clip.frame();
-    for (pi, hm) in handles.iter().enumerate() {
-        if let Some(mut mm) = meshes.get_mut(hm) {
-            let ids = &parts[pi].vert_ids;
-            let pos = ids
-                .iter()
-                .map(|&v| ue_to_bevy(mesh.sample(clip.start, clip.frames, f, v as usize)));
-            // Lean Updates: into the positions the mesh already has, not a new array.
-            match mm.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
-                Some(bevy::mesh::VertexAttributeValues::Float32x3(dst)) if lean && dst.len() == ids.len() => {
-                    for (d, p) in dst.iter_mut().zip(pos) {
-                        *d = p;
-                    }
-                }
-                _ => mm.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.collect::<Vec<[f32; 3]>>()),
-            }
-        }
-    }
+    crate::actors::pose_parts_in_place(meshes, mesh, clip.start, clip.frames, clip.frame(), parts, handles);
 }
 
 /// Lean Updates: was this mesh (any of its parts) drawn last frame? Like actors::animate, a critter nobody saw
@@ -332,6 +316,7 @@ pub fn trash_system(
             rnd: 1.0,
             time: 0.0,
             stopped: false,
+            posed_still: false,
             life: fprop(&d, "LifeSpan", 30.0) as f32,
             die_in: f32::MAX,
             height: fprop(&d, "CollisionHeight", 6.0),
@@ -397,12 +382,15 @@ pub fn trash_system(
             }
             t.clip.t += dt;
         }
-        if drawn(e, &kids, &seen) {
+        // Paper at rest holds a one-frame clip: posed once, then left alone. Lean Updates: only paper drawn last
+        // frame is posed (its clock still runs).
+        if drawn(e, &kids, &seen) && (t.clip.frames > 1 || !t.posed_still) {
+            t.posed_still = t.clip.frames <= 1;
             pose(&mut meshes, &t.mesh, &t.clip, &t.parts, &t.handles);
         }
         let rot = to_rot(t.rot);
-        tf.translation = Vec3::from(ue_to_bevy(t.pos.as_vec3().to_array()));
-        tf.rotation = quat_of(rot);
+        // (Written only when it moved: paper at rest stays as it was.)
+        tf.set_if_neq(Transform { translation: Vec3::from(ue_to_bevy(t.pos.as_vec3().to_array())), rotation: quat_of(rot), ..*tf });
         if t.pos.distance(t.lit_at) > 24.0 || t.stopped && t.lit_at.x > 1e8 {
             t.lit_at = t.pos;
             for (pi, hm) in t.handles.iter().enumerate() {

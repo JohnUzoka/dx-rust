@@ -18,7 +18,6 @@ use unreal_pkg::props::{find, Property, Value};
 /// A pawn that exists (alive, maybe out of the world).
 #[derive(Debug, Clone)]
 pub struct PawnInfo {
-    pub actor: usize,
     pub class: String,
     pub tag: String,
     pub bind: String,
@@ -27,13 +26,11 @@ pub struct PawnInfo {
     pub standing: bool,
     pub pos: DVec3,
     pub emp_hp: f32,
-    pub robot: bool,
 }
 
 /// A body on the floor (DeusExCarcass).
 #[derive(Debug, Clone)]
 pub struct CarcInfo {
-    pub actor: usize,
     pub class: String,
     pub tag: String,
     pub killer: String,
@@ -73,6 +70,7 @@ pub struct Ctx<'a> {
 
 /// Things scripts do to the player and the screen.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // RemoveAll: Mission00's RemoveAllInventory, handled but not sent yet.
 pub enum PlayerReq {
     /// ShakeView(time, roll, vert).
     Shake(f32, f32, f32),
@@ -492,12 +490,11 @@ fn m02_first(c: &mut Ctx, map: &str) {
                 }
             }
         }
-        "02_NYC_SMUG" => {
-            if c.b("FordSchickRescued") {
+        "02_NYC_SMUG"
+            if c.b("FordSchickRescued") => {
                 c.enter(Sel::isa("FordSchick"));
                 c.setd("SchickThankedPlayer", true);
             }
-        }
         _ => {}
     }
 }
@@ -533,9 +530,28 @@ fn m02_timer(c: &mut Ctx, map: &str) {
                     c.set("MS_DL_Played", true, 3);
                 }
             }
-            // Transcended: the map's terrorists are tagged ShantyTerrorist; the script only counted the misspelt tag.
+            // Ours: with the Ambrosia tagged, Jacobson says Navarre is "out front" with the next assignment. She's
+            // sent to Castle Clinton's front (AnnaDestination, where AnnaRun took her) when she's somewhere else
+            // and out of the player's way - left fighting elsewhere she had to be searched for. From there the
+            // map's MakeAnnaRun triggers bring her to the player as before.
+            if c.b("AmbrosiaTagged") && !c.b("MS_AnnaOutFront") {
+                c.set("MS_AnnaOutFront", true, 3);
+                let anna = c.pawns.iter().find(|p| p.bind.eq_ignore_ascii_case("AnnaNavarre") && p.in_world).map(|p| p.pos);
+                if let (Some(at), Some((pos, yaw))) = (anna, c.point("PatrolPoint", "AnnaDestination")) {
+                    if at.distance(pos) > 400.0 && at.distance(c.player_pos) > 700.0 {
+                        crate::ai::world_req(WorldReq::TeleportOrders(Sel::Bind("AnnaNavarre".into()), pos, yaw, "Standing".into()));
+                    }
+                }
+            }
+            // Ours: once the hostages are out (or the subway's terrorists are dead) the blue beams wired to the
+            // explosive crates switch off (the original leaves them on for good).
+            if !c.b("MS_SubBeamsOff") && (c.b("EscapeSuccessful") || c.b("SubTerroristsDead")) {
+                crate::security::event("BeamTrigger", false);
+                c.set("MS_SubBeamsOff", true, 3);
+            }
+            // Optional Fixes: the map's terrorists are tagged ShantyTerrorist; the script only counted the misspelt tag.
             let shanty = c.count("Terrorist", Some("ShantyTerrorists"))
-                + if crate::transcended::fixes() { c.count("Terrorist", Some("ShantyTerrorist")) } else { 0 };
+                + if crate::optfixes::fixes() { c.count("Terrorist", Some("ShantyTerrorist")) } else { 0 };
             if !c.b("ShantyTownSecure") && shanty == 0 {
                 c.setd("ShantyTownSecure", true);
             }
@@ -615,11 +631,10 @@ fn m02_timer(c: &mut Ctx, map: &str) {
                 c.set("M02HostagesRescued", true, 3);
             }
         }
-        "02_NYC_UNDERGROUND" => {
-            if c.b("FordSchick_Dead") && !c.b("FordSchickRescueDone") {
+        "02_NYC_UNDERGROUND"
+            if c.b("FordSchick_Dead") && !c.b("FordSchickRescueDone") => {
                 c.set("FordSchickRescueDone", true, 9);
             }
-        }
         _ => {}
     }
 }
@@ -718,11 +733,10 @@ fn m03_timer(c: &mut Ctx, map: &str) {
                 c.set("MoleTerroristsDefeated", true, 4);
             }
         }
-        "03_NYC_BROOKLYNBRIDGESTATION" => {
-            if !c.b("JugHeadGangDefeated") && c.count("ThugMale2", Some("ThugMale2")) == 0 {
+        "03_NYC_BROOKLYNBRIDGESTATION"
+            if !c.b("JugHeadGangDefeated") && c.count("ThugMale2", Some("ThugMale2")) == 0 => {
                 c.set("JugHeadGangDefeated", true, 4);
             }
-        }
         _ => {}
     }
 }
@@ -742,11 +756,10 @@ fn m04_first(c: &mut Ctx, map: &str) {
                 c.enter(Sel::isa("UNATCOTroop"));
             }
         }
-        "04_NYC_HOTEL" => {
-            if (c.b("SandraRenton_Dead") || c.b("GilbertRenton_Dead")) && !c.b("JoJoFine_Dead") {
+        "04_NYC_HOTEL"
+            if (c.b("SandraRenton_Dead") || c.b("GilbertRenton_Dead")) && !c.b("JoJoFine_Dead") => {
                 c.enter(Sel::isa_tag("ScriptedPawn", "JoJoInLobby"));
             }
-        }
         _ => {}
     }
 }
@@ -870,11 +883,10 @@ fn m05_first(c: &mut Ctx, map: &str) {
             }
             crate::ai::world_req(WorldReq::MinHealth(Sel::isa("AnnaNavarre"), 0.0));
         }
-        "05_NYC_UNATCOISLAND" => {
-            if c.b("MiguelFollowing") {
+        "05_NYC_UNATCOISLAND"
+            if c.b("MiguelFollowing") => {
                 c.enter(Sel::isa_bind("Terrorist", "Miguel"));
             }
-        }
         _ => {}
     }
 }
@@ -911,12 +923,11 @@ fn m05_timer(c: &mut Ctx, map: &str) {
                 c.set("MS_EliminateAnna", true, 6);
             }
         }
-        "05_NYC_UNATCOMJ12LAB" => {
-            if !c.b("MS_DL_Played") && c.b("PaulInMedLab_Played") {
+        "05_NYC_UNATCOMJ12LAB"
+            if !c.b("MS_DL_Played") && c.b("PaulInMedLab_Played") => {
                 c.datalink("DL_Paul");
                 c.set("MS_DL_Played", true, 6);
             }
-        }
         _ => {}
     }
 }
@@ -931,8 +942,8 @@ fn m06_first(c: &mut Ctx, map: &str) {
             }
         }
         "06_HONGKONG_WANCHAI_CANAL" => {
-            // Transcended: the flag is Have_ROM ("HaveROM" is never set, so this never ran).
-            let rom = c.b("HaveROM") || (crate::transcended::fixes() && c.b("Have_ROM"));
+            // Optional Fixes: the flag is Have_ROM ("HaveROM" is never set, so this never ran).
+            let rom = c.b("HaveROM") || (crate::optfixes::fixes() && c.b("Have_ROM"));
             if !c.b("Supervisor01_Dead") && rom {
                 c.hide(ActorSel::class_tag("DeusExCarcass", "John_Smith_Body"), false);
             }
@@ -1160,12 +1171,11 @@ fn m06_timer(c: &mut Ctx, map: &str) {
                 c.set("MS_ReadyAUC", true, 8);
             }
         }
-        "06_HONGKONG_WANCHAI_CANAL" => {
-            if c.b("Overhear_Canal_Thug1_Played") && !c.b("MS_DrugDealersAttacking") {
+        "06_HONGKONG_WANCHAI_CANAL"
+            if c.b("Overhear_Canal_Thug1_Played") && !c.b("MS_DrugDealersAttacking") => {
                 c.trigger("CanalDrugDealersAttack");
                 c.set("MS_DrugDealersAttacking", true, 8);
             }
-        }
         _ => {}
     }
 }
@@ -1274,8 +1284,8 @@ fn m08_timer(c: &mut Ctx, map: &str) {
 fn m09_first(c: &mut Ctx, map: &str) {
     match map {
         "09_NYC_SHIP" => {
-            // Transcended: the flag set on the breach is MS_ShipBreeched ("ShipBreech" is never set).
-            if c.b("ShipBreech") || (crate::transcended::fixes() && c.b("MS_ShipBreeched")) {
+            // Optional Fixes: the flag set on the breach is MS_ShipBreeched ("ShipBreech" is never set).
+            if c.b("ShipBreech") || (crate::optfixes::fixes() && c.b("MS_ShipBreeched")) {
                 for t in ["SewerGrate", "FrontDoor"] {
                     for i in c.mover_ids(t) {
                         let info = &c.lvl.movers[i];
@@ -1291,11 +1301,10 @@ fn m09_first(c: &mut Ctx, map: &str) {
                 }
             }
         }
-        "09_NYC_DOCKYARD" => {
-            if c.b("MS_ShipBreeched") {
+        "09_NYC_DOCKYARD"
+            if c.b("MS_ShipBreeched") => {
                 c.vehicle(ActorSel::class_tag("BlackHelicopter", "BlackHelicopter"), true);
             }
-        }
         _ => {}
     }
 }
@@ -1416,8 +1425,8 @@ fn m10_timer(c: &mut Ctx, map: &str) {
             if !c.b("SewerGreaselsDead") && c.count("Greasel", Some("SewerGreasel")) == 0 {
                 c.set("SewerGreaselsDead", true, 11);
             }
-            // Transcended: Aimee's goal is completed if she dies (else it stays open forever).
-            if crate::transcended::fixes() && !c.b("MS_AimeeDead") && !c.pawns.iter().any(|p| p.bind.eq_ignore_ascii_case("aimee")) {
+            // Optional Fixes: Aimee's goal is completed if she dies (else it stays open forever).
+            if crate::optfixes::fixes() && !c.b("MS_AimeeDead") && !c.pawns.iter().any(|p| p.bind.eq_ignore_ascii_case("aimee")) {
                 c.goal("KillGreasels");
                 c.set("MS_AimeeDead", true, 11);
             }
@@ -1464,12 +1473,11 @@ fn m10_timer(c: &mut Ctx, map: &str) {
                 c.set("MS_CopBarked", true, 11);
             }
         }
-        "10_PARIS_CHATEAU" => {
-            if !c.b("MS_CommandosUnhidden") && c.b("everettsignal") {
+        "10_PARIS_CHATEAU"
+            if !c.b("MS_CommandosUnhidden") && c.b("everettsignal") => {
                 c.enter(Sel::isa("MJ12Commando"));
                 c.set("MS_CommandosUnhidden", true, 11);
             }
-        }
         _ => {}
     }
 }
@@ -1501,13 +1509,12 @@ fn m11_timer(c: &mut Ctx, map: &str) {
             }
         }
         "11_PARIS_CATHEDRAL" => {
-            if c.b("M11MeetGunther_Played") && c.b("KillGunther") && !c.b("MS_GuntherKilled") {
-                if c.count("GuntherHermann", None) > 0 {
+            if c.b("M11MeetGunther_Played") && c.b("KillGunther") && !c.b("MS_GuntherKilled")
+                && c.count("GuntherHermann", None) > 0 {
                     crate::ai::world_req(WorldReq::Killswitch(Sel::isa("GuntherHermann")));
                     c.set("GuntherHermann_Dead", true, 0);
                     c.set("MS_GuntherKilled", true, 12);
                 }
-            }
             if c.b("templar_upload") && c.b("M11NearWalt") && !c.b("MS_M11WaltAppeared") {
                 c.enter(Sel::isa("WaltonSimons"));
                 c.set("MS_M11WaltAppeared", true, 12);
@@ -1558,14 +1565,14 @@ fn m12_timer(c: &mut Ctx, map: &str) {
                     _ => {}
                 }
             }
-            // Transcended: the map put these names in BindName, not Tag.
+            // Optional Fixes: the map put these names in BindName, not Tag.
             let by_bind = |c: &Ctx| {
                 c.pawns.iter().filter(|p| {
                     crate::classtree::is_a(&p.class, "MJ12Troop")
                         && (p.bind.eq_ignore_ascii_case("MJ12_hazlab_troop1") || p.bind.eq_ignore_ascii_case("MJ12_hazlab_troop2"))
                 }).count()
             };
-            let hazlab = if crate::transcended::fixes() { by_bind(c) } else { 0 };
+            let hazlab = if crate::optfixes::fixes() { by_bind(c) } else { 0 };
             if !c.b("CapturedScientistRescued")
                 && c.count("MJ12Troop", Some("MJ12_hazlab_troop1")) + c.count("MJ12Troop", Some("MJ12_hazlab_troop2")) + hazlab == 0
             {
@@ -1609,8 +1616,8 @@ fn m14_first(c: &mut Ctx, map: &str) {
 fn m14_timer(c: &mut Ctx, map: &str) {
     match map {
         "14_VANDENBERG_SUB" => {
-            // Transcended: the conversations check the misspelt TankKharkian_Dead.
-            if crate::transcended::fixes() && !c.b("MS_TankKarkian") && c.b("TankKarkian_Dead") {
+            // Optional Fixes: the conversations check the misspelt TankKharkian_Dead.
+            if crate::optfixes::fixes() && !c.b("MS_TankKarkian") && c.b("TankKarkian_Dead") {
                 c.set("TankKharkian_Dead", true, 15);
                 c.set("MS_TankKarkian", true, 15);
             }
@@ -1670,8 +1677,8 @@ const UC_SPAWNS: [(&str, &str, &str, &str); 12] = [
 ];
 
 fn m15_first(c: &mut Ctx, map: &str) {
-    // Transcended: if Everett's mechanic dealt with the bomb, Jock doesn't still die.
-    let spared = crate::transcended::fixes() && c.b("EverettMechanicComment");
+    // Optional Fixes: if Everett's mechanic dealt with the bomb, Jock doesn't still die.
+    let spared = crate::optfixes::fixes() && c.b("EverettMechanicComment");
     if map == "15_AREA51_BUNKER" && !c.b("Ray_dead") && !spared {
         c.vehicle(ActorSel::class_tag("BlackHelicopter", "heli_sabotaged"), true);
         c.vehicle(ActorSel::class_tag("BlackHelicopter", "UN_BlackHeli"), false);
@@ -1893,8 +1900,8 @@ fn endgame_first(c: &mut Ctx, map: &str) {
 }
 
 fn endgame_timer(c: &mut Ctx) {
-    if c.b("EndgameExplosions") {
-        if c.rand() < 0.8 {
+    if c.b("EndgameExplosions")
+        && c.rand() < 0.8 {
             let size = c.rand() as f32;
             c.sound(if size < 0.5 { "LargeExplosion1" } else { "LargeExplosion2" });
             if c.rand() < 0.8 {
@@ -1910,7 +1917,6 @@ fn endgame_timer(c: &mut Ctx) {
                 }
             }
         }
-    }
     for (i, flag) in ["Endgame1_Played", "Endgame2_Played", "Endgame3_Played"].iter().enumerate() {
         if c.b(flag) {
             if !c.vars.quote_printed {

@@ -42,6 +42,10 @@ pub struct WaterParams {
     pub mask: Vec4,
     /// Water heights (Bevy y) by the mask's plane index (16).
     pub heights: [Vec4; 4],
+    /// Screen-space reflections (Water Reflections = Screen-Space): x 1 = on (the material is drawn opaque in the
+    /// transmissive pass, where the scene drawn so far is on hand as a texture: the shader reflects it and blends
+    /// the water onto it itself, refracted by the waves), y march steps.
+    pub ssr: Vec4,
 }
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
@@ -174,7 +178,18 @@ pub struct WaterMats {
 /// Enhancement "Modern Water" (setting ModernWater): reflections, a body colour and see-through depth, detailed
 /// waves, rain rings - a shader-pack look instead of the original's translucent picture.
 pub fn modern() -> bool {
-    crate::settings::get("ModernWater") > 0.5
+    setting!("ModernWater") > 0.5
+}
+
+/// Modern Water's reflections drawn by a second camera under the water (Water Reflections = Planar).
+pub fn planar() -> bool {
+    modern() && setting!("WaterReflections") > 0.5
+}
+
+/// Modern Water's reflections worked out on the GPU from the picture already drawn (Water Reflections =
+/// Screen-Space, the default): no second view for the CPU to prepare and record.
+pub fn ssr() -> bool {
+    modern() && setting!("WaterReflections") < 0.5
 }
 
 /// Enhancement "Open Sea" (setting OpenSea, ours; the Switch build starts with it on): without Modern Water, the open
@@ -220,7 +235,16 @@ pub fn water_system(
     let switched = wm.modern != Some(modern);
     wm.modern = Some(modern);
     let open_sea = open_sea();
-    let key = [if modern { 1.0 } else { 0.0 }, storm(), moon_dir.x, moon_dir.y, moon_dir.z, if open_sea { 1.0 } else { 0.0 }];
+    let ssr = ssr();
+    let key = [
+        if modern { 1.0 } else { 0.0 } + if ssr { 2.0 } else { 0.0 },
+        storm(),
+        moon_dir.x,
+        moon_dir.y,
+        moon_dir.z,
+        if open_sea { 1.0 } else { 0.0 },
+    ];
+    let switched = switched || wm.last.is_some_and(|l| l[0] != key[0]);
     if wm.last != Some(key) {
         wm.last = Some(key);
         changed = true;
@@ -247,11 +271,19 @@ pub fn water_system(
                 let opaque = wm.opaque.get(i).copied().unwrap_or(false);
                 m.base.alpha_mode = match (opaque, modern) {
                     (true, _) => AlphaMode::Opaque,
+                    // Screen-space: drawn opaque in the transmissive pass, blending onto its own copy of the scene
+                    // (Bevy only puts opaque transmissive materials there).
+                    (false, true) if ssr => AlphaMode::Opaque,
                     (false, true) => AlphaMode::Blend,
                     (false, false) => AlphaMode::Add,
                 };
                 m.base.perceptual_roughness = if modern { 0.07 } else { 1.0 };
                 m.base.reflectance = if modern { 0.5 } else { 0.05 };
+                // Screen-space reflections read the scene drawn so far (Bevy's transmission texture): a material
+                // with any specular transmission is drawn in the transmissive pass, after the opaque world is
+                // copied (the shader turns the transmission itself off again).
+                m.base.specular_transmission = if ssr && !opaque { 1e-3 } else { 0.0 };
+                m.extension.params.ssr = Vec4::new(if ssr && !opaque { 1.0 } else { 0.0 }, 20.0, 0.0, 0.0);
             }
         }
     }
@@ -287,6 +319,7 @@ pub fn material(base: StandardMaterial, opaque: bool, placeholder: Handle<Image>
                 grid: Vec4::ZERO,
                 mask: Vec4::ZERO,
                 heights: [Vec4::ZERO; 4],
+                ssr: Vec4::ZERO,
             },
             reflection: placeholder,
             mask,
@@ -520,193 +553,6 @@ mod tests {
         assert!(((hx - h0) / e - gx).abs() < 0.05);
         assert!(((hz - h0) / e - gz).abs() < 0.05);
     }
-}
-
-/// Water sheets split until no edge is longer than `max` (Bevy metres), so the surface can move with the swell
-/// (Modern Water). Positions, normals and both UV sets are interpolated.
-#[allow(clippy::type_complexity)]
-pub fn tessellate(
-    pos: &[[f32; 3]],
-    nrm: &[[f32; 3]],
-    uv: &[[f32; 2]],
-    uv1: &[[f32; 2]],
-    idx: &[u32],
-    max: f32,
-) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<u32>) {
-    let (mut p, mut n, mut u, mut u1) = (pos.to_vec(), nrm.to_vec(), uv.to_vec(), uv1.to_vec());
-    let mut out = Vec::new();
-    // Every triangle split the same way: a sheet too big for the vertex budget at `max` gets a coarser `max` for all
-    // of it (stopping half way left whole stretches as big flat triangles that the storm swell's troughs dipped under:
-    // flat grey slivers across the sea). Halving splits leave triangles about max^2 / 4.
-    let area: f32 = idx
-        .chunks_exact(3)
-        .map(|t| {
-            let (a, b, c) = (Vec3::from(pos[t[0] as usize]), Vec3::from(pos[t[1] as usize]), Vec3::from(pos[t[2] as usize]));
-            (b - a).cross(c - a).length() * 0.5
-        })
-        .sum();
-    const TRI_BUDGET: f32 = 700_000.0;
-    let max = max.max((area * 4.0 / TRI_BUDGET).sqrt());
-    let mut mids: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
-    let mut stack: Vec<[u32; 3]> = idx.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
-    let budget = 2_000_000usize;
-    while let Some(t) = stack.pop() {
-        let d = |a: u32, b: u32, p: &Vec<[f32; 3]>| Vec3::from(p[a as usize]).distance(Vec3::from(p[b as usize]));
-        let e = [d(t[0], t[1], &p), d(t[1], t[2], &p), d(t[2], t[0], &p)];
-        let (k, &l) = e.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap();
-        if l <= max || p.len() > budget {
-            out.extend_from_slice(&t);
-            continue;
-        }
-        let (a, b, c) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
-        let key = (a.min(b), a.max(b));
-        let m = *mids.entry(key).or_insert_with(|| {
-            let mix3 = |x: [f32; 3], y: [f32; 3]| [(x[0] + y[0]) * 0.5, (x[1] + y[1]) * 0.5, (x[2] + y[2]) * 0.5];
-            let mix2 = |x: [f32; 2], y: [f32; 2]| [(x[0] + y[0]) * 0.5, (x[1] + y[1]) * 0.5];
-            p.push(mix3(p[a as usize], p[b as usize]));
-            n.push(n[a as usize]);
-            u.push(mix2(u[a as usize], u[b as usize]));
-            if !u1.is_empty() {
-                u1.push(mix2(u1[a as usize], u1[b as usize]));
-            }
-            (p.len() - 1) as u32
-        });
-        stack.push([a, m, c]);
-        stack.push([m, b, c]);
-    }
-    (p, n, u, u1, out)
-}
-
-/// A tessellated water sheet: positions, normals, UVs, lightmap UVs, indices.
-pub type Sheet = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<u32>);
-
-/// Every water sheet of the map split to `max` metres (see `tessellate`), then T-junctions mended across all of
-/// them: where one sheet's vertex lies on another sheet's edge (the map's water is many faces in several batches,
-/// one per material), that edge gets the vertex too, so neither opens a crack when the waves move them.
-pub fn tessellate_sheets(batches: &[&dx_level::Batch], max: f32) -> Vec<Sheet> {
-    let mut sheets: Vec<Sheet> = batches.iter().map(|b| tessellate(&b.positions, &b.normals, &b.uvs, &b.uvs1, &b.indices, max)).collect();
-    let all: Vec<(usize, [f32; 3])> = sheets.iter().enumerate().flat_map(|(k, s)| s.0.iter().map(move |p| (k, *p))).collect();
-    for (k, s) in sheets.iter_mut().enumerate() {
-        let (lo, hi) = s.0.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p[1]), a.1.max(p[1])));
-        let others: Vec<[f32; 3]> = all.iter().filter(|(j, p)| *j != k && p[1] >= lo - 0.05 && p[1] <= hi + 0.05).map(|(_, p)| *p).collect();
-        let idx = std::mem::take(&mut s.4);
-        s.4 = fix_tjunctions(&mut s.0, &mut s.1, &mut s.2, &mut s.3, &idx, &others);
-    }
-    sheets
-}
-
-/// Where a vertex of one triangle lies on the middle of another's edge (the map's water faces meet that way, and the
-/// splitting above makes many more), the moving surface would open a crack along that edge: such triangles become a
-/// fan round their centre through every vertex on their edges, so both sides move together.
-#[allow(clippy::type_complexity)]
-fn fix_tjunctions(p: &mut Vec<[f32; 3]>, n: &mut Vec<[f32; 3]>, u: &mut Vec<[f32; 2]>, u1: &mut Vec<[f32; 2]>, idx: &[u32], others: &[[f32; 3]]) -> Vec<u32> {
-    const CELL: f32 = 2.0;
-    // Vertices of other sheets are numbered from EXT up.
-    const EXT: u32 = 1 << 30;
-    let key = |v: [f32; 3]| ((v[0] / CELL).floor() as i32, (v[2] / CELL).floor() as i32);
-    // Distinct positions, bucketed (the first vertex at each position stands for it).
-    let mut grid: std::collections::HashMap<(i32, i32), Vec<u32>> = std::collections::HashMap::new();
-    let mut seen: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
-    let own = p.len();
-    for (i, v) in p.iter().chain(others.iter()).enumerate() {
-        let q = ((v[0] * 1000.0).round() as i32, (v[1] * 1000.0).round() as i32, (v[2] * 1000.0).round() as i32);
-        if seen.insert(q) {
-            let id = if i < own { i as u32 } else { EXT + (i - own) as u32 };
-            grid.entry(key(*v)).or_default().push(id);
-        }
-    }
-    let pos = |p: &Vec<[f32; 3]>, w: u32| if w >= EXT { others[(w - EXT) as usize] } else { p[w as usize] };
-    let mut out = Vec::with_capacity(idx.len());
-    for t in idx.chunks_exact(3) {
-        let c = [t[0], t[1], t[2]];
-        // Vertices on each edge's inside, ordered along it.
-        let mut ring: Vec<(u32, [f32; 2], [f32; 2])> = Vec::new();
-        let mut extra = false;
-        for e in 0..3 {
-            let (a, b) = (c[e], c[(e + 1) % 3]);
-            ring.push((a, u[a as usize], if u1.is_empty() { [0.0; 2] } else { u1[a as usize] }));
-            let (pa, pb) = (Vec3::from(p[a as usize]), Vec3::from(p[b as usize]));
-            let d = pb - pa;
-            let len2 = d.length_squared();
-            if len2 < 1e-8 {
-                continue;
-            }
-            let (lo, hi) = (pa.min(pb), pa.max(pb));
-            let (k0, k1) = (key(lo.to_array()), key(hi.to_array()));
-            let mut on: Vec<(f32, u32)> = Vec::new();
-            for gx in k0.0..=k1.0 {
-                for gz in k0.1..=k1.1 {
-                    let Some(list) = grid.get(&(gx, gz)) else { continue };
-                    for &w in list {
-                        let pw = Vec3::from(pos(p, w));
-                        let s = (pw - pa).dot(d) / len2;
-                        if s <= 1e-4 || s >= 1.0 - 1e-4 {
-                            continue;
-                        }
-                        if (pa + d * s).distance_squared(pw) < 1e-6 && pw.distance_squared(pa) > 1e-6 && pw.distance_squared(pb) > 1e-6 {
-                            on.push((s, w));
-                        }
-                    }
-                }
-            }
-            on.sort_by(|x, y| x.0.total_cmp(&y.0));
-            for (s, w) in on {
-                extra = true;
-                let lerp2 = |x: [f32; 2], y: [f32; 2]| [x[0] + (y[0] - x[0]) * s, x[1] + (y[1] - x[1]) * s];
-                let uv = lerp2(u[a as usize], u[b as usize]);
-                let uv1 = if u1.is_empty() { [0.0; 2] } else { lerp2(u1[a as usize], u1[b as usize]) };
-                ring.push((w, uv, uv1));
-            }
-        }
-        if !extra {
-            out.extend_from_slice(&c);
-            continue;
-        }
-        // New corners (own copies: this face's texture coordinates there), the centre, and the fan.
-        let mut ids = Vec::with_capacity(ring.len());
-        for (k, (w, uv, uv1)) in ring.iter().enumerate() {
-            if k == 0 || c.contains(w) {
-                ids.push(*w);
-                continue;
-            }
-            let pw = pos(p, *w);
-            p.push(pw);
-            n.push(n[c[0] as usize]);
-            u.push(*uv);
-            if !u1.is_empty() {
-                u1.push(*uv1);
-            }
-            ids.push((p.len() - 1) as u32);
-        }
-        let avg3 = |f: &dyn Fn(u32) -> [f32; 3]| {
-            let s = c.iter().fold([0.0f32; 3], |a, &i| {
-                let v = f(i);
-                [a[0] + v[0], a[1] + v[1], a[2] + v[2]]
-            });
-            [s[0] / 3.0, s[1] / 3.0, s[2] / 3.0]
-        };
-        let avg2 = |f: &dyn Fn(u32) -> [f32; 2]| {
-            let s = c.iter().fold([0.0f32; 2], |a, &i| {
-                let v = f(i);
-                [a[0] + v[0], a[1] + v[1]]
-            });
-            [s[0] / 3.0, s[1] / 3.0]
-        };
-        let cp = avg3(&|i| p[i as usize]);
-        let cu = avg2(&|i| u[i as usize]);
-        let cu1 = if u1.is_empty() { [0.0; 2] } else { avg2(&|i| u1[i as usize]) };
-        p.push(cp);
-        n.push(n[c[0] as usize]);
-        u.push(cu);
-        if !u1.is_empty() {
-            u1.push(cu1);
-        }
-        let ci = (p.len() - 1) as u32;
-        for k in 0..ids.len() {
-            out.extend_from_slice(&[ci, ids[k], ids[(k + 1) % ids.len()]]);
-        }
-    }
-    out
 }
 
 /// The open sea past the map's edge (Modern Water): a ring of water at the height of the map's largest water sheet,
@@ -976,7 +822,7 @@ pub fn ocean_system(
     // DXVIEW_WATER_NOPREPASS=1 never attaches it: an A/B of what the depth pass costs and saves in Classic, where
     // nothing reads it (Modern Water's depth effect goes with it).
     static WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if (modern() || crate::settings::get("Modern.ModernWater") > 0.5 || crate::perf::lean_rendering())
+    if (modern() || setting!("Modern.ModernWater") > 0.5 || crate::perf::lean_rendering())
         && !env_on!("DXVIEW_WATER_NOPREPASS")
     {
         WANTED.store(true, std::sync::atomic::Ordering::Relaxed);

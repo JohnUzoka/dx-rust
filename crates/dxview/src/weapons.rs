@@ -31,6 +31,14 @@ pub const VIEW_LAYER: usize = 2;
 /// Deus Ex's default field of view (horizontal degrees).
 pub const DEFAULT_FOV: f32 = 75.0;
 
+/// The world's field of view (setting FOV, Settings > Enhancements > Display; the original's DefaultFOV, 75):
+/// horizontal degrees across the window, as Unreal measures it. The weapon in hand keeps DEFAULT_FOV on its own
+/// camera, so a wide view never shows the model's cut-off ends.
+pub fn base_fov() -> f32 {
+    let v = setting!("FOV");
+    if v < 1.0 { DEFAULT_FOV } else { v.clamp(60.0, 130.0) }
+}
+
 #[derive(Component)]
 pub struct ViewModelCam;
 #[derive(Component)]
@@ -138,8 +146,8 @@ pub fn apply_mods(w: &mut WeaponStats, m: &ModState) {
         w.reload_count += diff * steps;
     }
     w.accurate_range += w.accurate_range * m.range;
-    // Transcended: the range mod also raises MaxRange (the longest shots were still cut short at it).
-    if crate::transcended::fixes() {
+    // Optional Fixes: the range mod also raises MaxRange (the longest shots were still cut short at it).
+    if crate::optfixes::fixes() {
         w.max_range += w.max_range * m.range;
     }
     w.reload_time = (w.reload_time + w.reload_time * m.reload).max(0.0);
@@ -761,7 +769,7 @@ fn view_defaults(
 
 /// Enhancement: the Dragon's Tooth runs on bioenergy (setting DTSEnergy).
 pub fn dts_energy() -> bool {
-    crate::settings::get("DTSEnergy") > 0.5
+    setting!("DTSEnergy") > 0.5
 }
 
 /// Bioenergy a Dragon's Tooth blow takes (GMDX chargePerUse 5 of 100).
@@ -789,6 +797,10 @@ pub struct Weapons {
     pub corpse: Option<Entity>,
     /// A body just picked up, to be raised as the POVCorpse view model.
     pub want_corpse: Option<Entity>,
+    /// The carried body can be thrown: both mouse buttons have been up since it was picked up. (The click that
+    /// picks it up could still count as just pressed when the body reached the hands in the same frame - the
+    /// systems' order isn't fixed - so it was thrown at once: GitHub #7, seen on Linux.)
+    pub corpse_armed: bool,
     /// Mods fitted, by weapon class.
     pub mods: HashMap<String, ModState>,
     /// The last real weapon drawn (unmodded stats): where a weapon mod used from the belt goes.
@@ -820,9 +832,6 @@ pub struct PawnHealth(pub HashMap<usize, f32>);
 #[derive(Resource, Default)]
 pub struct LastAttacker(pub HashMap<usize, Option<usize>>);
 
-#[derive(Component)]
-pub struct AmmoText;
-
 /// Input injected by automated tests (select a belt slot, pull the trigger).
 #[derive(Resource, Default)]
 pub struct ScriptedInput {
@@ -839,7 +848,13 @@ pub struct RuntimeAssets {
     pub materials: HashMap<(Option<String>, SurfaceClass), Handle<StandardMaterial>>,
     /// Animated procedural textures and the images they draw into.
     pub fire: Vec<(dx_level::firetex::FireTex, Handle<Image>)>,
+    /// Shared sprite materials / quad (sprite.rs).
+    pub sprites: crate::sprite::Cache,
+    /// Full-bright mesh parts shared by every instance (tracers, rings, sparks): (mesh path, scale bits, skin
+    /// signature) -> the meshes, their materials and the parts.
+    pub shared_parts: HashMap<(String, u32, u64), std::sync::Arc<SharedParts>>,
 }
+
 
 pub fn spawn_view_camera(commands: &mut Commands) {
     commands.spawn((
@@ -869,23 +884,6 @@ pub fn spawn_view_camera(commands: &mut Commands) {
         },
     ));
     commands.spawn((Transform::default(), Visibility::default(), ViewModelRoot));
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: bevy::text::FontSize::Px(16.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.85, 0.9, 0.85)),
-        Node {
-            position_type: PositionType::Absolute,
-            right: Val::Px(14.0),
-            bottom: Val::Px(96.0),
-            ..default()
-        },
-        // The original ammo display (classic_hud.rs) shows this now.
-        Visibility::Hidden,
-        AmmoText,
-    ));
     // HUDAmmoDisplay's targeting line for weapons that can lock on.
     commands.spawn((
         Text::new(""),
@@ -930,19 +928,16 @@ pub fn fov_system(
     let world_fov = crate::cinematic::fov()
         .unwrap_or_else(|| {
             // Through the diegetic scope only the lens is zoomed (scope.rs); the world view keeps a sights' narrowing.
-            let z = if crate::scope::active(&zoom, &weapons) { Some(DEFAULT_FOV * 0.82) } else { zoom.0 };
-            crate::aimmode::fov(crate::drug::drug_fov(&ph, z.unwrap_or(DEFAULT_FOV), &mut n))
+            let z = if crate::scope::active(&zoom, &weapons) { Some(base_fov() * 0.82) } else { zoom.0 };
+            crate::aimmode::fov(crate::drug::drug_fov(&ph, z.unwrap_or(base_fov()), &mut n))
         });
     for (mut p, is_vm) in &mut cams {
         let fov = if is_vm { DEFAULT_FOV } else { world_fov };
         let vfov = 2.0 * ((fov.to_radians() / 2.0).tan() / aspect).atan();
-        // Lean Updates (perf.rs): look before writing, so an unchanged projection isn't marked changed every frame.
-        let stale = matches!(&*p, Projection::Perspective(pp) if (pp.fov - vfov).abs() > 1e-4);
-        if crate::perf::lean_updates() && !stale {
-            continue;
-        }
-        if let Projection::Perspective(pp) = &mut *p {
-            if (pp.fov - vfov).abs() > 1e-4 {
+        // Read first: `&mut *p` alone marks the projection changed every frame.
+        let differs = matches!(&*p, Projection::Perspective(pp) if (pp.fov - vfov).abs() > 1e-4);
+        if differs {
+            if let Projection::Perspective(pp) = &mut *p {
                 pp.fov = vfov;
             }
         }
@@ -1142,11 +1137,114 @@ pub fn spawn_mesh_parts(
     map: &dyn Fn([f32; 3]) -> [f32; 3],
     layer: Option<RenderLayers>,
 ) -> Option<(LodMesh, Vec<MeshPart>, Vec<Handle<Mesh>>)> {
+    let view = layer.as_ref().is_some_and(|l| *l == RenderLayers::layer(VIEW_LAYER));
+    let (m, parts, built) = build_mesh_parts(mesh_path, scale, defaults, assets, images, meshes, materials, map, view)?;
+    let mut handles = Vec::with_capacity(built.len());
+    for b in built {
+        spawn_built_part(commands, root, &b, layer.as_ref(), view);
+        handles.push(b.mesh);
+    }
+    Some((m, parts, handles))
+}
+
+/// One built mesh section: its mesh, material and what kind of section it is.
+pub struct BuiltPart {
+    pub mesh: Handle<Mesh>,
+    pub mat: Handle<StandardMaterial>,
+    pub env: bool,
+    pub glassy: bool,
+}
+
+fn spawn_built_part(commands: &mut Commands, root: Entity, b: &BuiltPart, layer: Option<&RenderLayers>, view: bool) -> Entity {
+    let mut child = commands.spawn((Mesh3d(b.mesh.clone()), MeshMaterial3d(b.mat.clone())));
+    if let Some(l) = layer {
+        child.insert(l.clone());
+    }
+    if b.env {
+        child.insert(crate::actors::EnvMapped);
+    }
+    // View models only: the mirror / third-person body (JC's glasses are translucent / modulated) is built here too,
+    // and showing its hidden vertex glasses again left them floating beside the skeletal body.
+    if b.glassy && view {
+        child.insert(ViewGlass);
+    }
+    let child = child.id();
+    commands.entity(root).add_child(child);
+    child
+}
+
+/// A mesh built once for every transient instance of it (never relit, never deformed).
+pub struct SharedParts {
+    pub built: Vec<BuiltPart>,
+}
+
+/// `spawn_mesh_parts` for things spawned and despawned all the time that are drawn full bright (tracers, shock
+/// rings, sparks, water rings): the meshes are built once per (mesh, scale, skins) and every instance gets child
+/// entities drawing the same handles, so a shot no longer allocates, uploads and frees mesh slabs.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_mesh_parts_shared(
+    mesh_path: &str,
+    scale: f32,
+    defaults: &[Property],
+    assets: &mut RuntimeAssets,
+    images: &mut Assets<Image>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    commands: &mut Commands,
+    root: Entity,
+) -> Option<std::sync::Arc<SharedParts>> {
+    let sig = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for p in defaults {
+            if p.name.eq_ignore_ascii_case("Skin") || p.name.eq_ignore_ascii_case("MultiSkins") || p.name.eq_ignore_ascii_case("Texture") {
+                if let Value::Path(v) = &p.value {
+                    (p.index, v).hash(&mut h);
+                }
+            }
+        }
+        h.finish()
+    };
+    let key = (mesh_path.to_string(), scale.to_bits(), sig);
+    let shared = match assets.shared_parts.get(&key) {
+        Some(s) => s.clone(),
+        None => {
+            let map = |p: [f32; 3]| dx_level::ue_to_bevy(p);
+            let (_m, parts, built) = build_mesh_parts(mesh_path, scale, defaults, assets, images, meshes, materials, &map, false)?;
+            for (b, part) in built.iter().zip(&parts) {
+                if let Some(mut mm) = meshes.get_mut(&b.mesh) {
+                    mm.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0f32, 1.0, 1.0, 1.0]; part.positions.len()]);
+                }
+            }
+            let s = std::sync::Arc::new(SharedParts { built });
+            assets.shared_parts.insert(key, s.clone());
+            s
+        }
+    };
+    for b in &shared.built {
+        spawn_built_part(commands, root, b, None, false);
+    }
+    Some(shared)
+}
+
+/// The mesh sections of `mesh_path` as Bevy meshes (one per section, positions through `map`) with their
+/// materials; `view` = a first-person view model (Lay D Denton's hands, the sheen table, glass sections).
+#[allow(clippy::too_many_arguments)]
+fn build_mesh_parts(
+    mesh_path: &str,
+    scale: f32,
+    defaults: &[Property],
+    assets: &mut RuntimeAssets,
+    images: &mut Assets<Image>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    map: &dyn Fn([f32; 3]) -> [f32; 3],
+    view: bool,
+) -> Option<(LodMesh, Vec<MeshPart>, Vec<BuiltPart>)> {
     let (m, pkg) = load_mesh(&assets.classes, mesh_path)?;
     // Resolve textures to paths first, then to images.
     let mut tex_paths: Vec<String> = Vec::new();
     // The first-person weapon: Lay D Denton's own hands (travel::view_tex).
-    let view = layer.as_ref().is_some_and(|l| *l == RenderLayers::layer(VIEW_LAYER));
     let parts = {
         let (lib, classes) = (&mut assets.lib, &assets.classes);
         let mut resolve = |tp: &str| -> Option<(usize, bool)> {
@@ -1175,7 +1273,7 @@ pub fn spawn_mesh_parts(
             &mut resolve,
         )
     };
-    let mut handles = Vec::new();
+    let mut built = Vec::with_capacity(parts.len());
     // Mesh skins may come from an HD texture mod (New Vision): hd_scope is on while each part's image loads.
     for part in &parts {
         assets.lib.hd_scope = true;
@@ -1251,13 +1349,6 @@ pub fn spawn_mesh_parts(
                 }
             }
         }
-        let mut child = commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(mat)));
-        if let Some(l) = &layer {
-            child.insert(l.clone());
-        }
-        if part.env {
-            child.insert(crate::actors::EnvMapped);
-        }
         // See-through sections and anything textured as glass / a lens (HDTP's rifle scope: HDTPWeaponRifleShine, a blue cap
         // over its eyepiece): hidden while the Diegetic Scope's own lens sits in the eyepiece.
         let glassy = matches!(part.class, SurfaceClass::Translucent | SurfaceClass::Modulated)
@@ -1265,16 +1356,9 @@ pub fn spawn_mesh_parts(
                 let l = p.to_ascii_lowercase();
                 l.contains("glass") || l.contains("lens") || l.contains("shine")
             });
-        // View models only: the mirror / third-person body (JC's glasses are translucent / modulated) is built here too,
-        // and showing its hidden vertex glasses again left them floating beside the skeletal body.
-        if glassy && view {
-            child.insert(ViewGlass);
-        }
-        let child = child.id();
-        commands.entity(root).add_child(child);
-        handles.push(h);
+        built.push(BuiltPart { mesh: h, mat, env: part.env, glassy });
     }
-    Some((m, parts, handles))
+    Some((m, parts, built))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1636,6 +1720,7 @@ pub fn select_system(
             ) {
                 weapons.held = Some(h);
                 weapons.corpse = Some(body);
+                weapons.corpse_armed = false;
             }
         }
         return;
@@ -1749,7 +1834,7 @@ pub fn select_system(
     if weapons.held.is_none()
         && weapons.pending.is_none()
         && (keys.just_pressed(KeyCode::BracketLeft) || keys.just_pressed(KeyCode::KeyZ))
-        && crate::settings::get("SmartBinoculars") > 0.5
+        && setting!("SmartBinoculars") > 0.5
         && inv.0.items.iter().any(|i| i.def.class == "Binoculars")
     {
         weapons.pending_class = Some("Binoculars".into());
@@ -1812,7 +1897,7 @@ pub fn select_system(
 /// texture group or a mover with wood fragments - or a glass mover (8 units, 0.8), with open space that far behind.
 /// Returns where it comes out and the damage kept.
 pub fn penetrate(level: &dx_level::Level, rts: &[crate::movers::MoverRt], at: DVec3, dir: DVec3, sabot: bool) -> Option<(DVec3, f32)> {
-    if crate::settings::get("BulletPenetration") < 0.5 {
+    if setting!("BulletPenetration") < 0.5 {
         return None;
     }
     let wood = (16.0, if sabot { 0.75 } else { 0.5 });
@@ -1881,11 +1966,10 @@ fn pose_view_model(h: &mut Held, meshes: &mut Assets<Mesh>, dt: f32) {
     let pose = (h.clip.start, h.clip.frames, (f_used * 1000.0) as u32);
     if let Some(last) = h.last_pose {
         let restarted = !h.clip.looping && pose.2 + 500 < last.2;
-        if (last.0, last.1) != (pose.0, pose.1) || restarted {
-            if h.shown.len() == h.parts.len() {
+        if ((last.0, last.1) != (pose.0, pose.1) || restarted)
+            && h.shown.len() == h.parts.len() {
                 h.tween = Some((std::mem::take(&mut h.shown), 0.0));
             }
-        }
     }
     let mut tween_k = None;
     if let Some((_, t)) = h.tween.as_mut() {
@@ -1954,7 +2038,7 @@ fn spec_of(tex: &str) -> Option<[f32; 2]> {
 static VIEW_SPEC: std::sync::Mutex<Option<HashMap<AssetId<Mesh>, [f32; 2]>>> = std::sync::Mutex::new(None);
 
 pub fn material_sheen() -> bool {
-    crate::settings::get("MaterialSheen") > 0.5
+    setting!("MaterialSheen") > 0.5
 }
 
 /// The specular highlights on a view-model part (Blinn-Phong per vertex from the lights round the player, the
@@ -2070,7 +2154,7 @@ fn melee_blow(stats: &WeaponStats, cx: &mut ShotCx, eye: DVec3, fw: DVec3) {
     }
     // Enhancement (Melee Sweeps An Arc, setting MeleeArc): the blow also catches whatever stands within 25 degrees
     // either side of the aim (traces at 12.5 and 25 degrees), each thing once, at three quarters damage.
-    if crate::settings::get("MeleeArc") <= 0.5 {
+    if setting!("MeleeArc") <= 0.5 {
         return;
     }
     let mut done: Vec<usize> = hit.actor.into_iter().collect();
@@ -2354,13 +2438,9 @@ pub fn weapon_system(
     (mut weapons, mut inv, mut clips): (ResMut<Weapons>, ResMut<PlayerInventory>, ResMut<Clips>),
     (player, level, blockers, mv): (Res<Player>, Res<LevelRes>, Res<Blockers>, Res<Movers>),
     mut meshes: ResMut<Assets<Mesh>>,
-    (mut hud, mut ammo_text, mut seed): (
-        ResMut<HudMessage>,
-        Single<&mut Text, (With<AmmoText>, Without<LockText>)>,
-        Local<u64>,
-    ),
+    (mut hud, mut seed): (ResMut<HudMessage>, Local<u64>),
     (mut lock_text, pawn_health): (
-        Single<(&mut Text, &mut TextColor), (With<LockText>, Without<AmmoText>)>,
+        Single<(&mut Text, &mut TextColor), With<LockText>>,
         Res<PawnHealth>,
     ),
     (mut scripted, mut deco_hits, mut pawn_hits, aim): (
@@ -2428,7 +2508,7 @@ pub fn weapon_system(
             *seed = seed
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            let dir = crate::projectiles::projectile_dir(fw, 0.15, &mut *seed);
+            let dir = crate::projectiles::projectile_dir(fw, 0.15, &mut seed);
             launches.0.push(crate::projectiles::Launch {
                 class: "HalonGas".into(),
                 pos: eye + fw * player.params.radius,
@@ -2491,11 +2571,7 @@ pub fn weapon_system(
         }
     }
     let Some(h) = weapons.held.as_mut() else {
-        // Lean Updates: emptied once, not every frame (each write re-lays out the text).
-        if !crate::perf::lean_updates() || !ammo_text.0.is_empty() {
-            ammo_text.0.clear();
-        }
-        if !crate::perf::lean_updates() || !lock_text.0 .0.is_empty() {
+        if !lock_text.0 .0.is_empty() {
             lock_text.0 .0.clear();
         }
         return;
@@ -2559,13 +2635,14 @@ pub fn weapon_system(
     // about the eye by the difference, at most 6 degrees; not while zoomed or reloading, and a new weapon starts
     // straight.
     {
-        static LAG: std::sync::Mutex<Option<(String, Quat)>> = std::sync::Mutex::new(None);
+        static LAG: std::sync::Mutex<Option<(u64, Quat)>> = std::sync::Mutex::new(None);
         if let Ok(mut c) = LAG.lock() {
-            let on = crate::settings::get("WeaponInertia") > 0.5 && zoom.0.is_none() && h.state != WState::Reloading;
+            let on = setting!("WeaponInertia") > 0.5 && zoom.0.is_none() && h.state != WState::Reloading;
             let mut lag = cam.rotation;
+            let cls_key = crate::util::fnv1a(&h.stats.class);
             if on {
                 if let Some((cls, q)) = c.as_ref() {
-                    if *cls == h.stats.class {
+                    if *cls == cls_key {
                         lag = q.slerp(cam.rotation, 1.0 - (-dt * INERTIA_SPEED * 0.5).exp());
                         // At most 6 degrees behind.
                         let ang = lag.angle_between(cam.rotation);
@@ -2579,7 +2656,7 @@ pub fn weapon_system(
                 root.translation = rel * root.translation;
                 root.rotation = rel * root.rotation;
             }
-            *c = Some((h.stats.class.clone(), lag));
+            *c = Some((cls_key, lag));
         }
     }
     // Modern Aiming: the weapon points where the shot will go.
@@ -2612,9 +2689,17 @@ pub fn weapon_system(
         };
         let hit = world.trace(eye, eye + fw * 10000.0, DVec3::ZERO);
         // What's in the sights: (blocker, its range, a living pawn).
-        let target = hit.actor.filter(|_| h.state != WState::Reloading).map(|b| {
+        // Nothing is aimed at during a conversation or cut scene (the camera is the scene's; with the GEP in hand the
+        // speaker was "acquired", beeping and locking under the dialogue).
+        let away = crate::consys::third_person() || crate::cinematic::active() || crate::computers::open();
+        if away {
+            h.lock_mode = 0;
+            h.lock_target = None;
+            h.lock_timer = 0.0;
+        }
+        let target = hit.actor.filter(|_| h.state != WState::Reloading && !away).map(|b| {
             let a = &level.0.actors[blockers.list[b].actor];
-            let alive = find(&a.props, "GroundSpeed").is_some() && pawn_health.0.get(&b).map_or(true, |&hp| hp > 0.0);
+            let alive = find(&a.props, "GroundSpeed").is_some() && pawn_health.0.get(&b).is_none_or(|&hp| hp > 0.0);
             (b, blockers.list[b].center.distance(player.body.location), alive)
         });
         let (msg, col) = lock_on(h, target, dt);
@@ -2793,7 +2878,11 @@ pub fn weapon_system(
     // halves view x 300 x AugMuscle + 220 up + 40 x VRand for a corpse, which barely leaves the hands; ours throws
     // it at the full speed, like a crate (the user's call), and it slides on landing (actors::deco_physics).
     if let Some(body) = weapons.corpse {
+        if !mouse.pressed(MouseButton::Left) && !mouse.pressed(MouseButton::Right) {
+            weapons.corpse_armed = true;
+        }
         let clicked = cursor.grab_mode == CursorGrabMode::Locked
+            && weapons.corpse_armed
             && (mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right));
         if clicked {
             let conv = |v: Vec3| DVec3::new(v.x as f64, v.z as f64, v.y as f64).normalize();
@@ -2909,8 +2998,8 @@ pub fn weapon_system(
         h.flame_shots = 0;
     }
 
-    // Transcended: a conversation turns the laser off (a stray dot stayed on the speakers).
-    if h.lasing && crate::transcended::fixes() && crate::consys::third_person() {
+    // Optional Fixes: a conversation turns the laser off (a stray dot stayed on the speakers).
+    if h.lasing && crate::optfixes::fixes() && crate::consys::third_person() {
         h.lasing = false;
     }
     // ToggleLaser (']'): only with a laser mod fitted.
@@ -3235,12 +3324,28 @@ pub fn weapon_system(
         let ue = bevy_to_ue(at.to_array());
         crate::dynlight::hold(0xD75_0000, DVec3::new(ue[0] as f64, ue[1] as f64, ue[2] as f64), crate::dynlight::Spec::new(160, 64, 224, 4.0), 0.08);
     }
+    // Emissive Surfaces: the riot prod's arcs light what's round its tip (a dim blue-white flicker), like the
+    // Dragon's Tooth's blade does in the original.
+    if h.stats.class == "WeaponProd"
+        && matches!(h.state, WState::Idle | WState::Firing)
+        && crate::relight::emissive_on()
+        && !crate::consys::third_person()
+    {
+        let f = cam.forward().as_vec3();
+        let at = cam.translation + f * 0.55 + cam.right().as_vec3() * 0.12 - cam.up().as_vec3() * 0.05;
+        let ue = bevy_to_ue(at.to_array());
+        let t = time.elapsed_secs();
+        let flick = 0.75 + 0.25 * ((t * 23.0).sin() * (t * 7.3).cos()).abs();
+        let firing = matches!(h.state, WState::Firing);
+        let bri = ((if firing { 200.0 } else { 70.0 }) * flick) as u8;
+        crate::dynlight::hold(0x9D0_0000, DVec3::new(ue[0] as f64, ue[1] as f64, ue[2] as f64), crate::dynlight::Spec::new(150, 96, bri, if firing { 4.0 } else { 2.5 }), 0.08);
+    }
     light_view_model(h, &mut meshes, &level.0, cam.translation, cam.rotation, &root, dt);
     crate::scope::set_lens(lens_eye.as_ref().and_then(|se| se.posed(&h.shown)).map(|(c, axis, r)| {
         let axis = root.rotation * axis;
         if env_on!("DXVIEW_SCOPELOG") {
             static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 30 == 0 {
+            if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed).is_multiple_of(30) {
                 println!(
                     "SCOPE posed c {:?} rest {:?} r {:.4} axis {:?} root {:?} lens {:?} start {} t {:.2}",
                     c,
@@ -3267,16 +3372,7 @@ pub fn weapon_system(
         )
     }));
 
-    let clip_now = *clips.0.get(&h.stats.class).unwrap_or(&0);
-    let ammo = match (h.stats.hand_to_hand || h.stats.reload_count == 0, pool) {
-        (true, _) => h.stats.name.to_uppercase(),
-        (false, Some(p)) => format!("{}  {} / {}", h.stats.name.to_uppercase(), clip_now, p),
-        (false, None) => format!("{}  {}", h.stats.name.to_uppercase(), clip_now),
-    };
-    // Lean Updates: written only when it changes (each write re-lays out the text).
-    if !crate::perf::lean_updates() || ammo_text.0 != ammo {
-        ammo_text.0 = ammo;
-    }
+
     if let Some(p) = pending_ammo {
         weapons.ammo_note = Some(p);
     }
@@ -3465,6 +3561,7 @@ pub struct FireUse {
     std: std::collections::HashMap<AssetId<StandardMaterial>, Option<usize>>,
     bsp: std::collections::HashMap<AssetId<crate::shadowlight::BspMaterial>, Option<usize>>,
     anim: std::collections::HashMap<AssetId<crate::gpuanim::AnimMaterial>, Option<usize>>,
+    water: std::collections::HashMap<AssetId<crate::water::WaterMaterial>, Option<usize>>,
     /// Seconds since each fire texture was last on screen.
     unseen: Vec<f32>,
     /// This frame: on screen / being simulated (buffers kept between frames).
@@ -3494,6 +3591,11 @@ pub fn fire_texture_system(
     std_q: Query<(&ViewVisibility, &MeshMaterial3d<StandardMaterial>)>,
     bsp_q: Query<(&ViewVisibility, &MeshMaterial3d<crate::shadowlight::BspMaterial>)>,
     anim_q: Query<(&ViewVisibility, &MeshMaterial3d<crate::gpuanim::AnimMaterial>)>,
+    // Classic water's WetTexture / WaveTexture simulations show on water sheets (water.rs material).
+    (mut water_mats, water_q): (
+        ResMut<Assets<crate::water::WaterMaterial>>,
+        Query<(&ViewVisibility, &MeshMaterial3d<crate::water::WaterMaterial>)>,
+    ),
 ) {
     let _prof = crate::prof::scope("weapons::fire_texture_system");
     const RATE: f32 = 1.0 / 40.0;
@@ -3507,6 +3609,7 @@ pub fn fire_texture_system(
         u.std.clear();
         u.bsp.clear();
         u.anim.clear();
+        u.water.clear();
         u.unseen = vec![0.0; n];
     }
     let mut seen = std::mem::take(&mut u.seen);
@@ -3537,9 +3640,21 @@ pub fn fire_texture_system(
                 }
             }
         }
+        for (v, m) in &water_q {
+            if v.get() {
+                let k = *u.water.entry(m.0.id()).or_insert_with(|| water_mats.get(&m.0).and_then(|m| fire_of(&u.index, &m.base)));
+                if let Some(k) = k {
+                    seen[k] = true;
+                }
+            }
+        }
     }
     for (t, s) in u.unseen.iter_mut().zip(&seen) {
         *t = if *s { 0.0 } else { *t + dt };
+    }
+    if env_on!("DXVIEW_FIRELOG") {
+        let names: Vec<usize> = (0..n).filter(|&k| seen[k]).collect();
+        println!("FIRELOG fires {n} seen {names:?} water mats {} water meshes {}", u.water.len(), water_q.iter().count());
     }
     u.seen = seen;
     // (Materials made later - a weapon picked up, a copy for a screen effect - are looked up again now and then.)
@@ -3586,6 +3701,14 @@ pub fn fire_texture_system(
             }
         }
     }
+    // The water material isn't bindless: its bind group holds the texture view it was made with, and every upload
+    // of a simulated picture comes back as a new texture - so a water material showing one is prepared again with
+    // each step (the Classic water stood still on its first frame). One small bind group 40 times a second.
+    let touch: Vec<AssetId<crate::water::WaterMaterial>> =
+        u.water.iter().filter(|(_, k)| k.is_some_and(|k| u.active.get(k).copied().unwrap_or(false))).map(|(id, _)| *id).collect();
+    for id in touch {
+        let _ = water_mats.get_mut(id);
+    }
 }
 
 /// Marks the extra copy of a weapon's flash slot drawn with the muzzle-flash texture.
@@ -3623,14 +3746,7 @@ pub fn add_muzzle_flash(
     let mut mats = Vec::new();
     for t in &texs {
         let img = image_for(assets, images, t);
-        mats.push(materials.add(StandardMaterial {
-            base_color_texture: img,
-            unlit: true,
-            double_sided: true,
-            cull_mode: None,
-            alpha_mode: AlphaMode::Add,
-            ..default()
-        }));
+        mats.push(assets.sprites.material(materials, img));
     }
     let mut e = commands.spawn((
         Mesh3d(handles[i].clone()),
@@ -3667,10 +3783,10 @@ pub fn muzzle_flash_system(
                 *n = n.wrapping_mul(1103515245).wrapping_add(12345);
                 mat.0 = f.mats[((*n >> 16) as usize) % f.mats.len().max(1)].clone();
             }
-            *vis = Visibility::Inherited;
+            vis.set_if_neq(Visibility::Inherited);
             f.left -= dt;
         } else {
-            *vis = Visibility::Hidden;
+            vis.set_if_neq(Visibility::Hidden);
         }
     }
 }
@@ -3810,10 +3926,17 @@ pub fn activate_pickup(
         }
         "Sodacan" => {
             heal(ph, crate::perks::food(2.0));
+            crate::stamina::eat(20.0);
             crate::sound::play_player(&crate::travel::voice("DeusExSounds.Player.MaleBurp"), 1.0, 0.0);
         }
-        "Candybar" => heal(ph, crate::perks::food(2.0)),
-        "SoyFood" => heal(ph, crate::perks::food(5.0)),
+        "Candybar" => {
+            heal(ph, crate::perks::food(2.0));
+            crate::stamina::eat(30.0);
+        }
+        "SoyFood" => {
+            heal(ph, crate::perks::food(5.0));
+            crate::stamina::eat(45.0);
+        }
         "Liquor40oz" => {
             heal(ph, crate::perks::food(2.0));
             ph.drug_timer += 10.0;
@@ -3996,9 +4119,11 @@ pub fn prewarm_view_models_system(
     mut map_gen: Local<u64>,
     mut frames: Local<u32>,
     level: Res<crate::LevelRes>,
+    mut warmed_len: Local<usize>,
 ) {
     if crate::loader::new_map(&mut map_gen) {
         *frames = 0;
+        *warmed_len = usize::MAX;
         done.clear();
         if let Some((e, _)) = cur.take() {
             if let Ok(mut ec) = commands.get_entity(e) {
@@ -4009,13 +4134,16 @@ pub fn prewarm_view_models_system(
     // Not on the title map or the intro (the player's kit there is only for show), and not during cut scenes: wait.
     // A few frames in (a cut scene has started by then) and only where JC can actually draw a weapon.
     *frames = frames.saturating_add(1);
-    let m = level.0.name.to_ascii_lowercase();
+    // Nothing left to warm (until a pickup adds to the inventory): the common case, before any work.
+    if inv.0.items.len() == *warmed_len && cur.is_none() {
+        return;
+    }
     if env_on!("DXVIEW_NO_PREWARM")
         || *frames < 20
         || crate::menus::intro_map()
         || crate::cinematic::active()
-        || m.starts_with("00_intro")
-        || m.starts_with("99_endgame")
+        || crate::util::starts_with_ci(&level.0.name, "00_intro")
+        || crate::util::starts_with_ci(&level.0.name, "99_endgame")
     {
         return;
     }
@@ -4029,14 +4157,17 @@ pub fn prewarm_view_models_system(
         }
         return;
     }
-    let held = weapons.held.as_ref().map(|h| h.stats.class.clone());
+    let held = weapons.held.as_ref().map(|h| h.stats.class.as_str());
     let next = inv
         .0
         .items
         .iter()
-        .map(|i| i.def.class.clone())
-        .find(|c| !done.contains(c) && held.as_deref() != Some(c.as_str()));
-    let Some(class) = next else { return };
+        .map(|i| i.def.class.as_str())
+        .find(|c| !done.contains(*c) && held != Some(c));
+    let Some(class) = next.map(str::to_owned) else {
+        *warmed_len = inv.0.items.len();
+        return;
+    };
     done.insert(class.clone());
     let d = assets.classes.defaults(&class);
     let Some(mut stats) = weapon_stats(&class, &d) else { return };

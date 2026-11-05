@@ -1,56 +1,54 @@
-//! Transcended's vanilla+ fixes (ours, ported by hand from the mod's DeusEx.u source; its files are never read).
-//! Bug fixes that keep the original's intent are switched together by the TranscendedFixes setting (on in the
-//! Modern preset, off in Classic); the mod's bigger changes to play each have their own setting, all off by default:
+//! Optional fixes. Bug fixes that keep the original's intent are switched together by the OptionalFixes setting
+//! (on in the Modern preset, off in Classic); bigger changes to play each have their own setting, all off by
+//! default:
 //!
-//! * TrUnconsciousDeath - unconscious bodies can still be killed by blasts, fire and gas.
-//! * TrNoisyObjects - using doors, buttons, switches, lamps and fixtures makes a noise guards can hear
-//!   (Transcended's bNoisyObjectUsage).
-//! * TrWeaponPointing - a friendly or neutral person you point a drawn weapon at (within 160 units, in view)
+//! * UnconsciousDeath - unconscious bodies can still be killed by blasts, fire and gas.
+//! * NoisyObjects - using doors, buttons, switches, lamps and fixtures makes a noise guards can hear.
+//! * WeaponPointing - a friendly or neutral person you point a drawn weapon at (within 160 units, in view)
 //!   complains (bAIReactToWeapon).
-//! * TrRadarCloak - Thermoptic camo also counts as radar transparency (cameras, turrets, laser beams and placed
+//! * RadarCloak - Thermoptic camo also counts as radar transparency (cameras, turrets, laser beams and placed
 //!   mines miss you), and the Cloak and Radar Transparency augs together pass laser beams.
-//! * TrNpcLimp - people with a crippled leg walk at 85% speed, both legs 70%.
-//! * TrBossResist - Gunther and Walton Simons shrug off tear gas and halon, and take a third of explosions.
-//! * TrLongFlares - flares burn for six minutes instead of thirty seconds.
+//! * NpcLimp - people with a crippled leg walk at 85% speed, both legs 70%.
+//! * BossResist - Gunther and Walton Simons shrug off tear gas and halon, and take a third of explosions.
+//! * LongFlares - flares burn for six minutes instead of thirty seconds.
 //!
-//! Every place that changes says "Transcended" in a comment.
+//! Every place that changes says "Optional" in a comment.
 
-use crate::settings;
 
-/// The bug fixes (TranscendedFixes).
+/// The bug fixes (OptionalFixes).
 pub fn fixes() -> bool {
-    settings::get("TranscendedFixes") > 0.5
+    setting!("OptionalFixes") > 0.5
 }
 
 pub fn unconscious_death() -> bool {
-    settings::get("TrUnconsciousDeath") > 0.5
+    setting!("UnconsciousDeath") > 0.5
 }
 
 pub fn noisy_objects() -> bool {
-    settings::get("TrNoisyObjects") > 0.5
+    setting!("NoisyObjects") > 0.5
 }
 
 pub fn weapon_pointing() -> bool {
-    settings::get("TrWeaponPointing") > 0.5
+    setting!("WeaponPointing") > 0.5
 }
 
 pub fn radar_cloak() -> bool {
-    settings::get("TrRadarCloak") > 0.5
+    setting!("RadarCloak") > 0.5
 }
 
 pub fn npc_limp() -> bool {
-    settings::get("TrNpcLimp") > 0.5
+    setting!("NpcLimp") > 0.5
 }
 
 pub fn boss_resist() -> bool {
-    settings::get("TrBossResist") > 0.5
+    setting!("BossResist") > 0.5
 }
 
 pub fn long_flares() -> bool {
-    settings::get("TrLongFlares") > 0.5
+    setting!("LongFlares") > 0.5
 }
 
-/// Transcended's bNoisyObjectUsage: the player using something sends a LoudNoise of this radius from it.
+/// Noisy object use: the player using something sends a LoudNoise of this radius from it.
 pub fn object_noise(at: bevy::math::DVec3, radius: f64) {
     if noisy_objects() {
         crate::smartai::push_noise(crate::stealth::Noise {
@@ -69,18 +67,13 @@ pub fn never_drops_weapon(class: &str) -> bool {
     fixes() && matches!(class, "AnnaNavarre" | "GuntherHermann" | "WaltonSimons")
 }
 
-/// Pawns immune to gas don't run from it (IsProjectileDangerous: Cloud / GasGrenade not evil for them).
-pub fn gas_immune(class: &str) -> bool {
-    matches!(class, "AnnaNavarre" | "GuntherHermann" | "PaulDenton" | "WaltonSimons" | "MJ12Commando" | "RiotCop")
-}
-
 /// Meshes without the *2H sequences although the pawn may carry a two-handed weapon (JaimeReyes / WIB
 /// HasTwoHandedWeapon False).
 pub fn no_two_handed(class: &str) -> bool {
     fixes() && matches!(class, "JaimeReyes" | "WIB")
 }
 
-/// Transcended's weapon-pointing reaction (setting TrWeaponPointing; AugmentationDisplayWindow with
+/// The weapon-pointing reaction (setting WeaponPointing; AugmentationDisplayWindow with
 /// bAIReactToWeapon): a pawn not hostile to the player, within 160 units under the crosshair, that can see the
 /// player holding a drawn weapon, complains (FutzTimer 8, PlayFutzSound). Not while it's busy with orders that
 /// take it somewhere, fleeing or fighting.
@@ -132,7 +125,7 @@ pub fn weapon_pointing_system(
     }
 }
 
-/// Transcended's unconscious bodies (setting TrUnconsciousDeath; DeusExCarcass.TakeDamage while bNotDead): a blast,
+/// Unconscious bodies (setting UnconsciousDeath; DeusExCarcass.TakeDamage while bNotDead): a blast,
 /// fire or gas that reaches a knocked-out body kills it - it is then a dead body (killed, `<BindName>_Dead`, no
 /// longer `_Unconscious`). (Bodies in water already never stay unconscious here.)
 pub fn unconscious_death_system(
@@ -157,7 +150,7 @@ pub fn unconscious_death_system(
                 flags.0.set_bool(&format!("{}_Dead", n.bind_name), true);
                 flags.0.set_bool(&format!("{}_Unconscious", n.bind_name), false);
             }
-            println!("TRANSCENDED unconscious body {} killed by {kind}", n.bind_name);
+            println!("OPTFIX unconscious body {} killed by {kind}", n.bind_name);
         }
     }
 }

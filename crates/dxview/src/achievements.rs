@@ -1,8 +1,8 @@
 //! Achievements: the fifty of Deus Ex Remastered (names and goals as that release lists them), our own icons, a
 //! persona screen (from the Logs screen's Achievements button) and an unlock notice in the HUD's manner.
 //!
-//! Unlocks are kept for the player, not per save (Save/achievements.txt beside the saves: `id=unix time` lines and
-//! `progress.id=n` for the counted ones). Each one is detected from the same things the game itself tracks:
+//! Unlocks are kept per character, not per save (achievements.txt in the character's save folder, save::active_dir:
+//! `id=unix time` lines and `progress.id=n` for the counted ones; a new character starts with none). Each one is detected from the same things the game itself tracks:
 //! mission arrivals, conversation flags and choices, events (MadeBasket, SecretDoor, alexcloset), takedowns,
 //! augmentations, skills, weapon mods, and a few watched situations (sneaking past guards, a cloaked walk through
 //! someone's view, a body near a Karkian, the Underworld's pool table).
@@ -72,52 +72,157 @@ pub const LIST: [(&str, &str, &str); 50] = [
 /// Counted achievements: (id, target).
 const COUNTED: [(&str, u32); 4] = [("slugger", 3), ("sneak", 3), ("wardenclyffe", 3), ("atomheart", 3)];
 
+/// Ours: the endings (and reaching them) count for every character once any character has done it, so all three
+/// can be had over several playthroughs (Save/achievements_global.txt keeps who did it first).
+pub const GLOBAL: [&str; 4] = ["area51", "helios", "darkage", "illuminati"];
+
+/// Ours: achievements whose name or goal gives the story away: blurred with a lock over them until unlocked.
+pub const SPOILER: [&str; 21] = [
+    "lebedev", "choices", "breakout", "escapa", "sawnothing", "dibbuk", "renton", "hero", "tail", "meanjoe", "nerves",
+    "tonjc", "notmachine", "shame", "templars", "vandenberg", "sea", "area51", "helios", "darkage", "illuminati",
+];
+
+pub fn is_global(id: &str) -> bool {
+    GLOBAL.contains(&id)
+}
+
+pub fn is_spoiler(id: &str) -> bool {
+    SPOILER.contains(&id)
+}
+
 #[derive(Default)]
 struct Store {
     loaded: bool,
+    /// The character whose file is loaded.
+    char: String,
+    /// This character's own unlocks.
     unlocked: HashMap<String, u64>,
     progress: HashMap<String, u32>,
+    /// The GLOBAL ones any character has: (time, that character's name).
+    global: HashMap<String, (u64, String)>,
     /// Unlocked this session, waiting to be shown.
     popups: Vec<String>,
+}
+
+impl Store {
+    fn has(&self, id: &str) -> bool {
+        self.unlocked.contains_key(id) || self.global.contains_key(id)
+    }
+
+    fn when(&self, id: &str) -> Option<u64> {
+        self.unlocked.get(id).copied().or_else(|| self.global.get(id).map(|g| g.0))
+    }
+
+    /// Majestic Revelations: everything else (own or global).
+    fn check_majestic(&mut self) {
+        if !self.unlocked.contains_key("majestic") && LIST.iter().filter(|a| a.0 != "majestic").all(|a| self.has(a.0)) {
+            self.unlocked.insert("majestic".into(), now_secs());
+            self.popups.push("majestic".into());
+        }
+    }
 }
 
 static STORE: std::sync::LazyLock<Mutex<Store>> = std::sync::LazyLock::new(|| Mutex::new(Store::default()));
 
 fn path() -> std::path::PathBuf {
-    crate::save::dir().join("achievements.txt")
+    crate::save::active_dir().join("achievements.txt")
+}
+
+fn global_path() -> std::path::PathBuf {
+    crate::save::dir().join("achievements_global.txt")
+}
+
+/// The character changed (a new game, a load): the next look reads that character's file.
+pub fn character_changed() {
+    if let Ok(mut s) = STORE.lock() {
+        s.loaded = false;
+    }
+}
+
+/// One achievements.txt: (the character's name if written, unlocks, progress, format 2?).
+fn parse(text: &str) -> (Option<String>, HashMap<String, u64>, HashMap<String, u32>, bool) {
+    let (mut name, mut un, mut pr, mut f2) = (None, HashMap::new(), HashMap::new(), false);
+    for line in text.lines() {
+        let l = line.trim();
+        if l == "format=2" {
+            f2 = true;
+            continue;
+        }
+        if let Some(n) = l.strip_prefix("name=") {
+            name = Some(n.to_string());
+            continue;
+        }
+        let Some((k, v)) = l.split_once('=') else { continue };
+        let v: u64 = v.trim().parse().unwrap_or(0);
+        if let Some(id) = k.strip_prefix("progress.") {
+            pr.insert(id.to_string(), v as u32);
+        } else {
+            un.insert(k.trim().to_string(), v);
+        }
+    }
+    (name, un, pr, f2)
+}
+
+fn load_global() -> HashMap<String, (u64, String)> {
+    let mut g = HashMap::new();
+    let Ok(text) = std::fs::read_to_string(global_path()) else { return g };
+    for line in text.lines() {
+        let Some((k, v)) = line.trim().split_once('=') else { continue };
+        let (t, who) = v.split_once(';').unwrap_or((v, ""));
+        if is_global(k) {
+            g.insert(k.to_string(), (t.trim().parse().unwrap_or(0), who.to_string()));
+        }
+    }
+    g
+}
+
+fn save_global(g: &HashMap<String, (u64, String)>) {
+    let mut ids: Vec<_> = g.iter().collect();
+    ids.sort();
+    let out: String = ids.iter().map(|(k, (t, w))| format!("{k}={t};{w}\n")).collect();
+    let _ = std::fs::create_dir_all(crate::save::dir());
+    let _ = std::fs::write(global_path(), out);
 }
 
 fn load(s: &mut Store) {
-    if s.loaded {
+    let who = crate::save::active_char();
+    if s.loaded && s.char == who {
         return;
     }
     s.loaded = true;
-    let Ok(text) = std::fs::read_to_string(path()) else { return };
+    s.char = who;
+    s.unlocked.clear();
+    s.progress.clear();
+    s.popups.clear();
+    s.global = load_global();
+    let Ok(text) = std::fs::read_to_string(path()) else {
+        s.check_majestic();
+        return;
+    };
+    let (_, un, pr, f2) = parse(&text);
+    s.unlocked = un;
+    s.progress = pr;
     // Files from before format 2 may hold mission achievements the intro / endgame maps (missions 98 / 99) handed
     // out on arrival: those are dropped (arriving in a mission unlocks the ones behind it again).
-    let old = !text.lines().any(|l| l.trim() == "format=2");
-    for line in text.lines() {
-        if line.trim() == "format=2" {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else { continue };
-        let v: u64 = v.trim().parse().unwrap_or(0);
-        if let Some(id) = k.strip_prefix("progress.") {
-            s.progress.insert(id.to_string(), v as u32);
-        } else {
-            s.unlocked.insert(k.trim().to_string(), v);
-        }
-    }
-    if old {
+    if !f2 {
         for id in ["lady", "town", "lebedev", "choices", "breakout", "hongkong", "tanker1", "tanker2", "paree", "templars", "vandenberg", "sea", "tonjc", "hero", "majestic"] {
             s.unlocked.remove(id);
         }
+        save(s);
+    }
+    // An ending another character reached may complete the set.
+    let before = s.unlocked.contains_key("majestic");
+    s.check_majestic();
+    if !before && s.unlocked.contains_key("majestic") {
         save(s);
     }
 }
 
 fn save(s: &Store) {
     let mut out = String::from("format=2\n");
+    if let Some(n) = crate::travel::with_session(|g| g.name.clone()).filter(|n| !n.trim().is_empty()) {
+        out.push_str(&format!("name={n}\n"));
+    }
     let mut ids: Vec<_> = s.unlocked.iter().collect();
     ids.sort();
     for (k, v) in ids {
@@ -128,7 +233,7 @@ fn save(s: &Store) {
     for (k, v) in pr {
         out.push_str(&format!("progress.{k}={v}\n"));
     }
-    let _ = std::fs::create_dir_all(crate::save::dir());
+    let _ = std::fs::create_dir_all(crate::save::active_dir());
     let _ = std::fs::write(path(), out);
 }
 
@@ -136,21 +241,27 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Unlocks an achievement (once).
+/// Unlocks an achievement (once per character; GLOBAL ones also for every character).
 pub fn unlock(id: &str) {
     let Ok(mut s) = STORE.lock() else { return };
     load(&mut s);
     if s.unlocked.contains_key(id) || !LIST.iter().any(|a| a.0 == id) {
         return;
     }
-    s.unlocked.insert(id.to_string(), now_secs());
-    s.popups.push(id.to_string());
-    println!("ACHIEVEMENT {id}");
-    // Majestic Revelations: everything else.
-    if id != "majestic" && LIST.iter().filter(|a| a.0 != "majestic").all(|a| s.unlocked.contains_key(a.0)) {
-        s.unlocked.insert("majestic".into(), now_secs());
-        s.popups.push("majestic".into());
+    let t = now_secs();
+    // A GLOBAL one another character already has still goes in this character's file (the menu's list of who
+    // unlocked it) but isn't announced again.
+    if !s.global.contains_key(id) {
+        s.popups.push(id.to_string());
     }
+    s.unlocked.insert(id.to_string(), t);
+    if is_global(id) && !s.global.contains_key(id) {
+        let who = crate::travel::with_session(|g| g.name.clone()).unwrap_or_default();
+        s.global.insert(id.to_string(), (t, who));
+        save_global(&s.global);
+    }
+    println!("ACHIEVEMENT {id}");
+    s.check_majestic();
     save(&s);
 }
 
@@ -174,11 +285,11 @@ pub fn add_progress(id: &str, n: u32) {
     }
 }
 
-/// (unlocked unix time, progress) for the persona screen.
+/// (unlocked unix time, progress) for the persona screen (GLOBAL ones count from any character).
 pub fn state(id: &str) -> (Option<u64>, u32) {
     let Ok(mut s) = STORE.lock() else { return (None, 0) };
     load(&mut s);
-    (s.unlocked.get(id).copied(), s.progress.get(id).copied().unwrap_or(0))
+    (s.when(id), s.progress.get(id).copied().unwrap_or(0))
 }
 
 pub fn target(id: &str) -> u32 {
@@ -188,7 +299,54 @@ pub fn target(id: &str) -> u32 {
 pub fn unlocked_count() -> usize {
     let Ok(mut s) = STORE.lock() else { return 0 };
     load(&mut s);
-    s.unlocked.len()
+    LIST.iter().filter(|a| s.has(a.0)).count()
+}
+
+/// One character's achievements for the main menu's Achievements screen.
+pub struct CharAch {
+    pub name: String,
+    pub unlocked: HashMap<String, u64>,
+}
+
+/// Every character's achievements (Save/achievements.txt for the saves from before characters, and each
+/// Save/Characters/<id>/achievements.txt), with the GLOBAL ones' first finder.
+pub fn all_characters() -> (Vec<CharAch>, HashMap<String, (u64, String)>) {
+    let mut v = Vec::new();
+    let mut read = |p: std::path::PathBuf, id: &str| {
+        let Ok(text) = std::fs::read_to_string(&p) else { return };
+        let (name, unlocked, _, _) = parse(&text);
+        if unlocked.is_empty() {
+            return;
+        }
+        let name = name.unwrap_or_else(|| char_label(id));
+        v.push(CharAch { name, unlocked });
+    };
+    read(crate::save::dir().join("achievements.txt"), "");
+    if let Ok(rd) = std::fs::read_dir(crate::save::dir().join("Characters")) {
+        let mut dirs: Vec<_> = rd.flatten().filter(|e| e.path().is_dir()).collect();
+        dirs.sort_by_key(|e| e.file_name());
+        for e in dirs {
+            let id = e.file_name().to_string_lossy().to_string();
+            read(e.path().join("achievements.txt"), &id);
+        }
+    }
+    (v, load_global())
+}
+
+/// A character id ("JC_Denton-1793404800") as a name ("JC Denton").
+fn char_label(id: &str) -> String {
+    if id.is_empty() {
+        return "Earlier saves".into();
+    }
+    let mut stem = id;
+    while let Some((a, b)) = stem.rsplit_once('-') {
+        if b.chars().all(|c| c.is_ascii_digit()) {
+            stem = a;
+        } else {
+            break;
+        }
+    }
+    stem.replace('_', " ").trim().to_string()
 }
 
 // ------------------------------------------------------------------------------------------------ hooks
@@ -209,13 +367,20 @@ pub fn choice(con: &str, text: &str) {
     if con.eq_ignore_ascii_case("ClubMercedesConvo1") && text.trim().eq_ignore_ascii_case("Sure.") {
         unlock("sure");
     }
-    if con.eq_ignore_ascii_case("M11MeetGunther") && crate::util::contains_ci(&text, "laputan machine") {
+    if con.eq_ignore_ascii_case("M11MeetGunther") && crate::util::contains_ci(text, "laputan machine") {
         unlock("notmachine");
     }
 }
 
 /// A pawn was taken down (ai.rs).
 pub fn takedown(by_player: bool, class: &str, bind: &str, blocker: usize, explosive: bool) {
+    let _ = class;
+    let melee_strength = by_player && crate::perks::in_hand_melee() && crate::abilities::aug_active("AugCombat");
+    takedown_with(by_player, bind, blocker, explosive, melee_strength);
+}
+
+/// takedown with what it asks the world worked out: `melee_strength` = a melee weapon in hand and Combat Strength on.
+pub fn takedown_with(by_player: bool, bind: &str, blocker: usize, explosive: bool, melee_strength: bool) {
     if !by_player {
         // Aggressive Defense: a pawn killed by the blast of its own projectile, which the ADS set off.
         if explosive && ads_owner_recent(blocker) {
@@ -229,8 +394,7 @@ pub fn takedown(by_player: bool, class: &str, bind: &str, blocker: usize, explos
     if bind.eq_ignore_ascii_case("SickMan") {
         unlock("servant");
     }
-    let _ = class;
-    if crate::perks::in_hand_melee() && crate::abilities::aug_active("AugCombat") {
+    if melee_strength {
         add_progress("slugger", 1);
     }
 }
@@ -251,27 +415,35 @@ fn ads_owner_recent(blocker: usize) -> bool {
 
 /// A weapon mod went on (weapons::fit_mod): every upgrade the weapon can take is on it.
 pub fn mods_fitted(w: &crate::weapons::WeaponStats, m: &crate::weapons::ModState) {
-    let c = &w.can_mod;
+    if all_mods_on(&w.can_mod, w.has_scope, w.silenced, w.has_laser, m) {
+        unlock("lockload");
+    }
+}
+
+/// Every upgrade a weapon can take is on it (scope / silencer / laser count when the weapon came with one).
+pub fn all_mods_on(c: &[bool; 8], has_scope: bool, silenced: bool, has_laser: bool, m: &crate::weapons::ModState) -> bool {
     let ok = (!c[0] || m.accuracy > 0.0)
         && (!c[1] || m.clip > 0.0)
         && (!c[2] || m.range > 0.0)
         && (!c[3] || m.reload < 0.0)
         && (!c[4] || m.recoil < 0.0)
-        && (!c[5] || w.has_scope || m.scope)
-        && (!c[6] || w.silenced || m.silencer)
-        && (!c[7] || w.has_laser || m.laser);
-    if ok && c.iter().any(|x| *x) {
-        unlock("lockload");
-    }
+        && (!c[5] || has_scope || m.scope)
+        && (!c[6] || silenced || m.silencer)
+        && (!c[7] || has_laser || m.laser);
+    ok && c.iter().any(|x| *x)
 }
 
 /// While the cloak / radar transparency hides the player from a pawn that's looking right at him (ai.rs).
 pub fn hidden_in_view(robot: bool) {
+    hidden_in_view_with(robot, crate::abilities::aug_active("AugCloak"), crate::abilities::aug_active("AugRadarTrans"));
+}
+
+pub fn hidden_in_view_with(robot: bool, cloak: bool, radar: bool) {
     if robot {
-        if crate::abilities::aug_active("AugRadarTrans") {
+        if radar {
             unlock("automoto");
         }
-    } else if crate::abilities::aug_active("AugCloak") {
+    } else if cloak {
         unlock("section9");
     }
 }
@@ -300,9 +472,7 @@ pub struct Watch {
 }
 
 fn mission_of(lvl: &dx_level::Level) -> i32 {
-    lvl.actors
-        .iter()
-        .find(|a| a.class == "DeusExLevelInfo")
+    lvl.level_info()
         .and_then(|a| match unreal_pkg::props::find(&a.props, "MissionNumber") {
             Some(unreal_pkg::props::Value::Int(n)) => Some(*n),
             Some(unreal_pkg::props::Value::Byte(n)) => Some(*n as i32),
@@ -343,6 +513,9 @@ pub fn achievements_system(
         st.states.clear();
         st.carried.clear();
         st.pool = None;
+        // The notice's UI layer went with the old map's entities (it was made on the first map - the intro for a
+        // new game - so no notice ever showed after it).
+        st.layer = None;
         on_arrival(st.mission, &st.map, &flags.0);
     }
     // ---- the unlock notice
@@ -359,98 +532,20 @@ pub fn achievements_system(
         return;
     }
     let period = std::mem::take(&mut st.tick);
-    let f = &flags.0;
-    let fl = |n: &str| f.get_bool(n);
-    // ---- flags
-    // Rescue the Lady: as soon as Liberty Island's mission is done (the statue cleared), not only on reaching
-    // mission 2 (the notice used to come on the next map's arrival, behind its loading screen).
-    if fl("StatueMissionComplete") {
-        unlock("lady");
-    }
-    if fl("TerroristFollowup2_Played") {
-        unlock("based");
-    }
-    if fl("SimonsInterrogating3_Played") {
-        unlock("sawnothing");
-    }
-    // (Confix renames Everett's Ray conversation to AJumper2xMechanic.)
-    if fl("TalkAboutRay_Played") || fl("AJumper21Mechanic_Played") || fl("AJumper22Mechanic_Played") || fl("AJumper23Mechanic_Played") {
-        unlock("dibbuk");
-    }
-    if fl("M12MeetSandraRenton_Played") {
-        unlock("renton");
-    }
-    if fl("RentonLateComment_Played") {
-        unlock("shame");
-    }
-    if fl("LebedevAnnaDead_Played") {
-        unlock("nerves");
-    }
-    if fl("AnnaExitKillphrase_Played") {
-        unlock("howdid");
-    }
-    if fl("GreenKnowsAboutDowd") && (fl("MS_ShadyGuyUnhidden") || fl("MS_UnhideCommandos")) {
-        unlock("tail");
-    }
-    if fl("JoeGreen_Dead") {
-        unlock("meanjoe");
-    }
-    if fl("Endgame1_Played") {
-        unlock("darkage");
-        unlock("area51");
-    }
-    if fl("Endgame2_Played") {
-        unlock("helios");
-        unlock("area51");
-    }
-    if fl("Endgame3_Played") {
-        unlock("illuminati");
-        unlock("area51");
-    }
-    if st.mission == 1 && inv.0.items.iter().any(|i| i.def.class == "WeaponAssaultGun") {
-        unlock("nicegun");
-    }
+    check_flags(&flags.0, st.mission, inv.0.items.iter().any(|i| i.def.class == "WeaponAssaultGun"));
     // ---- skills and augmentations
     {
         let ab = crate::abilities::lock();
         if let Some(a) = ab.as_ref() {
-            if a.skills.list.iter().filter(|s| s.level >= 3).count() >= 2 {
-                unlock("veteran");
-            }
-            let mut locs = [false; 6];
-            for g in a.augs.list.iter().filter(|g| g.has) {
-                if (g.def.location as usize) < 6 {
-                    locs[g.def.location as usize] = true;
-                }
-                if g.level >= g.def.max_level && !g.boosted && g.def.max_level > 0 {
-                    unlock("upgrades");
-                }
-            }
-            if locs.iter().all(|x| *x) {
-                unlock("biomachina");
-            }
-            if a.augs.list.iter().filter(|g| g.boosted).count() >= 3 {
-                add_progress("atomheart", 3);
-            }
-            // The running augs, compared with last frame's in place (rebuilt only when they change).
-            let on = || a.augs.list.iter().filter(|g| g.active).map(|g| g.def.class.as_str());
-            let power = on().any(|c| c == "AugPower");
-            if power {
-                let newly = on().filter(|c| *c != "AugPower" && !st.active.contains(*c)).count() as u32;
-                // (The ones already on when it came on don't count; it's activations while it runs.)
-                if st.active.contains("AugPower") {
-                    st.power_count += newly;
-                }
-                if st.power_count >= 3 {
-                    add_progress("wardenclyffe", 3);
-                }
-            } else {
-                st.power_count = 0;
-            }
-            if on().count() != st.active.len() || on().any(|c| !st.active.contains(c)) {
-                st.active.clear();
-                st.active.extend(on().map(str::to_owned));
-            }
+            let skills: Vec<usize> = a.skills.list.iter().map(|s| s.level).collect();
+            let augs: Vec<AugView> = a
+                .augs
+                .list
+                .iter()
+                .map(|g| AugView { class: &g.def.class, location: g.def.location as usize, level: g.level, max: g.def.max_level, boosted: g.boosted, has: g.has, active: g.active })
+                .collect();
+            let w = &mut *st;
+            check_abilities(&skills, &augs, &mut w.active, &mut w.power_count);
         }
     }
     // ---- pawns: sneaking past, going on alert behind a wall, eating bodies
@@ -517,6 +612,118 @@ pub fn achievements_system(
     let _ = period;
 }
 
+/// The achievements that follow from the game's flags (polled four times a second), and Nice Gun.
+pub fn check_flags(f: &imsim_core::flags::FlagBase, mission: i32, has_assault_gun: bool) {
+    let fl = |n: &str| f.get_bool(n);
+    // ---- flags
+    // Rescue the Lady: as soon as Liberty Island's mission is done (the statue cleared), not only on reaching
+    // mission 2 (the notice used to come on the next map's arrival, behind its loading screen).
+    if fl("StatueMissionComplete") {
+        unlock("lady");
+    }
+    if fl("TerroristFollowup2_Played") {
+        unlock("based");
+    }
+    if fl("SimonsInterrogating3_Played") {
+        unlock("sawnothing");
+    }
+    if fl("TalkAboutRay_Played") {
+        unlock("dibbuk");
+    }
+    if fl("M12MeetSandraRenton_Played") {
+        unlock("renton");
+    }
+    if fl("RentonLateComment_Played") {
+        unlock("shame");
+    }
+    if fl("LebedevAnnaDead_Played") {
+        unlock("nerves");
+    }
+    if fl("AnnaExitKillphrase_Played") {
+        unlock("howdid");
+    }
+    if fl("GreenKnowsAboutDowd") && (fl("MS_ShadyGuyUnhidden") || fl("MS_UnhideCommandos")) {
+        unlock("tail");
+    }
+    // (Joe Greene's body flag is JoeGreene_Dead - his class's BindName. Mission08's "JoeGreen_Dead" is a typo
+    // in the original script and is never set, so the achievement waited on it forever.)
+    if fl("JoeGreene_Dead") {
+        unlock("meanjoe");
+    }
+    if fl("Endgame1_Played") {
+        unlock("darkage");
+        unlock("area51");
+    }
+    if fl("Endgame2_Played") {
+        unlock("helios");
+        unlock("area51");
+    }
+    if fl("Endgame3_Played") {
+        unlock("illuminati");
+        unlock("area51");
+    }
+    if mission == 1 && has_assault_gun {
+        unlock("nicegun");
+    }
+}
+
+/// One augmentation as the achievements see it.
+pub struct AugView<'a> {
+    pub class: &'a str,
+    pub location: usize,
+    pub level: usize,
+    pub max: usize,
+    pub boosted: bool,
+    pub has: bool,
+    pub active: bool,
+}
+
+/// Veteran Agent, Upgrades, Biomachina, Atom Heart Son and Wardenclyffe Man from the skills and augmentations.
+/// `active` / `power_count`: the running augs last time and the activations counted during this Power Recirculator run.
+pub fn check_abilities(skills: &[usize], augs: &[AugView], active: &mut HashSet<String>, power_count: &mut u32) {
+    if skills.iter().filter(|l| **l >= 3).count() >= 2 {
+        unlock("veteran");
+    }
+    let mut locs = [false; 6];
+    for g in augs.iter().filter(|g| g.has) {
+        if g.location < 6 {
+            locs[g.location] = true;
+        }
+        if g.level >= g.max && !g.boosted && g.max > 0 {
+            unlock("upgrades");
+        }
+    }
+    if locs.iter().all(|x| *x) {
+        unlock("biomachina");
+    }
+    if augs.iter().filter(|g| g.boosted).count() >= 3 {
+        add_progress("atomheart", 3);
+    }
+    // The running augs, compared with last time's (rebuilt only when they change).
+    let on = || augs.iter().filter(|g| g.active).map(|g| g.class);
+    if on().any(|c| c == "AugPower") {
+        // (The ones already on when it came on don't count; it's activations while it runs.)
+        let newly = on().filter(|c| *c != "AugPower" && !active.contains(*c)).count() as u32;
+        if active.contains("AugPower") {
+            *power_count += newly;
+        }
+        if *power_count >= 3 {
+            add_progress("wardenclyffe", 3);
+        }
+    } else {
+        *power_count = 0;
+    }
+    if on().count() != active.len() || on().any(|c| !active.contains(c)) {
+        active.clear();
+        active.extend(on().map(str::to_owned));
+    }
+}
+
+#[cfg(test)]
+pub fn arrival_for_test(mission: i32, map: &str, f: &imsim_core::flags::FlagBase) {
+    on_arrival(mission, map, f);
+}
+
 /// Mission arrivals: the mission before this one is done; and the story checks made on the way in.
 fn on_arrival(mission: i32, map: &str, f: &imsim_core::flags::FlagBase) {
     // Only the story's missions: the intro and the endgame cut scenes are missions 98 / 99, the title -2.
@@ -568,7 +775,7 @@ fn draw_popup(
     let layer = st.layer.get_or_insert_with(|| crate::menuui::layer(commands, images, layers, 30));
     let Some((id, t)) = st.popup.as_mut() else {
         if let Ok((_, mut v, _)) = nodes.get_mut(layer.e) {
-            *v = Visibility::Hidden;
+            v.set_if_neq(Visibility::Hidden);
         }
         return;
     };
@@ -577,7 +784,7 @@ fn draw_popup(
     if *t > LIFE {
         st.popup = None;
         if let Ok((_, mut v, _)) = nodes.get_mut(layer.e) {
-            *v = Visibility::Hidden;
+            v.set_if_neq(Visibility::Hidden);
         }
         return;
     }
@@ -848,15 +1055,66 @@ pub fn icon(i: usize, unlocked: bool, col: [u8; 3]) -> UiTex {
 /// The persona Achievements screen's list (inside the Logs screen's frame): returns the scroll range.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_list(c: &mut Canvas, head: &crate::uicanvas::UiFont, small: &crate::uicanvas::UiFont, x: i32, y: i32, w: i32, h: i32, scroll: i32) -> i32 {
-    const ROW: i32 = 46;
+    let global = {
+        let Ok(mut s) = STORE.lock() else { return 0 };
+        load(&mut s);
+        s.global.clone()
+    };
+    draw_rows(c, head, small, (x, y, w, h), scroll, &|id| {
+        let (when, prog) = state(id);
+        // A GLOBAL one another character reached: say who.
+        let by = global.get(id).filter(|g| !g.1.is_empty() && crate::travel::with_session(|s| s.name != g.1).unwrap_or(true));
+        (when, prog, by.map(|g| format!("All characters: reached by {}", g.1)))
+    })
+}
+
+/// The main menu's Achievements screen: every character's. Returns the scroll range.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_all(
+    c: &mut Canvas,
+    head: &crate::uicanvas::UiFont,
+    small: &crate::uicanvas::UiFont,
+    r: (i32, i32, i32, i32),
+    scroll: i32,
+    chars: &[CharAch],
+    global: &HashMap<String, (u64, String)>,
+) -> i32 {
+    draw_rows(c, head, small, r, scroll, &|id| {
+        let who: Vec<&str> = chars.iter().filter(|ch| ch.unlocked.contains_key(id)).map(|ch| ch.name.as_str()).collect();
+        let first = chars.iter().filter_map(|ch| ch.unlocked.get(id).copied()).min().or_else(|| global.get(id).map(|g| g.0));
+        let line = if who.is_empty() {
+            None
+        } else if is_global(id) {
+            Some(format!("All characters (first: {})", global.get(id).map_or(who[0], |g| if g.1.is_empty() { who[0] } else { g.1.as_str() })))
+        } else {
+            Some(format!("Unlocked by: {}", who.join(", ")))
+        };
+        (first, 0, line)
+    })
+}
+
+pub const ROW: i32 = 46;
+
+/// The rows: icon, name, date / progress / Locked, the goal (and an extra line when given). Spoilers that are still
+/// locked are drawn, then blurred and dimmed with a padlock over the middle.
+#[allow(clippy::type_complexity)]
+fn draw_rows(
+    c: &mut Canvas,
+    head: &crate::uicanvas::UiFont,
+    small: &crate::uicanvas::UiFont,
+    (x, y, w, h): (i32, i32, i32, i32),
+    scroll: i32,
+    info: &dyn Fn(&str) -> (Option<u64>, u32, Option<String>),
+) -> i32 {
     let col = crate::menuui::h_col(9);
     c.set_clip(Some((x, y, w, h)));
+    let lock = lock_tex(col);
     for (i, (id, name, goal)) in LIST.iter().enumerate() {
         let ry = y + i as i32 * ROW - scroll;
         if ry + ROW < y || ry > y + h {
             continue;
         }
-        let (when, prog) = state(id);
+        let (when, prog, extra) = info(id);
         let on = when.is_some();
         let ic = icon(i, on, col);
         c.texture(x + 4, ry + 5, 36, 36, 0, 0, &ic, Style::Masked, [255, 255, 255]);
@@ -869,13 +1127,80 @@ pub fn draw_list(c: &mut Canvas, head: &crate::uicanvas::UiFont, small: &crate::
         };
         c.text(small, x + w - 96, ry + 4, 90, small.height, HAlign::Right, VAlign::Top, if on { col } else { [120, 124, 128] }, &status);
         let lines = crate::uicanvas::wrap(small, goal, w - 54);
-        for (k, l) in lines.iter().take(2).enumerate() {
-            c.text(small, x + 46, ry + 4 + head.height + 2 + k as i32 * small.height, w - 54, small.height, HAlign::Left, VAlign::Top, if on { col } else { [128, 132, 136] }, l);
+        let n = if extra.is_some() { 1 } else { 2 };
+        let gy = ry + 4 + head.height + 2;
+        for (k, l) in lines.iter().take(n).enumerate() {
+            c.text(small, x + 46, gy + k as i32 * small.height, w - 54, small.height, HAlign::Left, VAlign::Top, if on { col } else { [128, 132, 136] }, l);
+        }
+        if let Some(e) = &extra {
+            c.text(small, x + 46, gy + small.height, w - 54, small.height, HAlign::Left, VAlign::Top, [200, 200, 200], e);
+        }
+        if !on && is_spoiler(id) {
+            // Everything but the status column, so "Locked" stays readable.
+            let (bx, by) = (x + 2, ry.max(y));
+            let bh = (ry + ROW - 1).min(y + h) - by;
+            c.blur(bx, by, w - 100, bh, 3, 0.1);
+            let (lx, ly) = (x + (w - 100) / 2 - lock.w as i32 / 2, ry + (ROW - lock.h as i32) / 2);
+            c.texture(lx, ly, lock.w as i32, lock.h as i32, 0, 0, &lock, Style::Masked, [255, 255, 255]);
         }
         c.fill(x + 2, ry + ROW - 1, w - 4, 1, Style::Normal, [40, 44, 48]);
     }
     c.set_clip(None);
     (LIST.len() as i32 * ROW - h).max(0)
+}
+
+/// A padlock, 18 x 22, in the theme colour with a dark outline (over blurred spoilers).
+fn lock_tex(col: [u8; 3]) -> UiTex {
+    const W: usize = 18;
+    const H: usize = 22;
+    const SS: usize = 4;
+    // Unit square shapes (y down): the shackle ring cut below its middle, the body, a keyhole.
+    let shapes = [S::O(0.5, 0.36, 0.26, 0.13)];
+    let body = S::R(0.12, 0.42, 0.88, 0.96);
+    let hole = [S::C(0.5, 0.62, 0.08), S::R(0.46, 0.62, 0.54, 0.8)];
+    let mut cov = vec![(0f32, 0f32); W * H];
+    for py in 0..H {
+        for px in 0..W {
+            let (mut fill, mut cut) = (0, 0);
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let fx = (px as f32 + (sx as f32 + 0.5) / SS as f32) / W as f32;
+                    let fy = (py as f32 + (sy as f32 + 0.5) / SS as f32) / H as f32;
+                    let ring = shapes.iter().any(|s| inside(*s, fx, fy)) && fy < 0.45;
+                    let b = inside(body, fx, fy);
+                    let k = hole.iter().any(|s| inside(*s, fx, fy));
+                    if (ring || b) && !(b && k) {
+                        fill += 1;
+                    }
+                    if b && k {
+                        cut += 1;
+                    }
+                }
+            }
+            cov[py * W + px] = (fill as f32 / (SS * SS) as f32, cut as f32 / (SS * SS) as f32);
+        }
+    }
+    let mut px = vec![[0u8; 4]; W * H];
+    for y in 0..H {
+        for x in 0..W {
+            let (k, hole) = cov[y * W + x];
+            // Outline: anything next to the lock.
+            let near = (-1i32..=1).any(|dy| {
+                (-1i32..=1).any(|dx| {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    nx >= 0 && ny >= 0 && (nx as usize) < W && (ny as usize) < H && cov[ny as usize * W + nx as usize].0 > 0.3
+                })
+            });
+            let t = 1.0 - y as f32 / H as f32;
+            let fg = [0, 1, 2].map(|j| col[j] as f32 + (255.0 - col[j] as f32) * t * 0.5);
+            if k > 0.3 {
+                px[y * W + x] = [fg[0] as u8, fg[1] as u8, fg[2] as u8, 255];
+            } else if hole > 0.3 || near {
+                px[y * W + x] = [10, 11, 13, 255];
+            }
+        }
+    }
+    UiTex { w: W as u32, h: H as u32, px }
 }
 
 /// A unix time as a calendar date (UTC), MM/DD/YYYY.

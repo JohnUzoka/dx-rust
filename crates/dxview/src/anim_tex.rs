@@ -15,6 +15,12 @@ struct Anim {
     at: usize,
     /// Belongs to the current level's textures (dropped with it); runtime-loaded images stay.
     level: bool,
+    /// The materials drawing it (found once): touched with each new frame - a bindless material keeps the texture
+    /// view it was prepared with, so with the level's surfaces on bindless BspMaterials the swapped picture never
+    /// reached the screen (New Vision's monitors stood still).
+    mats: Option<(Vec<AssetId<crate::shadowlight::BspMaterial>>, Vec<AssetId<StandardMaterial>>)>,
+    /// Game time something drawing it was last on screen (a loop nobody sees doesn't step).
+    seen: f32,
 }
 
 static ANIMS: Mutex<Vec<Anim>> = Mutex::new(Vec::new());
@@ -47,14 +53,68 @@ pub fn register(lib: &mut dx_level::TexLib, path: &str, handle: &Handle<Image>, 
         if a.iter().any(|x| x.handle == *handle) {
             return;
         }
-        a.push(Anim { handle: handle.clone(), frames, step, t: 0.0, at: 0, level });
+        if env_on!("DXVIEW_ANIMLOG") {
+            println!("ANIMTEX {path}: {} frames, {:.3} s each", frames.len(), step);
+        }
+        a.push(Anim { handle: handle.clone(), frames, step, t: 0.0, at: 0, level, mats: None, seen: 0.0 });
     }
 }
 
-pub fn anim_tex_system(time: Res<Time>, mut images: ResMut<Assets<Image>>) {
+/// The images that loop (gpudrive.rs keeps the surfaces showing them CPU-culled).
+pub fn images() -> Vec<AssetId<Image>> {
+    ANIMS.lock().map(|l| l.iter().map(|a| a.handle.id()).collect()).unwrap_or_default()
+}
+
+#[allow(clippy::type_complexity)]
+pub fn anim_tex_system(
+    time: Res<Time>,
+    mut images: ResMut<Assets<Image>>,
+    mut bsp: ResMut<Assets<crate::shadowlight::BspMaterial>>,
+    mut std_mats: ResMut<Assets<StandardMaterial>>,
+    drawn: Query<(&ViewVisibility, Option<&MeshMaterial3d<StandardMaterial>>, Option<&MeshMaterial3d<crate::shadowlight::BspMaterial>>), With<Mesh3d>>,
+    mut visible: Local<(std::collections::HashSet<AssetId<StandardMaterial>>, std::collections::HashSet<AssetId<crate::shadowlight::BspMaterial>>)>,
+) {
+    let _prof = crate::prof::scope("anim_tex::anim_tex_system");
     let dt = time.delta_secs().min(0.25);
+    let now = time.elapsed_secs();
     let Ok(mut list) = ANIMS.lock() else { return };
+    if list.is_empty() {
+        return;
+    }
+    // The materials something on screen draws this frame.
+    visible.0.clear();
+    visible.1.clear();
+    for (v, sm, bm) in &drawn {
+        if !v.get() {
+            continue;
+        }
+        if let Some(m) = sm {
+            visible.0.insert(m.0.id());
+        }
+        if let Some(m) = bm {
+            visible.1.insert(m.0.id());
+        }
+    }
     for a in list.iter_mut() {
+        if a.mats.is_none() {
+            let id = a.handle.id();
+            let b: Vec<_> = bsp.iter().filter(|(_, m)| m.base.base_color_texture.as_ref().is_some_and(|h| h.id() == id)).map(|(i, _)| i).collect();
+            let s: Vec<_> = std_mats.iter().filter(|(_, m)| m.base_color_texture.as_ref().is_some_and(|h| h.id() == id)).map(|(i, _)| i).collect();
+            a.mats = Some((b, s));
+            a.seen = now;
+        }
+        if let Some((b, s)) = &a.mats {
+            if b.iter().any(|i| visible.1.contains(i)) || s.iter().any(|i| visible.0.contains(i)) {
+                a.seen = now;
+            }
+        }
+        if env_on!("DXVIEW_ANIMLOG") && (now * 2.0).floor() != ((now - dt) * 2.0).floor() {
+            println!("ANIMTEX step {:?} at {} seen {:.1} s ago mats {:?}", a.handle.id(), a.at, now - a.seen, a.mats.as_ref().map(|m| (m.0.len(), m.1.len())));
+        }
+        // Out of sight for half a second: the loop pauses (nothing would show the new picture).
+        if now - a.seen > 0.5 {
+            continue;
+        }
         a.t += dt;
         if a.t < a.step {
             continue;
@@ -63,29 +123,30 @@ pub fn anim_tex_system(time: Res<Time>, mut images: ResMut<Assets<Image>>) {
             a.t -= a.step;
             a.at = (a.at + 1) % a.frames.len();
         }
+        let mut reshaped = false;
         if let Some(mut im) = images.get_mut(&a.handle) {
             let next = &a.frames[a.at];
-            // Lean Updates: when only the pixels differ (the frames of a loop are decoded alike), hand over the
-            // frame's bytes alone - into the image's own buffer while it still has one (the render world takes
-            // a RENDER_WORLD image's bytes when it uploads them) - instead of a whole new Image.
-            if crate::perf::lean_updates() && same_but_data(&im, next) {
-                match (im.data.as_mut(), next.data.as_ref()) {
-                    (Some(d), Some(n)) if d.len() == n.len() => d.copy_from_slice(n),
-                    _ => im.data = next.data.clone(),
-                }
-            } else {
-                *im = next.clone();
+            reshaped = im.texture_descriptor.size != next.texture_descriptor.size
+                || im.texture_descriptor.format != next.texture_descriptor.format
+                || im.texture_descriptor.mip_level_count != next.texture_descriptor.mip_level_count;
+            // A copy of the frame goes in: the image is a render-world asset, so the copy's pixels are taken
+            // at upload (moving the frames themselves in, as before, left every frame empty after one loop and the
+            // screens stood still).
+            *im = next.clone();
+        }
+        // Same size and format: Bevy writes the new pixels into the same texture. A different one (the first
+        // frame of a New Vision texture is its HD picture, the loop's frames are the original's) makes a new texture,
+        // and the materials have to pick it up.
+        if !reshaped {
+            continue;
+        }
+        if let Some((b, s)) = &a.mats {
+            for id in b {
+                let _ = bsp.get_mut(*id);
+            }
+            for id in s {
+                let _ = std_mats.get_mut(*id);
             }
         }
     }
-}
-
-/// Every field but the pixels equal: then setting the data alone gives the same Image as cloning the frame.
-fn same_but_data(a: &Image, b: &Image) -> bool {
-    a.texture_descriptor == b.texture_descriptor
-        && a.sampler == b.sampler
-        && a.texture_view_descriptor == b.texture_view_descriptor
-        && a.asset_usage == b.asset_usage
-        && a.data_order == b.data_order
-        && a.copy_on_resize == b.copy_on_resize
 }

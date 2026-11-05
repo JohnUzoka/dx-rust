@@ -17,11 +17,11 @@ use bevy::render::render_resource::BlendState;
 use bevy::render::view::Msaa;
 
 pub fn ao_on() -> bool {
-    crate::settings::get("AmbientOcclusion") > 0.5
+    setting!("AmbientOcclusion") > 0.5
 }
 
 pub fn soft_on() -> bool {
-    crate::settings::get("SoftShadows") > 0.5
+    setting!("SoftShadows") > 0.5
 }
 
 /// Size of the lights for soft shadows (metres): a lamp's bulb and shade, more or less.
@@ -80,7 +80,7 @@ pub fn postfx_system(
     // The BSP shader's shadow strength goes with it: 0 (Lean Rendering with no shadow lights) skips its walk over
     // the lights in each fragment's cluster.
     let strength = crate::shadowlight::shadow_strength();
-    let detail = crate::settings::get("DetailTextures") > 0.5;
+    let detail = setting!("DetailTextures") > 0.5;
     // Lean Rendering's Classic lights (shadowlight.rs): a change re-specializes the level's pipelines, as does
     // Flashlight Cone, the one spot light their walk may meet.
     let classic = crate::shadowlight::classic_lights();
@@ -115,15 +115,17 @@ pub fn postfx_system(
     // The SSAO pass costs GPU time, so it's only there when Ambient Occlusion is on in either look (now, or in
     // the Modern mix Classic / Modern remembers); once attached it stays for the session.
     static ATTACHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let wanted = ao || crate::settings::get("Modern.AmbientOcclusion") > 0.5;
+    let wanted = ao || setting!("Modern.AmbientOcclusion") > 0.5;
     if wanted {
         ATTACHED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let ssao = ATTACHED.load(std::sync::atomic::Ordering::Relaxed) && !env_on!("DXVIEW_AO_NOSSAO");
     for (e, has) in &world {
         if ssao && !has {
+            // Low: one slice of two samples, denoised. Medium was the single most expensive GPU pass of a Modern frame
+            // (more than drawing the level), for a difference hard to see under Unreal's baked light.
             commands.entity(e).insert(ScreenSpaceAmbientOcclusion {
-                quality_level: bevy::pbr::ScreenSpaceAmbientOcclusionQualityLevel::Medium,
+                quality_level: bevy::pbr::ScreenSpaceAmbientOcclusionQualityLevel::Low,
                 constant_object_thickness: 0.3,
             });
         } else if !ssao && has {
@@ -146,7 +148,8 @@ pub fn postfx_system(
             commands.entity(e).insert(want_msaa);
         }
         if vm && aa_off && !smaa {
-            commands.entity(e).insert(Smaa::default());
+            // Medium preset: shorter edge searches than High, about two thirds of its cost.
+            commands.entity(e).insert(Smaa { preset: bevy::anti_alias::smaa::SmaaPreset::Medium });
         } else if smaa && !aa_off {
             commands.entity(e).remove::<Smaa>();
         }

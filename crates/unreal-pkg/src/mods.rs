@@ -23,16 +23,8 @@ pub enum ModKind {
     /// the Parallax Occlusion Mapping addon): read by dx-level's relief module for remastered lighting, never as
     /// colour textures.
     ReliefMaps,
-    /// A few files used in place of the game's while a setting asks for them (Confix: its conversation packages
-    /// only - DeusExConText / DeusExConAudio* / DeusExConversations - never its DeusEx.u).
-    ConFiles,
-    /// Not read as packages at all: its fixes are ported to Rust by hand and the folder is only checked for
-    /// (Transcended).
-    Fixes,
 }
 
-/// The file-name prefixes a ConFiles mod supplies.
-pub const CON_FILES: &[&str] = &["DeusExConText", "DeusExConAudio", "DeusExConversations"];
 
 #[derive(Clone, Copy, Debug)]
 pub struct ModDef {
@@ -102,20 +94,6 @@ pub const MODS: &[ModDef] = &[
         kind: ModKind::ReliefMaps,
         marker: "",
         help: "Normal and height maps (the Parallax Occlusion Mapping addon): choose its folder; used by Remastered Lighting",
-    },
-    ModDef {
-        id: "confix",
-        name: "Confix",
-        kind: ModKind::ConFiles,
-        marker: "System/ConSys.u",
-        help: "Conversation fixes (Confix): choose its folder; switch them in Settings > Enhancements (Confix Fixes)",
-    },
-    ModDef {
-        id: "transcended",
-        name: "Transcended",
-        kind: ModKind::Fixes,
-        marker: "Mods/Transcended/System/DeusEx.u",
-        help: "Transcended's vanilla+ fixes are built in (Settings > Enhancements); its folder is only checked for",
     },
     ModDef {
         id: "gmdx",
@@ -207,8 +185,6 @@ fn hints(id: &str) -> &'static [&'static str] {
         "augmentique" => &["augmentique"],
         "precipitation" => &["precipitation", "gmdx"],
         "relief" => &["parallax", "relief", "pom"],
-        "confix" => &["confix"],
-        "transcended" => &["transcended"],
         "gmdx" => &["gmdx"],
         _ => &[],
     }
@@ -356,12 +332,6 @@ pub fn activate(list: &[(&'static ModDef, PathBuf)]) {
     let addons = list.iter().filter(|(m, _)| m.kind == ModKind::Addon).map(|(_, p)| p.clone()).collect();
     let hd = list.iter().filter(|(m, _)| m.kind == ModKind::HdTextures).map(|(_, p)| p.clone()).collect();
     crate::paths::set_addons(addons, hd);
-    let picks = list
-        .iter()
-        .filter(|(m, _)| m.kind == ModKind::ConFiles)
-        .map(|(_, p)| (p.clone(), CON_FILES.iter().map(|s| s.to_string()).collect()))
-        .collect();
-    crate::paths::set_picks(picks);
     let dds: Vec<PathBuf> = list.iter().filter(|(m, _)| m.kind == ModKind::DdsTextures).map(|(_, p)| p.clone()).collect();
     if !dds.is_empty() {
         let n = crate::paths::set_dds(&dds);

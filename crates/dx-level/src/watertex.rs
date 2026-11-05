@@ -97,6 +97,7 @@ impl WaterSim {
         }
     }
 
+    #[allow(dead_code)]
     fn scale(&mut self, x: i32, y: i32, k: f32) {
         let (w, h) = (self.gw as i32, self.gh as i32);
         let i = (x.rem_euclid(w) + y.rem_euclid(h) * w) as usize;
@@ -121,10 +122,13 @@ impl WaterSim {
                     o.depth = dr.depth.wrapping_add(dr.d.max(1));
                     self.set(x, y, phase(o.depth));
                 }
-                // ShallowSpot: shallow water there - its waves are damped away.
-                2 => self.scale(x, y, 0.5),
-                // HalfAmpl: the waves there at half height.
-                3 => self.scale(x, y, 0.75),
+                // ShallowSpot / HalfAmpl: PhaseSpots at a lower swing (Depth = phase, ByteD = speed). The Island's
+                // harbour water (Effects.water.drtywater_a) is nothing but ShallowSpots, so they must drive the
+                // ripples: read as damping, the water stood still.
+                2 | 3 => {
+                    o.depth = dr.depth.wrapping_add(dr.d.max(1));
+                    self.set(x, y, phase(o.depth) * if dr.kind == 2 { 0.6 } else { 0.5 });
+                }
                 // RandomMover: a point that wanders, pushing the water.
                 4 => {
                     let r = self.rnd();
@@ -188,7 +192,7 @@ impl WaterSim {
                 18 | 19 => {
                     let period = (dr.d as u32 + 8).max(8);
                     let due = if dr.kind == 18 {
-                        (f + (dr.x as u32 * 7 + dr.y as u32 * 13)) % period == 0
+                        (f + (dr.x as u32 * 7 + dr.y as u32 * 13)).is_multiple_of(period)
                     } else {
                         self.frand() < 1.0 / period as f32
                     };
@@ -242,7 +246,8 @@ impl WaterSim {
         match &self.look {
             Look::Wet { source } => {
                 // WaveAmp pixels of displacement per unit of slope.
-                let k = self.wave_amp / 24.0;
+                // (A quarter of this - /24 - moved the picture by under a pixel: the harbour looked frozen.)
+                let k = self.wave_amp / 6.0;
                 for y in 0..h {
                     for x in 0..w {
                         let (fx, fy) = (x as f32, y as f32);

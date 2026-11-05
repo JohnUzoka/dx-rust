@@ -182,7 +182,7 @@ pub(crate) fn apply_themes(assets: &mut RuntimeAssets, menu: usize, hud: usize) 
     // HUD theme of the same name when there is one, else with colours derived from the menu theme - until the
     // player picks a HUD theme of their own (HUDFollowsMenu 0); picking a menu theme again follows again.
     let mut hud = hud;
-    let mut follow = crate::settings::get("HUDFollowsMenu") > 0.5;
+    let mut follow = setting!("HUDFollowsMenu") > 0.5;
     if let Some((lm, lh)) = LAST.lock().ok().and_then(|l| *l) {
         if menu != lm {
             follow = true;
@@ -196,7 +196,7 @@ pub(crate) fn apply_themes(assets: &mut RuntimeAssets, menu: usize, hud: usize) 
         match hud_themes().iter().position(|h| h.eq_ignore_ascii_case(m)) {
             Some(h) => {
                 hud = h;
-                if crate::settings::get("HUDColor") as usize != h {
+                if setting!("HUDColor") as usize != h {
                     crate::settings::set("HUDColor", h as f32);
                 }
             }

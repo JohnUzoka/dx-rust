@@ -29,7 +29,7 @@ pub fn player_ragdoll() -> bool {
 }
 
 pub fn enabled() -> bool {
-    crate::settings::get("Ragdolls") > 0.5 && crate::skeletal::enabled()
+    setting!("Ragdolls") > 0.5 && crate::skeletal::enabled()
 }
 
 /// A killing / knock-out blow (ai.rs), Unreal space.
@@ -132,9 +132,9 @@ const PARTS: &[PartDef] = &[
     PartDef { bone: "DEF-forearm.L", tail: "DEF-hand.L", extend: 0.45, radius: 0.045, parent: Some(3), swing: 0.0, twist: 0.0, hinge: Some((-0.05, 2.4)) },
     PartDef { bone: "DEF-upper_arm.R", tail: "DEF-forearm.R", extend: 0.0, radius: 0.05, parent: Some(1), swing: 1.4, twist: 0.5, hinge: None },
     PartDef { bone: "DEF-forearm.R", tail: "DEF-hand.R", extend: 0.45, radius: 0.045, parent: Some(5), swing: 0.0, twist: 0.0, hinge: Some((-0.05, 2.4)) },
-    PartDef { bone: "DEF-thigh.L", tail: "DEF-shin.L", extend: 0.0, radius: 0.075, parent: Some(0), swing: 1.0, twist: 0.25, hinge: None },
+    PartDef { bone: "DEF-thigh.L", tail: "DEF-shin.L", extend: 0.0, radius: 0.075, parent: Some(0), swing: 0.85, twist: 0.12, hinge: None },
     PartDef { bone: "DEF-shin.L", tail: "DEF-foot.L", extend: 0.15, radius: 0.055, parent: Some(7), swing: 0.0, twist: 0.0, hinge: Some((-2.3, 0.05)) },
-    PartDef { bone: "DEF-thigh.R", tail: "DEF-shin.R", extend: 0.0, radius: 0.075, parent: Some(0), swing: 1.0, twist: 0.25, hinge: None },
+    PartDef { bone: "DEF-thigh.R", tail: "DEF-shin.R", extend: 0.0, radius: 0.075, parent: Some(0), swing: 0.85, twist: 0.12, hinge: None },
     PartDef { bone: "DEF-shin.R", tail: "DEF-foot.R", extend: 0.15, radius: 0.055, parent: Some(9), swing: 0.0, twist: 0.0, hinge: Some((-2.3, 0.05)) },
 ];
 
@@ -178,7 +178,6 @@ pub struct Ragdoll {
 /// Static colliders for the level, a cell at a time.
 #[derive(Resource, Default)]
 pub struct RagWorld {
-    generation: u64,
     tris: HashMap<(i32, i32, i32), Vec<[Vec3; 3]>>,
     built: bool,
     spawned: HashMap<(i32, i32, i32), Entity>,
@@ -282,7 +281,7 @@ pub fn start_system(
     player: Option<Res<crate::Player>>,
 ) {
     if crate::loader::new_map(&mut map_gen) {
-        *world = RagWorld { generation: *map_gen, ..default() };
+        *world = RagWorld::default();
     }
     let deaths: Vec<Death> = DEATHS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
     if deaths.is_empty() || !enabled() {
@@ -465,9 +464,24 @@ pub fn start_system(
                     // the pose already has (the joint starts at angle 0).
                     let (pa, pb) = segs[pi];
                     let parent_dir = (pb - pa).normalize_or(Vec3::NEG_Y);
-                    let bend = parent_dir.cross(child).dot(right).atan2(parent_dir.dot(child));
-                    let y = (child - right * child.dot(right)).normalize_or(Vec3::Y);
-                    let basis = Quat::from_mat3(&Mat3::from_cols(y.cross(right), y, right));
+                    // The hinge's own axis: square to the upper bone. The body's left-to-right line was only right
+                    // for a leg straight under the hip - a thigh turned out or forward hinged the knee across its
+                    // own plane, so shins swung sideways and twisted. A bent limb's axis is the one its pose shows
+                    // (signed to the body's right); a straight one, the body's right made square to the bone.
+                    let axis = {
+                        let bent = parent_dir.cross(child);
+                        let side = (right - parent_dir * right.dot(parent_dir)).normalize_or(right);
+                        if bent.length() > 0.17 {
+                            // Signed like the body's right, so the range (knees back, elbows forward) means the same.
+                            let b = bent.normalize();
+                            if b.dot(side) < 0.0 { -b } else { b }
+                        } else {
+                            side
+                        }
+                    };
+                    let bend = parent_dir.cross(child).dot(axis).atan2(parent_dir.dot(child));
+                    let y = (child - axis * child.dot(axis)).normalize_or(Vec3::Y);
+                    let basis = Quat::from_mat3(&Mat3::from_cols(y.cross(axis), y, axis));
                     let (min, max) = ((lo - bend).min(0.0), (hi - bend).max(0.0));
                     commands
                         .spawn((

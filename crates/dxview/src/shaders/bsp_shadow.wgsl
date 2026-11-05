@@ -134,12 +134,13 @@ fn relight(lm: vec3<f32>, wp: vec3<f32>, flat_n: vec3<f32>, mapped_n: vec3<f32>,
         let h = normalize(l * sign(fd + 1e-6) + v);
         let ndh = max(dot(m, h), 0.0);
         let f = 0.04 + 0.96 * pow(1.0 - max(dot(h, v), 0.0), 5.0);
-        spec = spec + lc * reach * mapped * ggx(ndh, bsp.r.z) * f * gain * 0.25;
+        // (The peak is capped: a mirror-smooth surface (glass, r 0.08) peaked at ~800 and blew out under bloom.)
+        spec = spec + lc * reach * mapped * min(ggx(ndh, bsp.r.z), 12.0) * f * gain * 0.25;
     }
     s = max(s, vec3<f32>(0.0)) * bsp.s.x + vec3<f32>(bsp.s.y);
     var out: Relit;
     out.light = from_srgb(s);
-    out.spec = spec;
+    out.spec = min(spec, vec3<f32>(1.2));
     return out;
 }
 
@@ -367,7 +368,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 #ifdef BSP_RELIGHT
     if (bsp.r.x > 0.5) {
         // Surfaces drawn full bright (PF_Unlit: lamps, screens, signs) have a white lightmap: they glow instead.
-        if (min(pbr_input.lightmap_light.r, min(pbr_input.lightmap_light.g, pbr_input.lightmap_light.b)) > 0.98) {
+        // (Only faces the bake gave no lights: a face lit brightly enough to saturate its lightmap - Gunther's cell
+        // window under the cell's lamps - isn't a lamp, and glowing it blew out to a white sheet under bloom.)
+        if (min(pbr_input.lightmap_light.r, min(pbr_input.lightmap_light.g, pbr_input.lightmap_light.b)) > 0.98 && in.color.x < 0.75) {
             unlit_glow = bsp.s.w;
         } else {
             let v = normalize(view_bindings::view.world_position.xyz - pbr_input.world_position.xyz);
