@@ -347,10 +347,48 @@ fn switch_settings() {
     }
 }
 
-/// The CPU boost follows the map loader (`loader::busy`): on while a map loads, off for play.
+/// The CPU boost follows the map loader (`loader::busy`): on while a map loads, off for play. Once the first map is up
+/// its ClassDb holds the code packages, so the boot's read of them (`prefetch_classes`) is let go.
 #[cfg(target_os = "horizon")]
 fn cpu_boost() {
-    boost::set(crate::loader::busy(), "a map loads");
+    let busy = crate::loader::busy();
+    boost::set(busy, "a map loads");
+    if !busy {
+        if let Ok(mut prefetch) = CLASS_PREFETCH.try_lock() {
+            prefetch.take();
+        }
+    }
+}
+
+/// Run 21's title setup spent 2.1 s in `ClassDb::open` reading the game's code packages (DeusExCharacters.u,
+/// DeusExUI.u and the rest, about 85 MB) whole from the SD card: the Switch can't map a file, so what a PC reads page
+/// by page as it's used is read at once. From launch a thread reads them while the title map loads and Bevy starts.
+/// unreal_pkg shares a file's bytes with every Package opened on it while one holds them, so the setup's own ClassDb
+/// then only reads their tables (or waits for the file being read, never reading it twice).
+#[cfg(target_os = "horizon")]
+static CLASS_PREFETCH: std::sync::Mutex<Option<std::thread::JoinHandle<unreal_pkg::classes::ClassDb>>> =
+    std::sync::Mutex::new(None);
+
+/// Starts the code packages' read (`CLASS_PREFETCH`), once the game folder and its mods are known (main.rs).
+/// `no_class_prefetch` in options.txt leaves it to the title's setup, to compare.
+pub fn prefetch_classes(_root: &std::path::Path) {
+    #[cfg(target_os = "horizon")]
+    {
+        if option("no_class_prefetch") {
+            return;
+        }
+        let dir = _root.join("System");
+        let read = move || {
+            let t = std::time::Instant::now();
+            let db = unreal_pkg::classes::ClassDb::open(&dir);
+            eprintln!("[Boot] code packages read in {:.2} s on a thread of their own", t.elapsed().as_secs_f32());
+            db
+        };
+        match std::thread::Builder::new().name("class prefetch".into()).spawn(read) {
+            Ok(h) => *CLASS_PREFETCH.lock().unwrap_or_else(|e| e.into_inner()) = Some(h),
+            Err(e) => eprintln!("[Boot] class prefetch thread not started: {e}"),
+        }
+    }
 }
 
 /// A level surface (BSP batch) for the draw check: its mesh, material and base texture, size and place.

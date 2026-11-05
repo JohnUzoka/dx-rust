@@ -661,6 +661,7 @@ fn main() {
     }
     unreal_pkg::paths::set(&PathBuf::from(&root), mods);
     unreal_pkg::mods::activate(&enabled);
+    horizon::prefetch_classes(std::path::Path::new(&root));
     remaster::fill_new_modern_keys();
     // Relief maps (remastered lighting): the Parallax Maps mod's folder, the copy shipped beside the exe
     // (relief/), and packs installed in the game's Textures folder the DX11 renderer's way.
