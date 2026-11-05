@@ -668,6 +668,8 @@ mod tests {
             images: Default::default(),
             materials: Default::default(),
             fire: Vec::new(),
+            sprites: Default::default(),
+            shared_parts: Default::default(),
         };
         let mut hud = ClassicHud::default();
         assert!(hud.tex(&mut assets, "InfoPortraits.AlexJacobson").is_some(), "no portrait in HUD_GAME");
