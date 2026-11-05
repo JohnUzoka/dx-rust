@@ -384,6 +384,30 @@ fn hud_scale_choice() -> Choice {
     }
 }
 
+/// Our own choice: UI Scale on the Display screen, under HUD Scale.
+fn ui_scale_choice() -> Choice {
+    let v = setting!("UIScale");
+    let vals: Vec<i32> = (100..=200).step_by(10).collect();
+    Choice {
+        key: "UIScale".into(),
+        label: "|&UI Scale".into(),
+        help: "Makes the HUD, menus, inventory and computers bigger. 100% is the original size.".into(),
+        kind: ChoiceKind::Slider {
+            ticks: vals.len() as i32,
+            start: 100.0,
+            end: 200.0,
+            labels: vals.iter().map(|v| format!("{v}%")).collect(),
+        },
+        value: v,
+        saved: v,
+        info_w: 77,
+        info_x: 270,
+        control_x: 270,
+        voff: 0,
+        dropdown: false,
+    }
+}
+
 /// Ours, in place of Toggle Full-Screen Mode: Full Screen (exclusive), Windowed, or Borderless (a screen-sized
 /// window without borders, so alt-tab and clicking out behave).
 fn display_mode_choice() -> Choice {
@@ -1613,6 +1637,7 @@ fn open_window(hud: &mut ClassicHud, assets: &mut RuntimeAssets, class: &str) ->
                 let at = choices.iter().position(|c| c.key == "Resolution").map_or(choices.len(), |i| i + 1);
                 choices.insert(at, vsync_choice());
                 choices.push(hud_scale_choice());
+                choices.push(ui_scale_choice());
             }
             for c in choices.iter_mut().filter(|c| c.key == "Resolution") {
                 c.info_w = 110;
@@ -2736,7 +2761,7 @@ fn cancel_choices(win: &Win) {
     }
 }
 
-/// Settings that preview live while the screen is up (volumes, brightness, themes, HUD scale). The sound and
+/// Settings that preview live while the screen is up (volumes, brightness, themes, HUD and UI scale). The sound and
 /// speech sliders play a test sound at the new level (MenuChoice_SoundVolume / SpeechVolume.ScalePositionChanged:
 /// Menu_SoundTest, and Menu_SpeechTest in the talk slot); music is heard as it plays.
 fn live_preview(c: &Choice) {
@@ -2754,7 +2779,7 @@ fn live_preview(c: &Choice) {
     }
     if matches!(
         c.key.as_str(),
-        "MusicVolume" | "SoundVolume" | "SpeechVolume" | "AdjustBrightness" | "MenuColor" | "HUDColor" | "HUDScale" | "MenuTranslucency"
+        "MusicVolume" | "SoundVolume" | "SpeechVolume" | "AdjustBrightness" | "MenuColor" | "HUDColor" | "HUDScale" | "UIScale" | "MenuTranslucency"
     ) {
         crate::settings::set(&c.key, c.value);
     }
@@ -3306,7 +3331,10 @@ pub fn menu_system(
                             if t != c.slider_tick() {
                                 c.set_tick(t);
                                 crate::sound::play_player("DeusExSounds.UserInterface.Menu_Slider", 0.25, 0.0);
-                                live_preview(c);
+                                // UI Scale resizes the menu under the pointer: applied when it lets go.
+                                if c.key != "UIScale" {
+                                    live_preview(c);
+                                }
                             }
                         }
                     }
@@ -3325,6 +3353,11 @@ pub fn menu_system(
     if binds.buttons.just_released(MouseButton::Left) {
         st.drag = None;
         if let Some(w) = st.pressed.take() {
+            if let (W::Slider(i), Body::Choices { choices }) = (w, &st.stack[top].body) {
+                if let Some(c) = choices.get(i as usize).filter(|c| c.key == "UIScale") {
+                    live_preview(c);
+                }
+            }
             if hover_w == Some(w) {
                 activate(st, top, w, false, &mut hud, &mut assets, &mut acts);
             }

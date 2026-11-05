@@ -35,23 +35,57 @@ pub struct CrossImage;
 #[derive(Component)]
 pub struct CrossSize(f32, f32);
 
-/// Deus Ex UI scale for this window, in physical pixels per UI unit (the nearest whole multiple of 600 lines).
-pub fn ui_scale(win: &Window) -> f32 {
-    // DeusExRootWindow: whole multiples of 600 lines; the HUD Scale setting goes one step either way.
+/// The UI Scale setting as a factor (100% = 1, the original's sizes; up to 2).
+pub fn ui_zoom() -> f32 {
+    (setting!("UIScale") / 100.0).clamp(1.0, 2.0)
+}
+
+/// Deus Ex UI scale for this window, in physical pixels per UI unit: (the whole-number scale its canvases are
+/// drawn at, the scale shown on screen). The original's is the nearest whole multiple of 600 lines (HUD Scale
+/// goes one step either way); UI Scale enlarges that, and a fractional result is drawn at the next whole scale
+/// up and filtered down (`set_filter`).
+pub fn ui_scales(win: &Window) -> (i32, f32) {
+    whole_and_shown(base_scale(win) * ui_zoom())
+}
+
+/// The original's UI scale (DeusExRootWindow: whole multiples of 600 lines; the HUD Scale setting goes one step
+/// either way).
+fn base_scale(win: &Window) -> f32 {
     ((win.physical_height() as f32 / 600.0).round() + crate::settings::hud_scale_step() as f32).max(1.0)
 }
-/// Scale for a full-screen window of w x h UI units (inventory, computers, menus): Medium is the largest whole
-/// multiple that fits the window (as before); the HUD Scale setting steps it the same way as the HUD, though never
-/// past what fits.
+
+/// (the whole scale to draw at, the scale shown) for a shown scale: whole ones (within rounding) are drawn as they
+/// are, fractional ones at the next whole scale up.
+fn whole_and_shown(shown: f32) -> (i32, f32) {
+    if (shown - shown.round()).abs() < 1e-3 {
+        (shown.round() as i32, shown.round())
+    } else {
+        (shown.ceil() as i32, shown)
+    }
+}
+
+/// The scale shown on screen, in physical pixels per UI unit (`ui_scales`).
+pub fn ui_scale(win: &Window) -> f32 {
+    ui_scales(win).1
+}
+
+/// `ui_scales` for a window of w x h UI units: UI Scale enlarges it only as far as it fits the screen.
+pub fn ui_scales_fit(win: &Window, w: i32, h: i32) -> (i32, f32) {
+    let base = base_scale(win);
+    let fit = (win.physical_width() as f32 / w as f32).min(win.physical_height() as f32 / h as f32);
+    whole_and_shown((base * ui_zoom()).min(fit).max(base))
+}
+
 /// The inventory, computer and menu screens' scale: (the whole-number scale their canvas is drawn at, the scale
 /// shown on screen). HUD Scale Small = one whole step down, Medium = the largest whole fit (crisp pixels, as
 /// before), Large = as big as fits (fractional: the canvas is drawn at the next whole scale up and filtered down,
-/// so a 640 x 480 screen fills a Steam Deck's 800 lines instead of sitting at 1x).
+/// so a 640 x 480 screen fills a Steam Deck's 800 lines instead of sitting at 1x). UI Scale enlarges Small and
+/// Medium, never past what fits.
 pub fn screen_scales(win: &Window, w: i32, h: i32) -> (i32, f32) {
     let (pw, ph) = (win.physical_width() as f32, win.physical_height() as f32);
     let fitf = (pw / w as f32).min(ph / h as f32).max(1.0);
     let fit = fitf.floor() as i32;
-    match crate::settings::hud_scale_step() {
+    let (draw, shown) = match crate::settings::hud_scale_step() {
         s if s > 0 => (fitf.ceil() as i32, fitf),
         s => {
             // Whole-number scales: drawn at 1x and enlarged by the GPU (nearest), the same picture as drawing every
@@ -60,26 +94,38 @@ pub fn screen_scales(win: &Window, w: i32, h: i32) -> (i32, f32) {
             let k = (fit + s).clamp(1, fit);
             (1, k as f32)
         }
+    };
+    let zoom = ui_zoom();
+    if zoom == 1.0 {
+        return (draw, shown);
+    }
+    let shown = (shown * zoom).min(fitf).max(shown);
+    if (shown - shown.round()).abs() < 1e-3 {
+        (1, shown.round())
+    } else {
+        (shown.ceil() as i32, shown)
     }
 }
 
-/// Linear filtering for a screen canvas shown at a fractional scale (nearest when whole).
-pub fn set_filter(images: &mut Assets<Image>, img: &Handle<Image>, render: i32, display: f32) {
-    use bevy::image::ImageSampler;
-    // Nearest when the picture is shown at a whole multiple of the size it was drawn at.
+/// Linear filtering for a canvas drawn at whole scale `render` and shown at `display` (nearest when the picture
+/// is shown at a whole multiple of the size it was drawn at). Touches the image only when its filter changes, and
+/// says so (a material showing it then needs marking changed, as after a resize).
+pub fn set_filter(images: &mut Assets<Image>, img: &Handle<Image>, render: i32, display: f32) -> bool {
     let ratio = display / render.max(1) as f32;
     let linear = (ratio - ratio.round()).abs() > 1e-3;
-    static LAST: std::sync::Mutex<Vec<(bevy::asset::AssetId<Image>, bool)>> = std::sync::Mutex::new(Vec::new());
-    let Ok(mut last) = LAST.lock() else { return };
-    let id = img.id();
-    if last.iter().any(|(i, l)| *i == id && *l == linear) {
-        return;
+    // (Checked on the image itself: a canvas replaced on resize starts over with its own sampler.)
+    let Some(im) = images.get(img) else { return false };
+    if !matches!(im.sampler, ImageSampler::Default) && is_linear(im) == linear {
+        return false;
     }
-    if let Some(mut im) = images.get_mut(id) {
-        im.sampler = if linear { ImageSampler::linear() } else { ImageSampler::nearest() };
-        last.retain(|(i, _)| *i != id);
-        last.push((id, linear));
-    }
+    let Some(mut im) = images.get_mut(img) else { return false };
+    im.sampler = if linear { ImageSampler::linear() } else { ImageSampler::nearest() };
+    true
+}
+
+/// The image is set to linear filtering (not nearest, nor the app's default).
+pub fn is_linear(im: &Image) -> bool {
+    matches!(&im.sampler, ImageSampler::Descriptor(d) if d.mag_filter == bevy::image::ImageFilterMode::Linear)
 }
 
 #[derive(Component)]

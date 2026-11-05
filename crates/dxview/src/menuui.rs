@@ -687,8 +687,8 @@ pub(crate) fn place(
     nodes: &mut Query<(&mut bevy::ui::Node, &mut Visibility, &MaterialNode<HudLayer>), impl bevy::ecs::query::QueryFilter>,
 ) {
     // `d`: the shown scale (fractional with HUD Scale Large; the canvas is drawn at its own whole scale c.s).
-    crate::hud::set_filter(images, &l.img, c.s, d);
-    if upload(images, &l.img, &mut l.last, c) {
+    let refiltered = crate::hud::set_filter(images, &l.img, c.s, d);
+    if upload(images, &l.img, &mut l.last, c) || refiltered {
         if let Ok((_, _, m)) = nodes.get(l.e) {
             if let Some(m) = layers.get_mut(&m.0) {
                 m.into_inner();

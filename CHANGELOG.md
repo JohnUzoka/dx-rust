@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- UI Scale (Settings > Display, 100% to 200%) makes the whole UI bigger - the HUD, the menus, the inventory and
+  the computer screens - for small or far-away screens such as a handheld's. 100% is the original size.
+
 ## v0.11.0
 
 The highlights since v0.10.0 (the detailed notes for each day follow):

@@ -1,7 +1,7 @@
 //! Player settings (the original's DeusEx.ini / User.ini values the menus edit), kept in settings.txt beside
 //! the exe as `Key=Value` lines. Keys are the MenuChoice class names without the prefix (ObjectNames,
-//! MusicVolume...) plus our own (HUDScale). Values are the choice's value as the menu stores it (enum index or
-//! slider value). Game systems read them through the typed helpers below.
+//! MusicVolume...) plus our own (HUDScale, UIScale). Values are the choice's value as the menu stores it (enum
+//! index or slider value). Game systems read them through the typed helpers below.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,6 +44,8 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("AdjustBrightness", 0.5),
     // HUD size (ours): 0 small, 1 medium (the original's rule), 2 large.
     ("HUDScale", 1.0),
+    // UI size (ours), in percent (100..200): the whole UI - HUD, menus, inventory, computers - that much bigger.
+    ("UIScale", 100.0),
     ("FOV", 75.0),
     ("FPSLimit", 0.0),
     ("WelcomeSeen", 0.0),

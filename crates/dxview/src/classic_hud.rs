@@ -633,12 +633,12 @@ pub fn classic_hud_system(
     let dt = time.delta_secs();
     let hud = &mut *hud;
     let assets = &mut *assets;
-    let s = crate::hud::ui_scale(&window) as i32;
+    // s: the whole scale the windows are drawn at; d: the scale shown (fractional with UI Scale).
+    let (s, d) = crate::hud::ui_scales(&window);
     let (sw, sh) = (
-        window.physical_width() as i32 / s,
-        window.physical_height() as i32 / s,
+        (window.physical_width() as f32 / d) as i32,
+        (window.physical_height() as f32 / d) as i32,
     );
-    let _to_logical = |v: i32| v as f32 * s as f32 / window.scale_factor();
 
     if hud.true_north.is_none() {
         let n = level.0.level_info()
@@ -943,7 +943,7 @@ pub fn classic_hud_system(
             ),
             Win::ConCursor => {
                 let pos = window.cursor_position().map(|c| {
-                    let k = window.scale_factor() / s as f32;
+                    let k = window.scale_factor() / d;
                     ((c.x * k) as i32 - 32, (c.y * k) as i32 - 32)
                 });
                 let choosing = third && con.play.as_ref().is_some_and(|p| !p.choices.is_empty() && p.win_pos >= 1.0);
@@ -1283,6 +1283,18 @@ pub fn classic_hud_system(
             hud.last.insert(w, bytes);
         }
         }
+        // Shown at a fractional scale (UI Scale): filtered down from the whole one it's drawn at.
+        if let Some((handle, _)) = hud.images.get(&w) {
+            if crate::hud::set_filter(&mut images, handle, s, d) {
+                for (hw, _, _, mat) in &nodes {
+                    if hw.0 == w {
+                        if let Some(m) = layers.get_mut(&mat.0) {
+                            m.into_inner();
+                        }
+                    }
+                }
+            }
+        }
         for (hw, mut node, mut vis, mat) in &mut nodes {
             if hw.0 != w {
                 continue;
@@ -1307,7 +1319,7 @@ pub fn classic_hud_system(
                 let fy = if y * 2 + wh < sh { y as f32 } else { (y + wh) as f32 - wh as f32 * k };
                 (fx, fy)
             };
-            let lf = |v: f32| v * s as f32 / window.scale_factor();
+            let lf = |v: f32| v * d / window.scale_factor();
             let (l, t, wd, ht) = (
                 Val::Px(lf(sx)),
                 Val::Px(lf(sy)),

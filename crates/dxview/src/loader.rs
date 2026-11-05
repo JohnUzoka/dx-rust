@@ -595,18 +595,24 @@ pub fn spawn_loading_words(
     }
     let Some(Some(f)) = font.as_ref() else { return None };
     let msg = "LOADING";
-    let s = crate::hud::ui_scale(win).max(1.0) as i32;
+    // s: the whole scale the words are drawn at; d: the scale shown (fractional with UI Scale).
+    let (s, d) = crate::hud::ui_scales(win);
     let (tw, th) = (f.width(msg) + 2, f.height + 2);
     let mut c = crate::uicanvas::Canvas::new(tw, th, s);
     c.text_styled(f, 0, 0, tw, th, crate::uicanvas::HAlign::Center, crate::uicanvas::VAlign::Center, [0, 0, 255], msg, crate::uicanvas::Style::Translucent);
-    let img = images.add(Image::new(
+    let mut im = Image::new(
         bevy::render::render_resource::Extent3d { width: (tw * s) as u32, height: (th * s) as u32, depth_or_array_layers: 1 },
         bevy::render::render_resource::TextureDimension::D2,
         c.to_rgba8(),
         bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
         bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
-    ));
-    let (lw, lh) = ((tw * s) as f32 / win.scale_factor(), (th * s) as f32 / win.scale_factor());
+    );
+    // Shown at a fractional scale: filtered down from the whole one it's drawn at.
+    if s as f32 != d {
+        im.sampler = bevy::image::ImageSampler::linear();
+    }
+    let img = images.add(im);
+    let (lw, lh) = (tw as f32 * d / win.scale_factor(), th as f32 * d / win.scale_factor());
     Some(
         commands
             .spawn((

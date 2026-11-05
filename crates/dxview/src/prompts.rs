@@ -29,7 +29,8 @@ fn bar_width(items: &[(PadBtn, &str)], font: &crate::uicanvas::UiFont) -> i32 {
     items.iter().map(|(b, t)| crate::glyphs::width(*b) + 3 + font.width(t) + 10).sum::<i32>() + 6
 }
 
-/// Show / place / (re)build one image node.
+/// Show / place / (re)build one image node (`linear`: shown at a fractional scale, filtered down from the whole
+/// one `s` it's drawn at).
 #[allow(clippy::too_many_arguments)]
 fn present<T: Component + Default, F: bevy::ecs::query::QueryFilter>(
     commands: &mut Commands,
@@ -40,6 +41,7 @@ fn present<T: Component + Default, F: bevy::ecs::query::QueryFilter>(
     c: Option<&Canvas>,
     size: (i32, i32),
     s: i32,
+    linear: bool,
     pos: Vec2,
     k: f32,
 ) {
@@ -60,7 +62,7 @@ fn present<T: Component + Default, F: bevy::ecs::query::QueryFilter>(
     };
     if let Some(h) = img.as_ref() {
         if let Some(mut im) = images.get_mut(h) {
-            if im.width() == pw && im.height() == ph {
+            if im.width() == pw && im.height() == ph && crate::hud::is_linear(&im) == linear {
                 im.data = Some(c.to_rgba8());
                 for (_, mut nd, mut v) in node.iter_mut() {
                     place(&mut nd);
@@ -70,13 +72,17 @@ fn present<T: Component + Default, F: bevy::ecs::query::QueryFilter>(
             }
         }
     }
-    let im = images.add(Image::new(
+    let mut new = Image::new(
         bevy::render::render_resource::Extent3d { width: pw, height: ph, depth_or_array_layers: 1 },
         bevy::render::render_resource::TextureDimension::D2,
         c.to_rgba8(),
         bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
         bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
-    ));
+    );
+    if linear {
+        new.sampler = bevy::image::ImageSampler::linear();
+    }
+    let im = images.add(new);
     *img = Some(im.clone());
     for (e, ..) in node.iter() {
         commands.entity(e).despawn();
@@ -114,8 +120,10 @@ pub fn prompts_system(
     let f = crate::gamepad::frame();
     let pad = f.connected && f.pad_last;
     let ui = crate::keybinds::UI_MODE.load(Ordering::Relaxed);
-    let s = crate::hud::ui_scale(win).max(1.0) as i32;
-    let k = s as f32 / win.scale_factor();
+    // s: the whole scale the prompts are drawn at; d: the scale shown (fractional with UI Scale).
+    let (s, d) = crate::hud::ui_scales(win);
+    let linear = s as f32 != d;
+    let k = d / win.scale_factor();
     let Some(font) = hud.font(&mut assets, "FontMenuSmall_DS") else { return };
     let kind = crate::gamepad::glyph_kind();
     let text_col = crate::menuui::h_col(7);
@@ -148,14 +156,14 @@ pub fn prompts_system(
         v
     };
     if items.is_empty() {
-        present::<HintNode, _>(&mut commands, &mut images, &mut layers, &mut hint, hint_img, None, (1, 1), s, Vec2::ZERO, k);
+        present::<HintNode, _>(&mut commands, &mut images, &mut layers, &mut hint, hint_img, None, (1, 1), s, linear, Vec2::ZERO, k);
         *hint_key = 0;
     } else {
         let text_only = notes && !pad;
         let w = if text_only { font.width(items[0].1) + 14 } else { bar_width(&items, &font) };
         let h = 19;
         let pos = Vec2::new((win.width() - w as f32 * k) / 2.0, win.height() - (h as f32 + 6.0) * k);
-        let key = hash(&format!("{items:?}{kind:?}{s}{w}{}{text_only}", win.width()));
+        let key = hash(&format!("{items:?}{kind:?}{s}{d}{w}{}{text_only}", win.width()));
         if key != *hint_key || hint.is_empty() {
             *hint_key = key;
             let mut c = Canvas::new(w, h, s);
@@ -172,7 +180,7 @@ pub fn prompts_system(
                 c.text(&font, x, 2, font.width(t) + 2, 15, HAlign::Left, VAlign::Center, text_col, t);
                 x += font.width(t) + 10;
             }
-            present::<HintNode, _>(&mut commands, &mut images, &mut layers, &mut hint, hint_img, Some(&c), (w, h), s, pos, k);
+            present::<HintNode, _>(&mut commands, &mut images, &mut layers, &mut hint, hint_img, Some(&c), (w, h), s, linear, pos, k);
         } else {
             for (_, mut nd, mut v) in hint.iter_mut() {
                 nd.left = Val::Px(pos.x);
@@ -193,13 +201,13 @@ pub fn prompts_system(
     match (pad && !ui && setting!("PadFrobPrompt") > 0.5, use_btn, at) {
         (true, Some(b), Some(at)) => {
             let w = crate::glyphs::width_in(kind, b);
-            let key = hash(&format!("{b:?}{kind:?}{s}"));
+            let key = hash(&format!("{b:?}{kind:?}{s}{d}"));
             let pos = Vec2::new(at.x - (w as f32 + 3.0) * k, at.y);
             if key != *frob_key || frob.is_empty() {
                 *frob_key = key;
                 let mut c = Canvas::new(w, crate::glyphs::SIZE, s);
                 crate::glyphs::draw_in(&mut c, kind, b, 0, 0);
-                present::<FrobGlyphNode, _>(&mut commands, &mut images, &mut layers, &mut frob, frob_img, Some(&c), (w, crate::glyphs::SIZE), s, pos, k);
+                present::<FrobGlyphNode, _>(&mut commands, &mut images, &mut layers, &mut frob, frob_img, Some(&c), (w, crate::glyphs::SIZE), s, linear, pos, k);
             } else {
                 for (_, mut nd, mut v) in frob.iter_mut() {
                     nd.left = Val::Px(pos.x);
@@ -209,7 +217,7 @@ pub fn prompts_system(
             }
         }
         _ => {
-            present::<FrobGlyphNode, _>(&mut commands, &mut images, &mut layers, &mut frob, frob_img, None, (1, 1), s, Vec2::ZERO, k);
+            present::<FrobGlyphNode, _>(&mut commands, &mut images, &mut layers, &mut frob, frob_img, None, (1, 1), s, linear, Vec2::ZERO, k);
             *frob_key = 0;
         }
     }

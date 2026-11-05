@@ -788,7 +788,8 @@ fn draw_popup(
         }
         return;
     }
-    let s = crate::hud::ui_scale(window) as i32;
+    // s: the whole scale the notice is drawn at; d: the scale shown (fractional with UI Scale).
+    let (s, d) = crate::hud::ui_scales(window);
     let (w, h) = (280, 46);
     let mut c = Canvas::new(w, h, s.max(1));
     let Some((name, _)) = LIST.iter().find(|a| a.0 == id.as_str()).map(|a| (a.1, a.2)) else { return };
@@ -802,7 +803,6 @@ fn draw_popup(
     // Slides down from the top, back up at the end.
     let k = (*t / 0.3).min(1.0).min(((LIFE - *t) / 0.3).max(0.0));
     let sf = window.scale_factor();
-    let d = s as f32;
     let pw = window.physical_width() as f32 / d;
     let y = -(h as f32) + (h as f32 + 12.0) * k * (2.0 - k);
     crate::menuui::place(layer, &c, (((pw - w as f32) / 2.0) as i32, y as i32), d, sf, images, layers, nodes);

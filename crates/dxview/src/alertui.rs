@@ -197,7 +197,12 @@ pub fn alert_ui_system(
         let e = dx_level::bevy_to_ue(cam_gt.translation().to_array());
         DVec3::new(e[0] as f64, e[1] as f64, e[2] as f64)
     };
-    let scale = crate::hud::ui_scale(&window) / window.scale_factor();
+    let d = crate::hud::ui_scale(&window);
+    // The icons are drawn at 1x: filtered when shown at a fractional scale (UI Scale).
+    for icon in &st.icons {
+        crate::hud::set_filter(&mut images, icon, 1, d);
+    }
+    let scale = d / window.scale_factor();
     let size = S as f32 * scale;
     let dt = time.delta_secs();
     let lvl = &level.0;

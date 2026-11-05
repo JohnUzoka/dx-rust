@@ -42,8 +42,9 @@
 //! Switch's path; run it with `DXVIEW_CPU_CULL=1` and `DXVIEW_AO_NOSSAO=1` as `init` sets them on the console.
 //!
 //! The settings the Switch starts with (`switch_settings`), unless settings.txt already has a value: Anti-Aliasing and
-//! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), and Open Sea on (water.rs). They are on the
-//! Settings > Enhancements list like the rest. While neither Realtime Shadows nor Soft Shadows is on, every 3D camera
+//! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), Open Sea on (water.rs), and UI Scale at 125% for
+//! the handheld's small screen (hud.rs). They are on the Settings > Enhancements and Display lists like the rest.
+//! While neither Realtime Shadows nor Soft Shadows is on, every 3D camera
 //! uses Bevy's one-tap `Hardware2x2` shadow filter instead of its 8- to 9-tap Gaussian (`shadow_filter`): the filter is
 //! compiled into every lit shader whether or not a light casts: 450 of the PBR shaders' 3,120 instructions (NAK).
 
@@ -405,8 +406,14 @@ fn shadow_filter(mut commands: Commands, cameras: Query<(Entity, Option<&bevy::l
 /// wins): the lean Performance settings (perf.rs), and Open Sea (water.rs), so the sea doesn't end in black.
 #[cfg(target_os = "horizon")]
 fn switch_settings() {
-    const SWITCH: [(&str, f32); 5] =
-        [("AntiAliasing", 0.0), ("HDRRendering", 0.0), ("LeanRendering", 1.0), ("LeanUpdates", 1.0), ("OpenSea", 1.0)];
+    const SWITCH: [(&str, f32); 6] = [
+        ("AntiAliasing", 0.0),
+        ("HDRRendering", 0.0),
+        ("LeanRendering", 1.0),
+        ("LeanUpdates", 1.0),
+        ("OpenSea", 1.0),
+        ("UIScale", 125.0),
+    ];
     // The working folder is the NRO's, where settings.rs keeps settings.txt when there is no exe path.
     let saved = std::fs::read_to_string("settings.txt").unwrap_or_default();
     for (key, value) in SWITCH {
@@ -617,10 +624,10 @@ fn shadow_lights_log(
 /// The settings that decide what the GPU draws, for the log: a run's numbers mean little without them.
 #[cfg(target_os = "horizon")]
 fn settings_line() -> String {
-    const KEYS: [&str; 17] = [
+    const KEYS: [&str; 18] = [
         "Resolution", "VSync", "RealtimeShadows", "SoftShadows", "AmbientOcclusion", "Bloom", "ModernWater",
         "LightShafts", "FogVolumes", "AtmosphericFog", "FlashlightCone", "DiegeticScreens", "HDTextures",
-        "AntiAliasing", "HDRRendering", "LeanRendering", "LeanUpdates",
+        "AntiAliasing", "HDRRendering", "LeanRendering", "LeanUpdates", "UIScale",
     ];
     let mut line = format!("Modern {}", crate::remaster::is_modern());
     for key in KEYS {

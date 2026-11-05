@@ -152,7 +152,10 @@ pub struct Scroll {
     timer: f32,
     speed: f32,
     paused: bool,
-    scale: i32,
+    /// The UI scale shown (fractional with UI Scale).
+    scale: f32,
+    /// The whole scale the phrase and logo overlay is drawn at (1 at a whole UI scale: enlarged nearest).
+    overlay_scale: i32,
     /// bScrolling: false once the strip has gone off the top.
     scrolling: bool,
     /// CreditsWindow: the CreditsEnd sound playing before the quotes open.
@@ -499,9 +502,12 @@ pub fn credits_system(
             for (e, ..) in &nodes {
                 commands.entity(e).despawn();
             }
-            let s = crate::hud::ui_scale(win).max(1.0) as i32;
+            // s: the whole scale the strip is drawn at; d: the scale shown (fractional with UI Scale, which
+            // enlarges it only as far as its width fits).
+            let (s, d) = crate::hud::ui_scales_fit(win, TILE_W, 1);
+            let linear = s as f32 != d;
             let (height, chunks) = render(assets, s, mode);
-            let k = s as f32 / win.scale_factor();
+            let k = d / win.scale_factor();
             let full = Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(0.0),
@@ -514,7 +520,11 @@ pub fn credits_system(
             commands.spawn((CreditsNode(BACKDROP), full.clone(), BackgroundColor(Color::BLACK), GlobalZIndex(900)));
             let n = chunks.len();
             for (i, c) in chunks.into_iter().enumerate() {
-                let img = images.add(image((TILE_W * s) as u32, (CHUNK * s) as u32, c.to_rgba8(), false));
+                let mut im = image((TILE_W * s) as u32, (CHUNK * s) as u32, c.to_rgba8(), false);
+                if linear {
+                    im.sampler = bevy::image::ImageSampler::linear();
+                }
+                let img = images.add(im);
                 commands.spawn((
                     CreditsNode(i),
                     MaterialNode(layers.add(HudLayer::new(img))),
@@ -548,9 +558,16 @@ pub fn credits_system(
                     ));
                 }
             }
-            // Phrases and logos: one canvas at 1x the root, drawn nearest-neighbour at the UI scale.
-            let root = ((win.physical_width() as i32) / s, (win.physical_height() as i32) / s);
-            let ov = images.add(image(root.0.max(1) as u32, root.1.max(1) as u32, vec![0; (root.0.max(1) * root.1.max(1) * 4) as usize], true));
+            // Phrases and logos: one canvas at 1x the root, drawn nearest-neighbour at the UI scale (at a fractional
+            // one, drawn at the next whole scale up and filtered down).
+            let root = ((win.physical_width() as f32 / d) as i32, (win.physical_height() as f32 / d) as i32);
+            let os = if linear { s } else { 1 };
+            let (ow, oh) = (root.0.max(1) * os, root.1.max(1) * os);
+            let mut ov = image(ow as u32, oh as u32, vec![0; (ow * oh * 4) as usize], true);
+            if linear {
+                ov.sampler = bevy::image::ImageSampler::linear();
+            }
+            let ov = images.add(ov);
             commands.spawn((CreditsNode(OVERLAY), MaterialNode(layers.add(HudLayer::new(ov.clone()))), full, GlobalZIndex(903)));
             let logos = if mode == Mode::Quotes { (0..10).map(|_| new_logo(root)).collect() } else { Vec::new() };
             *st = Some(Scroll {
@@ -561,7 +578,8 @@ pub fn credits_system(
                 timer: 0.04,
                 speed: 0.04,
                 paused: false,
-                scale: s,
+                scale: d,
+                overlay_scale: os,
                 scrolling: true,
                 end_timer: None,
                 egg: String::new(),
@@ -739,7 +757,7 @@ pub fn credits_system(
     if busy || sc.overlay_drawn {
         if let (Some(h), Some((loc, spin))) = (&sc.overlay, fonts.as_ref()) {
             let (w, hh) = sc.root;
-            let mut cv = Canvas::new(w, hh, 1);
+            let mut cv = Canvas::new(w, hh, sc.overlay_scale);
             for l in &sc.logos {
                 if let Some(f) = spin {
                     let ch = char::from(b'0' + l.frame as u8).to_string();
@@ -758,11 +776,11 @@ pub fn credits_system(
         }
         sc.overlay_drawn = busy;
     }
-    let kk = sc.scale as f32 / win.scale_factor();
+    let kk = sc.scale / win.scale_factor();
     if env_on!("DXVIEW_CREDITS") {
         println!("CREDITS y={} t={:.1} dt={:.3}", sc.y, time.elapsed_secs(), time.delta_secs());
     }
-    let screen_h = win.physical_height() as i32 / sc.scale.max(1);
+    let screen_h = (win.physical_height() as f32 / sc.scale) as i32;
     for (_, cn, mut node, mut vis) in &mut nodes {
         if cn.0 < sc.chunks {
             let top = sc.y + cn.0 as i32 * CHUNK;

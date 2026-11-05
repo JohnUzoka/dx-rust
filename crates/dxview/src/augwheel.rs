@@ -157,12 +157,13 @@ pub fn augwheel_system(
     let (open, sel, page) = with(|s| (s.open, s.sel, s.page));
     let show_strip = pages && f.connected && !busy && !list.is_empty() && !open;
     let Some(win) = windows.iter().next() else { return };
-    let s = crate::hud::ui_scale(win).max(1.0) as i32;
-    let k = s as f32 / win.scale_factor();
+    // s: the whole scale the wheel is drawn at; d: the scale shown (fractional with UI Scale).
+    let (s, d) = crate::hud::ui_scales(win);
+    let k = d / win.scale_factor();
     // Redraw when what's shown changes.
     let key = {
         let mut h: u64 = 1469598103934665603;
-        for b in format!("{open}{sel:?}{page}{show_strip}{s}{list:?}{:?}", crate::gamepad::glyph_kind()).bytes() {
+        for b in format!("{open}{sel:?}{page}{show_strip}{s}{d}{list:?}{:?}", crate::gamepad::glyph_kind()).bytes() {
             h ^= b as u64;
             h = h.wrapping_mul(1099511628211);
         }
@@ -268,9 +269,11 @@ pub fn augwheel_system(
     }
     let bytes = c.to_rgba8();
     let px = (SIZE * s) as u32;
+    // Linear when shown at a fractional scale: filtered down from the whole one it's drawn at.
+    let linear = s as f32 != d;
     if let Some(h) = img.as_ref() {
         if let Some(mut im) = images.get_mut(h) {
-            if im.width() == px {
+            if im.width() == px && crate::hud::is_linear(&im) == linear {
                 im.data = Some(bytes);
                 for (_, mut nd, _) in &mut node {
                     nd.left = Val::Px((win.width() - SIZE as f32 * k) / 2.0);
@@ -280,15 +283,19 @@ pub fn augwheel_system(
             }
         }
     }
-    let im = images.add(Image::new(
+    let mut new = Image::new(
         bevy::render::render_resource::Extent3d { width: px, height: px, depth_or_array_layers: 1 },
         bevy::render::render_resource::TextureDimension::D2,
         bytes,
         bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
         bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
-    ));
+    );
+    if linear {
+        new.sampler = bevy::image::ImageSampler::linear();
+    }
+    let im = images.add(new);
     *img = Some(im.clone());
-    // A new size (the UI scale changed): replace the node.
+    // A new size or filtering (the UI scale changed): replace the node.
     for (e, ..) in &node {
         commands.entity(e).despawn();
     }

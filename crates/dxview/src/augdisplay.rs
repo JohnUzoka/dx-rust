@@ -280,8 +280,9 @@ pub fn augdisplay_system(
     }
 
     // ---- the view window (drone or zoom)
-    let s = crate::hud::ui_scale(win).max(1.0) as i32;
-    let (uw, uh) = ((win.physical_width() as i32) / s, (win.physical_height() as i32) / s);
+    // s: the whole scale the panel is drawn at; d: the scale shown (fractional with UI Scale).
+    let (s, d) = crate::hud::ui_scales(win);
+    let (uw, uh) = ((win.physical_width() as f32 / d) as i32, (win.physical_height() as f32 / d) as i32);
     let margin = 4;
     let (bw, bh) = (uw / 4, uh / 4);
     let (bcx, bcy) = (uw / 8 + margin, uh / 2);
@@ -302,7 +303,7 @@ pub fn augdisplay_system(
         _ => None,
     };
     let want_view = drone_view.is_some() || zoom_view.is_some();
-    let size = UVec2::new((bw * s) as u32, (bh * s) as u32);
+    let size = UVec2::new((bw as f32 * d) as u32, (bh as f32 * d) as u32);
     if want_view && st.image.as_ref().is_none_or(|i| i.1 != size) {
         let img = image(&mut images, size);
         st.image = Some((img, size));
@@ -443,7 +444,7 @@ pub fn augdisplay_system(
         feed(l);
         feed(&format!("{c:?}"));
     }
-    feed(&format!("{show_box}{no_image}{scanning:?}{uw}x{uh}{s}"));
+    feed(&format!("{show_box}{no_image}{scanning:?}{uw}x{uh}{s}{d}"));
     let changed = hash != st.last_panel;
     st.last_panel = hash;
     let any = show_box || scanning.is_some();
@@ -487,9 +488,14 @@ pub fn augdisplay_system(
             }
             let bytes = c.to_rgba8();
             let px = ((lw * s) as u32, (lh_total * s) as u32);
-            let k = 1.0 / win.scale_factor();
+            let k = d / win.scale_factor();
             let have_node = nodes.iter().any(|n| n.3.is_none());
-            let same = st.panel_img.as_ref().is_some_and(|p| p.1 == (lw, lh_total, s)) && have_node;
+            // (A new image too when the filtering changes: linear only when shown at a fractional scale.)
+            let linear = s as f32 != d;
+            let same = st.panel_img.as_ref().is_some_and(|p| {
+                p.1 == (lw, lh_total, s)
+                    && images.get(&p.0).is_some_and(|i| crate::hud::is_linear(i) == linear)
+            }) && have_node;
             if same {
                 // Same size: new pixels into the same image.
                 if let Some((h, _)) = &st.panel_img {
@@ -500,17 +506,22 @@ pub fn augdisplay_system(
                 for (_, mut node, mut vis, im) in nodes.iter_mut() {
                     if im.is_none() {
                         vis.set_if_neq(Visibility::Inherited);
-                        node.top = Val::Px((ly * s) as f32 * k);
+                        node.top = Val::Px(ly as f32 * k);
                     }
                 }
             } else {
-                let img = images.add(Image::new(
+                let mut img = Image::new(
                     bevy::render::render_resource::Extent3d { width: px.0, height: px.1, depth_or_array_layers: 1 },
                     bevy::render::render_resource::TextureDimension::D2,
                     bytes,
                     bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
                     bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
-                ));
+                );
+                // Shown at a fractional scale (UI Scale): filtered down from the whole one it's drawn at.
+                if linear {
+                    img.sampler = bevy::image::ImageSampler::linear();
+                }
+                let img = images.add(img);
                 if let Some((old, _)) = st.panel_img.replace((img.clone(), (lw, lh_total, s))) {
                     images.remove(old.id());
                 }
@@ -524,10 +535,10 @@ pub fn augdisplay_system(
                     MaterialNode(layers.add(HudLayer::new(img))),
                     Node {
                         position_type: PositionType::Absolute,
-                        left: Val::Px((lx * s) as f32 * k),
-                        top: Val::Px((ly * s) as f32 * k),
-                        width: Val::Px(px.0 as f32 * k),
-                        height: Val::Px(px.1 as f32 * k),
+                        left: Val::Px(lx as f32 * k),
+                        top: Val::Px(ly as f32 * k),
+                        width: Val::Px(lw as f32 * k),
+                        height: Val::Px(lh_total as f32 * k),
                         ..default()
                     },
                     Visibility::Inherited,
@@ -554,11 +565,11 @@ pub fn augdisplay_system(
             continue;
         }
         vis.set_if_neq(Visibility::Inherited);
-        let k = 1.0 / win.scale_factor();
-        node.left = Val::Px((bx * s) as f32 * k);
-        node.top = Val::Px((by * s) as f32 * k);
-        node.width = Val::Px((bw * s) as f32 * k);
-        node.height = Val::Px((bh * s) as f32 * k);
+        let k = d / win.scale_factor();
+        node.left = Val::Px(bx as f32 * k);
+        node.top = Val::Px(by as f32 * k);
+        node.width = Val::Px(bw as f32 * k);
+        node.height = Val::Px(bh as f32 * k);
         if let Some((img, _)) = &st.image {
             if im.image != *img {
                 im.image = img.clone();
@@ -568,16 +579,16 @@ pub fn augdisplay_system(
     }
     if !have_view && want_view {
         if let Some((img, _)) = &st.image {
-            let k = 1.0 / win.scale_factor();
+            let k = d / win.scale_factor();
             commands.spawn((
                 AugView,
                 ImageNode::new(img.clone()),
                 Node {
                     position_type: PositionType::Absolute,
-                    left: Val::Px((bx * s) as f32 * k),
-                    top: Val::Px((by * s) as f32 * k),
-                    width: Val::Px((bw * s) as f32 * k),
-                    height: Val::Px((bh * s) as f32 * k),
+                    left: Val::Px(bx as f32 * k),
+                    top: Val::Px(by as f32 * k),
+                    width: Val::Px(bw as f32 * k),
+                    height: Val::Px(bh as f32 * k),
                     ..default()
                 },
                 Visibility::Inherited,
@@ -756,7 +767,7 @@ pub fn aug_text_system(
     mut images: ResMut<Assets<Image>>,
     mut layers: ResMut<Assets<HudLayer>>,
     mut node: Query<(&mut Visibility, &MaterialNode<HudLayer>), With<AugText>>,
-    mut st: Local<(Option<Option<Arc<UiFont>>>, u64, (i32, i32), Option<Handle<Image>>)>,
+    mut st: Local<(Option<Option<Arc<UiFont>>>, u64, (i32, i32, i32), Option<Handle<Image>>)>,
 ) {
     let Some(win) = windows.iter().next() else { return };
     let busy = ph.dead || crate::menus::open() || crate::inventory_screen::screen_open() || crate::consys::third_person() || crate::credits::open();
@@ -769,19 +780,23 @@ pub fn aug_text_system(
     if st.0.is_none() {
         st.0 = Some(crate::classic_hud::load_font(&mut assets, "FontMenuSmall_DS").map(Arc::new));
     }
-    let s = crate::hud::ui_scale(win).max(1.0) as i32;
-    let root = ((win.physical_width() as i32 / s).max(1), (win.physical_height() as i32 / s).max(1));
+    // d: the UI scale shown. The screen-sized canvas is drawn at 1x and enlarged by the GPU (nearest) at a whole
+    // scale; at a fractional one (UI Scale) it's drawn at the next whole scale up and filtered down.
+    let (s, d) = crate::hud::ui_scales(win);
+    let cs = if s as f32 == d { 1 } else { s };
+    let root = (((win.physical_width() as f32 / d) as i32).max(1), ((win.physical_height() as f32 / d) as i32).max(1));
     let (Some(font), Ok((camera, gt))) = (st.0.clone().flatten(), cam.single()) else { return };
     // The canvas and its node (rebuilt when the screen size changes).
-    if st.2 != root || st.3.is_none() {
+    if st.2 != (root.0, root.1, cs) || st.3.is_none() {
+        let (iw, ih) = (root.0 * cs, root.1 * cs);
         let mut img = Image::new(
-            bevy::render::render_resource::Extent3d { width: root.0 as u32, height: root.1 as u32, depth_or_array_layers: 1 },
+            bevy::render::render_resource::Extent3d { width: iw as u32, height: ih as u32, depth_or_array_layers: 1 },
             bevy::render::render_resource::TextureDimension::D2,
-            vec![0; (root.0 * root.1 * 4) as usize],
+            vec![0; (iw * ih * 4) as usize],
             bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
             bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
         );
-        img.sampler = bevy::image::ImageSampler::nearest();
+        img.sampler = if cs == 1 { bevy::image::ImageSampler::nearest() } else { bevy::image::ImageSampler::linear() };
         let h = images.add(img);
         if node.is_empty() {
             commands.spawn((
@@ -802,7 +817,7 @@ pub fn aug_text_system(
         if let Some(old) = st.3.replace(h) {
             images.remove(old.id());
         }
-        st.2 = root;
+        st.2 = (root.0, root.1, cs);
         st.1 = 0;
     }
     for (mut vis, _) in &mut node {
@@ -822,7 +837,7 @@ pub fn aug_text_system(
     let ads = defense.map(|(pos, detonating)| {
         let p = Vec3::from(dx_level::ue_to_bevy(pos.as_vec3().to_array()));
         let in_front = (p - gt.translation()).dot(*gt.forward()) > 0.0;
-        let sp = camera.world_to_viewport(gt, p).ok().map(|v| v * win.scale_factor() / s as f32);
+        let sp = camera.world_to_viewport(gt, p).ok().map(|v| v * win.scale_factor() / d);
         let (cx, cy) = sp.map_or((w as f32 / 2.0, h as f32 / 2.0), |v| (v.x, v.y));
         let range = (pos - player.body.location).length() / 16.0;
         (cx, cy, in_front && sp.is_some(), range as i32, detonating)
@@ -837,7 +852,7 @@ pub fn aug_text_system(
         return;
     }
     st.1 = hash;
-    let mut c = Canvas::new(w, h, 1);
+    let mut c = Canvas::new(w, h, cs);
     if light_amp {
         // The middle box: width/2 x height/2 at the centre.
         let (bx, by) = (w / 4, h / 4);

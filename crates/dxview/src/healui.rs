@@ -97,8 +97,10 @@ pub fn heal_ui_system(
     }
     st.shown = want;
     st.alpha = if want { (st.alpha + dt / 0.15).min(1.0) } else { (st.alpha - dt / 0.2).max(0.0) };
-    let s = crate::hud::ui_scale(win).max(1.0) as i32;
-    let k = s as f32 / win.scale_factor();
+    // s: the whole scale the body is drawn at; d: the scale shown (fractional with UI Scale, which enlarges it
+    // only as far as it fits).
+    let (s, d) = crate::hud::ui_scales_fit(win, W, H);
+    let k = d / win.scale_factor();
     if st.alpha <= 0.0 {
         for (_, _, mut v) in &mut body {
             v.set_if_neq(Visibility::Hidden);
@@ -125,7 +127,7 @@ pub fn heal_ui_system(
     let hp: Vec<i32> = crate::persona::PARTS.iter().map(|&p| ph.parts[p].max(0.0).round() as i32).collect();
     let key = {
         let mut h: u64 = 1469598103934665603;
-        for v in hp.iter().map(|v| *v as u64).chain([hover.map_or(99, |h| h as u64), s as u64, crate::gamepad::pad_in_use() as u64]) {
+        for v in hp.iter().map(|v| *v as u64).chain([hover.map_or(99, |h| h as u64), s as u64, d.to_bits() as u64, crate::gamepad::pad_in_use() as u64]) {
             h ^= v;
             h = h.wrapping_mul(1099511628211);
         }
@@ -162,20 +164,26 @@ pub fn heal_ui_system(
             c.text(f, 0, BY + 376, W, 14, HAlign::Center, VAlign::Center, crate::menuui::h_col(8), how);
         }
         let (pw, ph_) = ((W * s) as u32, (H * s) as u32);
-        let fits = st.img.as_ref().and_then(|h| images.get(h)).is_some_and(|im| im.width() == pw && im.height() == ph_);
+        // Linear when shown at a fractional scale: filtered down from the whole one it's drawn at.
+        let linear = s as f32 != d;
+        let fits = st.img.as_ref().and_then(|h| images.get(h)).is_some_and(|im| im.width() == pw && im.height() == ph_ && crate::hud::is_linear(im) == linear);
         if fits {
             if let Some(mut im) = st.img.as_ref().and_then(|h| images.get_mut(h)) {
                 im.data = Some(c.to_rgba8());
             }
         } else {
             {
-                let im = images.add(Image::new(
+                let mut new = Image::new(
                     bevy::render::render_resource::Extent3d { width: pw, height: ph_, depth_or_array_layers: 1 },
                     bevy::render::render_resource::TextureDimension::D2,
                     c.to_rgba8(),
                     bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
                     bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
-                ));
+                );
+                if linear {
+                    new.sampler = bevy::image::ImageSampler::linear();
+                }
+                let im = images.add(new);
                 st.img = Some(im.clone());
                 for (e, ..) in &body {
                     commands.entity(e).despawn();
