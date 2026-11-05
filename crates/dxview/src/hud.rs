@@ -55,12 +55,23 @@ fn base_scale(win: &Window) -> f32 {
 }
 
 /// (the whole scale to draw at, the scale shown) for a shown scale: whole ones (within rounding) are drawn as they
-/// are, fractional ones at the next whole scale up.
+/// are, fractional ones at `fractional_draw_scale`.
 fn whole_and_shown(shown: f32) -> (i32, f32) {
     if (shown - shown.round()).abs() < 1e-3 {
         (shown.round() as i32, shown.round())
     } else {
-        (shown.ceil() as i32, shown)
+        (fractional_draw_scale(shown), shown)
+    }
+}
+
+/// The whole scale a fractional UI scale is drawn at: the next one up, filtered down (sharp; the drawing costs the
+/// square of it: 4x at 125% on a 720-line screen), or with `DXVIEW_UI_UPSCALE` the one below, enlarged by the GPU
+/// (softer; 125% then costs what 100% does). An A/B for the Switch (run 24).
+fn fractional_draw_scale(shown: f32) -> i32 {
+    if env_on!("DXVIEW_UI_UPSCALE") {
+        (shown.floor() as i32).max(1)
+    } else {
+        shown.ceil() as i32
     }
 }
 
@@ -103,7 +114,7 @@ pub fn screen_scales(win: &Window, w: i32, h: i32) -> (i32, f32) {
     if (shown - shown.round()).abs() < 1e-3 {
         (1, shown.round())
     } else {
-        (shown.ceil() as i32, shown)
+        (fractional_draw_scale(shown), shown)
     }
 }
 
