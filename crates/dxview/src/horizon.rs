@@ -36,7 +36,7 @@
 //!   included, and then for the session). Otherwise it stays off on the Switch (`DXVIEW_AO_NOSSAO`): with the depth
 //!   and normal prepass and the SMAA it brings, it cost about 22 ms of GPU time a frame with Ambient Occlusion off
 //!   (runs 6b to 9), and the Switch keeps it off until the game holds 60 fps without it (the user's call, 2026-11-02).
-//! - `ui_sharp`: a fractional UI Scale (the Switch's 125%) drawn at the next whole scale up and shrunk, sharp.
+//! - `ui_sharp`: a fractional UI Scale (the Switch's 150%) drawn at the next whole scale up and shrunk, sharp.
 //!   Otherwise it is drawn at the whole scale below and enlarged by the GPU (`DXVIEW_UI_UPSCALE`, hud.rs): softer,
 //!   and 3.8 ms a frame cheaper for the HUD in busy views (run 24); the user kept that one.
 //! - `no_update_check`: no check for a newer release (below).
@@ -46,8 +46,9 @@
 //! Switch's path; run it with `DXVIEW_CPU_CULL=1` and `DXVIEW_AO_NOSSAO=1` as `init` sets them on the console.
 //!
 //! The settings the Switch starts with (`switch_settings`), unless settings.txt already has a value: Anti-Aliasing and
-//! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), Open Sea on (water.rs), and UI Scale at 125% for
-//! the handheld's small screen (hud.rs). They are on the Settings > Enhancements and Display lists like the rest.
+//! HDR Rendering off, Lean Rendering and Lean Updates on (perf.rs), Open Sea on (water.rs), and UI Scale at 150% for
+//! the handheld's small screen (hud.rs: at 125% the user found Medium hard to read). They are on the Settings >
+//! Enhancements and Display lists like the rest.
 //! While neither Realtime Shadows nor Soft Shadows is on, every 3D camera
 //! uses Bevy's one-tap `Hardware2x2` shadow filter instead of its 8- to 9-tap Gaussian (`shadow_filter`): the filter is
 //! compiled into every lit shader whether or not a light casts: 450 of the PBR shaders' 3,120 instructions (NAK).
@@ -153,7 +154,7 @@ pub fn init() {
                 std::env::set_var("DXVIEW_AO_NOSSAO", "1");
             }
             if !option("ui_sharp") {
-                // A fractional UI Scale (125%, the Switch's) drawn at the whole scale below and enlarged by the GPU
+                // A fractional UI Scale (the Switch's 150%) drawn at the whole scale below and enlarged by the GPU
                 // (hud.rs): drawn at 2x and shrunk it cost the HUD 3.8 ms more a frame in busy views (run 24 a
                 // against b). `ui_sharp` draws it the sharp way, to compare.
                 std::env::set_var("DXVIEW_UI_UPSCALE", "1");
@@ -510,7 +511,8 @@ fn shadow_filter(mut commands: Commands, cameras: Query<(Entity, Option<&bevy::l
 }
 
 /// The settings the Switch starts with, where settings.txt has none (a value there, written by the menu or by hand,
-/// wins): the lean Performance settings (perf.rs), and Open Sea (water.rs), so the sea doesn't end in black.
+/// wins): the lean Performance settings (perf.rs), Open Sea (water.rs), so the sea doesn't end in black, and UI Scale
+/// at 150%, which the handheld's screen needs (hud.rs).
 #[cfg(target_os = "horizon")]
 fn switch_settings() {
     const SWITCH: [(&str, f32); 6] = [
@@ -519,7 +521,7 @@ fn switch_settings() {
         ("LeanRendering", 1.0),
         ("LeanUpdates", 1.0),
         ("OpenSea", 1.0),
-        ("UIScale", 125.0),
+        ("UIScale", 150.0),
     ];
     // The working folder is the NRO's, where settings.rs keeps settings.txt when there is no exe path.
     let saved = std::fs::read_to_string("settings.txt").unwrap_or_default();

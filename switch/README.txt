@@ -30,8 +30,9 @@ Notes
 -----
 - The first launch compiles the game's shaders as it meets them, so the first minutes stutter; later launches load
   them from the SD card.
-- The Switch starts with lean settings (Settings > Enhancements > Performance) and the UI at 125% (Settings >
-  Display > UI Scale). The FPS Counter is on the Performance list.
+- The Switch starts with lean settings (Settings > Enhancements > Performance) and the UI at 150% (Settings >
+  Display > UI Scale: 100%, 125% or 150%). HUD Scale Large is the biggest HUD that keeps the belt on screen. The FPS
+  Counter is on the Performance list.
 - log.txt beside the NRO records each run; include it with bug reports.
 - options.txt beside the NRO is optional, for test switches only.
 

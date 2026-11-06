@@ -384,18 +384,19 @@ fn hud_scale_choice() -> Choice {
     }
 }
 
-/// Our own choice: UI Scale on the Display screen, under HUD Scale.
+/// Our own choice: UI Scale on the Display screen, under HUD Scale: a slider with a stop for each of hud.rs's
+/// `UI_SCALES`.
 fn ui_scale_choice() -> Choice {
     let v = setting!("UIScale");
-    let vals: Vec<i32> = (100..=200).step_by(10).collect();
+    let vals = crate::hud::UI_SCALES;
     Choice {
         key: "UIScale".into(),
         label: "|&UI Scale".into(),
-        help: "Makes the HUD, menus, inventory and computers bigger. 100% is the original size.".into(),
+        help: "Makes the HUD, menus, inventory and computers bigger, as far as they fit the screen. 100% is the original size.".into(),
         kind: ChoiceKind::Slider {
             ticks: vals.len() as i32,
-            start: 100.0,
-            end: 200.0,
+            start: vals[0],
+            end: vals[vals.len() - 1],
             labels: vals.iter().map(|v| format!("{v}%")).collect(),
         },
         value: v,

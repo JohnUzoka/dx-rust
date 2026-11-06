@@ -35,17 +35,32 @@ pub struct CrossImage;
 #[derive(Component)]
 pub struct CrossSize(f32, f32);
 
-/// The UI Scale setting as a factor (100% = 1, the original's sizes; up to 2).
+/// UI Scale's choices (Settings > Display), in percent: the original's size and two steps up. The menu shows them as
+/// the stops of a slider from the first to the last, an equal step apart.
+pub const UI_SCALES: [f32; 3] = [100.0, 125.0, 150.0];
+
+/// The UI Scale setting as a factor (100% = 1, the original's sizes): the choice the menu's slider shows for it, so a
+/// value between two (settings.txt by hand, or the earlier 100% to 200% slider) goes to the nearer.
 pub fn ui_zoom() -> f32 {
-    (setting!("UIScale") / 100.0).clamp(1.0, 2.0)
+    let (first, last) = (UI_SCALES[0], UI_SCALES[UI_SCALES.len() - 1]);
+    let step = (last - first) / (UI_SCALES.len() - 1) as f32;
+    let stop = ((setting!("UIScale") - first) / step).round().clamp(0.0, (UI_SCALES.len() - 1) as f32);
+    (first + stop * step) / 100.0
 }
+
+/// The narrowest screen the original HUD is laid out for, in UI units (its 640 x 480): the ammo display and the
+/// object belt just fit side by side along the bottom (95 + 541, classic_hud.rs).
+const HUD_WIDTH: f32 = 640.0;
 
 /// Deus Ex UI scale for this window, in physical pixels per UI unit: (the whole-number scale its canvases are
 /// drawn at, the scale shown on screen). The original's is the nearest whole multiple of 600 lines (HUD Scale
-/// goes one step either way); UI Scale enlarges that, and a fractional result is drawn at the next whole scale
-/// up and filtered down (`set_filter`).
+/// goes one step either way); UI Scale enlarges that, but never past the screen's last `HUD_WIDTH` units (Large at
+/// 125% was 2.5 on the Switch's 720 lines: 512 units, the belt cut off), and a fractional result is drawn at
+/// `fractional_draw_scale` and filtered (`set_filter`).
 pub fn ui_scales(win: &Window) -> (i32, f32) {
-    whole_and_shown(base_scale(win) * ui_zoom())
+    let base = base_scale(win);
+    let fit = win.physical_width() as f32 / HUD_WIDTH;
+    whole_and_shown((base * ui_zoom()).min(fit).max(base))
 }
 
 /// The original's UI scale (DeusExRootWindow: whole multiples of 600 lines; the HUD Scale setting goes one step

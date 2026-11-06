@@ -44,7 +44,8 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     ("AdjustBrightness", 0.5),
     // HUD size (ours): 0 small, 1 medium (the original's rule), 2 large.
     ("HUDScale", 1.0),
-    // UI size (ours), in percent (100..200): the whole UI - HUD, menus, inventory, computers - that much bigger.
+    // UI size (ours), in percent (100, 125 or 150: hud.rs UI_SCALES): the whole UI - HUD, menus, inventory,
+    // computers - that much bigger.
     ("UIScale", 100.0),
     ("FOV", 75.0),
     ("FPSLimit", 0.0),
