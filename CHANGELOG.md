@@ -10,6 +10,9 @@
 - Aiming Sensitivity (Settings > Enhancements > Controller): the right stick's speed while aiming through sights, a
   scope or binoculars. Very Slow to Very Fast follow the zoom (Normal moves the zoomed picture as fast as the normal
   one, so sniping with a stick is steady); Unchanged, the default, turns as fast as when not aiming, as before.
+- A newspaper's, book's or datacube's text closes when a screen opens over the game (the inventory, a menu, a
+  computer) and with a controller's B / Circle, which then doesn't also crouch. It closed only when used again or
+  left 160 units behind.
 
 ## v0.11.0
 

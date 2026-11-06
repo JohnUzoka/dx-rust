@@ -1,9 +1,28 @@
 //! Readable things (InformationDevices: datacubes, books, newspapers): using one shows its text (looked up by
-//! textTag in DeusExText.u) in a window until you use it again or walk away.
+//! textTag in DeusExText.u) in a window until you use it again, walk away, open a screen over the game (the
+//! inventory, a menu, a computer) or press a controller's B (gamepad.rs).
 
 use crate::Player;
 use bevy::prelude::*;
 use glam::DVec3;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// A readable's text is on screen: `info_system` keeps it each frame, for the pad's B (`showing`, `close`).
+pub(crate) static SHOWING: AtomicBool = AtomicBool::new(false);
+/// `close` asked for the text to go; `info_system` closes it.
+static CLOSE: AtomicBool = AtomicBool::new(false);
+
+/// A readable's text is on screen.
+pub fn showing() -> bool {
+    SHOWING.load(Ordering::Relaxed)
+}
+
+/// Closes the readable's text on screen (`info_system` this frame or the next).
+pub fn close() {
+    if SHOWING.swap(false, Ordering::Relaxed) {
+        CLOSE.store(true, Ordering::Relaxed);
+    }
+}
 
 #[derive(Resource, Default)]
 pub struct InfoDisplay {
@@ -107,10 +126,13 @@ pub fn info_system(
     mut text: Single<&mut Text, With<InfoText>>,
 ) {
     let _prof = crate::prof::scope("info::info_system");
-    // Walking away closes it.
-    if info.text.is_some() && player.body.location.distance(info.at) > 160.0 {
+    // Walking away, a screen over the game (the inventory, a menu, a computer) or the pad's B (`close`) closes it.
+    let asked = CLOSE.swap(false, Ordering::Relaxed);
+    let far = || player.body.location.distance(info.at) > 160.0;
+    if info.text.is_some() && (asked || crate::inventory_screen::screen_open() || far()) {
         info.text = None;
     }
+    SHOWING.store(info.text.is_some(), Ordering::Relaxed);
     match &info.text {
         Some(t) => {
             if text.0 != *t {

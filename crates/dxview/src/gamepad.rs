@@ -474,6 +474,12 @@ pub fn outputs(key_map: &[Input], dt: f32, ui: bool, snap_ok: bool) -> PadOut {
         t.1 = t.1.saturating_sub(1);
         t.1 > 0
     });
+    // B in play closes a readable's text (a newspaper, book or datacube: info.rs) instead of crouching, and is then
+    // ignored until it's let go.
+    if !ui && f.just.contains(&PadBtn::East) && crate::info::showing() {
+        crate::info::close();
+        h.suppress.push(PadBtn::East);
+    }
     h.suppress.retain(|b| f.held.contains(b));
     let suppressed = h.suppress.clone();
     let held = |b: PadBtn| f.held.contains(&b) && !suppressed.contains(&b);
@@ -872,6 +878,9 @@ pub fn rumble_system(
 mod tests {
     use super::*;
 
+    /// The pad's state is global (FRAME, HOLD): one of these tests at a time.
+    static PAD: Mutex<()> = Mutex::new(());
+
     /// `outputs` for one frame at 60 fps with these buttons held (`just`: pressed this frame), in a screen or in play.
     fn frame_out(keys: &[Input], held: &[PadBtn], just: &[PadBtn], ui: bool) -> Vec<Input> {
         *FRAME.lock().unwrap() = Some(PadFrame { connected: true, held: held.to_vec(), just: just.to_vec(), ..Default::default() });
@@ -880,6 +889,7 @@ mod tests {
 
     #[test]
     fn select_that_closes_a_screen_does_not_open_the_inventory_again() {
+        let _pad = PAD.lock().unwrap_or_else(|e| e.into_inner());
         *HOLD.lock().unwrap() = None;
         let keys: Vec<Input> = ACTIONS.iter().map(|a| a.1).collect();
         // Select goes down in the inventory, which closes it, stays down into play, then is let go.
@@ -891,5 +901,22 @@ mod tests {
         let down: Vec<bool> = frames.iter().map(|f| f.contains(&inventory)).collect();
         let presses = (0..down.len()).filter(|&i| down[i] && (i == 0 || !down[i - 1])).count();
         assert_eq!(presses, 1, "Inventory key down per frame: {down:?}");
+    }
+
+    #[test]
+    fn b_closes_a_readable_instead_of_crouching() {
+        let _pad = PAD.lock().unwrap_or_else(|e| e.into_inner());
+        *HOLD.lock().unwrap() = None;
+        let keys: Vec<Input> = ACTIONS.iter().map(|a| a.1).collect();
+        let crouch = bound(&keys, "Crouch / swim down").unwrap();
+        // A newspaper's text is up: B goes down (which closes it), stays down a few frames, then is let go.
+        crate::info::SHOWING.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut frames = vec![frame_out(&keys, &[PadBtn::East], &[PadBtn::East], false)];
+        assert!(!crate::info::showing(), "B left the text up");
+        frames.extend((0..5).map(|_| frame_out(&keys, &[PadBtn::East], &[], false)));
+        frames.push(frame_out(&keys, &[], &[], false));
+        assert!(frames.iter().all(|f| !f.contains(&crouch)), "B crouched as it closed the text");
+        // With nothing to read, B crouches.
+        assert!(frame_out(&keys, &[PadBtn::East], &[PadBtn::East], false).contains(&crouch));
     }
 }
