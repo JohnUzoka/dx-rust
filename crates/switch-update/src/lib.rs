@@ -38,7 +38,11 @@ use std::{
 };
 
 /// The repository whose releases the Switch build updates from.
-pub const REPOSITORY: &str = "JohnUzoka/dx-rust";
+pub const REPOSITORY: &str = "JohnUzoka/dx-rust-nx";
+/// The repository's earlier names. GitHub sends a renamed repository's API calls on to it, but its listing then
+/// names the new repository in every download, which a build checking for its old name rejects: builds before
+/// 2026-11-06's rename find no updates. Downloads under these are accepted too, so a rename back keeps updates working.
+pub const FORMER_NAMES: &[&str] = &["JohnUzoka/dx-rust"];
 /// Switch releases are tagged `switch-v<version>`, the version their NRO's NACP shows (switch/build.sh).
 pub const TAG_PREFIX: &str = "switch-v";
 /// The release file with the NRO.
@@ -330,7 +334,7 @@ mod tests {
         }
     }
 
-    const LISTING: &str = "https://api.github.com/repos/JohnUzoka/dx-rust/releases?per_page=20";
+    const LISTING: &str = "https://api.github.com/repos/JohnUzoka/dx-rust-nx/releases?per_page=20";
 
     fn url(tag: &str) -> String {
         format!("https://github.com/{REPOSITORY}/releases/download/{tag}/{NRO_ASSET}")

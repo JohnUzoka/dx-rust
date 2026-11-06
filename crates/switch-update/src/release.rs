@@ -49,13 +49,17 @@ struct ReleaseFile {
 
 /// The releases in GitHub's listing (`GET /repos/{repository}/releases`) that are published (not drafts), tagged
 /// `switch-v<version>` with a version above `installed` and no pre-release part, and have an uploaded `dxview.nro`
-/// with a SHA-256 digest, downloaded from this repository's releases. Newest first. GitHub's own pre-release label
-/// doesn't hold a release back (0.1.0 carries it): a build only for testing gets a version with a pre-release part
-/// (`switch-v0.1.1-test.1`), or stays a draft.
+/// with a SHA-256 digest, downloaded from this repository's releases (under its name or one of its
+/// [`FORMER_NAMES`](crate::FORMER_NAMES)). Newest first. GitHub's own pre-release label doesn't hold a release back
+/// (0.1.0 carries it): a build only for testing gets a version with a pre-release part (`switch-v0.1.1-test.1`), or
+/// stays a draft.
 pub(crate) fn newer(listing: &[u8], repository: &str, installed: &Version) -> Result<Vec<Candidate>, String> {
     let releases: Vec<Release> =
         serde_json::from_slice(listing).map_err(|e| format!("GitHub's release list is unreadable: {e}"))?;
-    let downloads = format!("https://github.com/{repository}/releases/download/");
+    let downloads: Vec<String> = std::iter::once(repository)
+        .chain(crate::FORMER_NAMES.iter().copied())
+        .map(|name| format!("https://github.com/{name}/releases/download/"))
+        .collect();
     let mut candidates: Vec<Candidate> = releases
         .into_iter()
         .filter(|release| !release.draft)
@@ -67,7 +71,7 @@ pub(crate) fn newer(listing: &[u8], repository: &str, installed: &Version) -> Re
             let nro = release.assets.iter().find(|file| {
                 file.name == NRO_ASSET
                     && file.state.as_deref().is_none_or(|state| state == "uploaded")
-                    && file.browser_download_url.starts_with(&downloads)
+                    && downloads.iter().any(|prefix| file.browser_download_url.starts_with(prefix.as_str()))
                     && NRO_SIZES.contains(&file.size)
             })?;
             Some(Candidate {
@@ -104,7 +108,7 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
 
-    const REPO: &str = "JohnUzoka/dx-rust";
+    const REPO: &str = "JohnUzoka/dx-rust-nx";
 
     fn nro(tag: &str) -> Value {
         json!({
@@ -159,5 +163,18 @@ mod tests {
         let listing = json!([release("switch-v0.1.0", false, true, vec![nro("switch-v0.1.0")])]);
         assert_eq!(tags(&listing, "0.1.0-otatest"), ["switch-v0.1.0"]);
         assert!(tags(&listing, "0.1.0").is_empty());
+    }
+
+    #[test]
+    fn a_download_under_the_former_name_is_offered_and_another_repository_is_not() {
+        let mut former = nro("switch-v0.1.1");
+        former["browser_download_url"] = json!(format!("https://github.com/JohnUzoka/dx-rust/releases/download/switch-v0.1.1/{NRO_ASSET}"));
+        let mut other = nro("switch-v0.1.2");
+        other["browser_download_url"] = json!(format!("https://github.com/JohnUzoka/dx-rust-old/releases/download/switch-v0.1.2/{NRO_ASSET}"));
+        let listing = json!([
+            release("switch-v0.1.2", false, false, vec![other]),
+            release("switch-v0.1.1", false, false, vec![former]),
+        ]);
+        assert_eq!(tags(&listing, "0.1.0"), ["switch-v0.1.1"]);
     }
 }
