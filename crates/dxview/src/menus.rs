@@ -1787,6 +1787,7 @@ fn pad_option_choices() -> Vec<Choice> {
         e("PadInvertLook", "|&Invert Controller Look", "Push the right stick up to look down.", &["Disabled", "Enabled"]),
         e("PadDeadzone", "Stick |&Deadzone", "How far a stick moves before it counts.", &["Very Small", "Small", "Normal", "Large", "Very Large"]),
         e("PadAimSlowdown", "|&Aim Slowdown", "The right stick turns more slowly while the crosshair is on an enemy.", &["Disabled", "Enabled"]),
+        e("PadAimSensitivity", "Aiming |&Sensitivity", "The right stick's speed while aiming through sights, a scope or binoculars. Normal follows the zoom; Unchanged ignores it.", &["Unchanged", "Very Slow", "Slow", "Normal", "Fast", "Very Fast"]),
         e("PadAugPages", "Aug |&Hotkey Pages", "The D-pad toggles pages of three augmentations; tap the wheel button to turn the page, hold it for the wheel.", &["Disabled", "Enabled"]),
         e("PadHints", "Button |&Hints", "A bar at the bottom of menus and screens showing what the controller's buttons do there.", &["Disabled", "Enabled"]),
         e("PadFrobPrompt", "Button Prompts on |&Objects", "Show the Use button beside the name of what you're looking at (not in the original).", &["Disabled", "Enabled"]),

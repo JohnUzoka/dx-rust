@@ -83,13 +83,15 @@ pub const DEFAULTS: &[(&str, f32)] = &[
     // DeusExPlayer.bQuotesEnabled (globalconfig): the credits' QUOTES easter egg, then the quotes after the credits.
     ("QuotesEnabled", 0.0),
     // Ours (Enhancements, gamepad): glyph set 0 auto / 1 Xbox / 2 PlayStation; stick deadzone and right-stick look
-    // speed (steps 0..4); look invert; aim slowdown on enemies; D-pad aug hotkey pages instead of belt stepping.
+    // speed (steps 0..4); look invert; aim slowdown on enemies; the look while aiming (0 unchanged, 1..5 following the
+    // zoom, Very Slow to Very Fast); D-pad aug hotkey pages instead of belt stepping.
     ("PadGlyphs", 0.0),
     ("PadDeadzone", 2.0),
     ("PadLookSensitivityH", 2.0),
     ("PadLookSensitivityV", 2.0),
     ("PadInvertLook", 0.0),
     ("PadAimSlowdown", 0.0),
+    ("PadAimSensitivity", 0.0),
     ("PadAugPages", 0.0),
     // Controller prompts: the hint bar on free-cursor screens (on), the Use glyph beside frob labels (off).
     ("PadHints", 1.0),

@@ -23,8 +23,9 @@ The face buttons go by their letters, as on the Switch: A confirms and B goes ba
   Right stick click: third person (hold: change ammo)
   D-pad up: augmentation wheel (hold), down: flashlight, left / right: belt
   Minus: inventory (hold: goals)    Plus: menu
-Settings > Enhancements > Controller has the layout picture, the look sensitivity and the dead zone; Settings >
-Controls > Controller Bindings changes what each button does.
+Settings > Enhancements > Controller has the layout picture, the look sensitivity, the dead zone and Aiming
+Sensitivity (the stick's speed through a scope: every choice but Unchanged slows it with the zoom, for sniping);
+Settings > Controls > Controller Bindings changes what each button does.
 
 Notes
 -----

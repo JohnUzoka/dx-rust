@@ -2122,12 +2122,13 @@ fn fly(
     mut walk_test: Option<ResMut<WalkTest>>,
     movers_res: Res<movers::Movers>,
     mut frob_req: ResMut<pickups::FrobRequest>,
-    (carrying, mut ph, weapons_res, mut scripted, mouse): (
+    (carrying, mut ph, weapons_res, mut scripted, mouse, zoom): (
         Res<carry::Carrying>,
         ResMut<ai::PlayerHealth>,
         Res<weapons::Weapons>,
         ResMut<weapons::ScriptedInput>,
         Res<ButtonInput<MouseButton>>,
+        Res<weapons::Zoom>,
     ),
 ) {
     let _prof = crate::prof::scope("main::fly");
@@ -2187,8 +2188,11 @@ fn fly(
         // MouseSensitivity (default 3) scales the look; Invert Mouse flips the pitch.
         let k = 0.0022 * crate::settings::mouse_sensitivity() / 3.0;
         let inv = if crate::settings::invert_mouse() { -1.0 } else { 1.0 };
-        // The gamepad's right stick turns at a rate (gamepad.rs).
-        let pad = gamepad::look_delta(time.delta_secs());
+        // The gamepad's right stick turns at a rate (gamepad.rs), which Aiming Sensitivity can slow with the zoom of a
+        // scope, binoculars or Modern Aiming's sights.
+        let normal = weapons::base_fov();
+        let aiming = aimmode::fov(zoom.0.unwrap_or(normal));
+        let pad = gamepad::look_delta(time.delta_secs(), aiming / normal);
         let dyaw = motion.delta.x * k + pad.x;
         let dpitch = -inv * motion.delta.y * k + pad.y;
         looked = dyaw != 0.0 || dpitch != 0.0;

@@ -726,10 +726,14 @@ pub fn move_axes() -> Option<Vec2> {
     (f.connected && f.ls.length() > 0.0).then_some(f.ls)
 }
 
+/// The look sensitivities' steps, Very Slow to Very Fast.
+const LOOK_STEPS: [f32; 5] = [0.5, 0.75, 1.0, 1.4, 1.9];
+
 /// View turn this frame (yaw, pitch) in radians from the right stick: an exponent-2 curve, up to 220 deg/s
 /// horizontally and 150 vertically at default sensitivity, scaled by the horizontal and vertical Look Sensitivity
-/// and inverted with Invert Pad Look.
-pub fn look_delta(dt: f32) -> Vec2 {
+/// and inverted with Invert Pad Look. `zoom` is the aiming view's field of view over the normal one (a scope,
+/// binoculars or Modern Aiming's sights; 1 when not aiming), which Aiming Sensitivity can slow the turn by.
+pub fn look_delta(dt: f32, zoom: f32) -> Vec2 {
     let f = frame();
     // The aug wheel has the right stick while it's up.
     if !f.connected || crate::augwheel::open() {
@@ -740,16 +744,28 @@ pub fn look_delta(dt: f32) -> Vec2 {
         return Vec2::ZERO;
     }
     let curved = f.rs / m * m.powf(2.0);
-    let table = [0.5, 0.75, 1.0, 1.4, 1.9];
-    let sens_h = table[(setting!("PadLookSensitivityH") as usize).min(4)];
-    let sens_v = table[(setting!("PadLookSensitivityV") as usize).min(4)];
+    let sens_h = LOOK_STEPS[(setting!("PadLookSensitivityH") as usize).min(4)];
+    let sens_v = LOOK_STEPS[(setting!("PadLookSensitivityV") as usize).min(4)];
     let inv = if setting!("PadInvertLook") > 0.5 { -1.0 } else { 1.0 };
     // Aim slowdown (Enhancement): 40% slower while the crosshair is on an enemy.
     let slow = if setting!("PadAimSlowdown") > 0.5 && crate::hud::on_enemy() { 0.6 } else { 1.0 };
+    let aim = aim_factor(setting!("PadAimSensitivity").round().max(0.0) as usize, zoom);
     Vec2::new(
-        curved.x * 220f32.to_radians() * sens_h * slow * dt,
-        curved.y * 150f32.to_radians() * sens_v * slow * inv * dt,
+        curved.x * 220f32.to_radians() * sens_h * slow * aim * dt,
+        curved.y * 150f32.to_radians() * sens_v * slow * aim * inv * dt,
     )
+}
+
+/// The turn's factor while aiming (Aiming Sensitivity, step 0..5) with the view at `zoom` of its normal field of
+/// view. Unchanged (0) turns as fast as when not aiming, as the game always has: a 20-degree scope then sweeps its
+/// picture nearly four times as fast. The others follow the zoom (Normal: the zoomed picture moves as fast as the
+/// normal one), times the look sensitivities' steps from Very Slow to Very Fast, and never turn faster than when not
+/// aiming (Very Fast down the sights' slight zoom would).
+fn aim_factor(step: usize, zoom: f32) -> f32 {
+    if step == 0 || zoom >= 1.0 {
+        return 1.0;
+    }
+    (LOOK_STEPS[(step - 1).min(4)] * zoom).min(1.0)
 }
 
 /// A button's name in a glyph set (the Controller Bindings list, prompts without room for a glyph).

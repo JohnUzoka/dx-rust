@@ -7,6 +7,9 @@
   HUD never grows past the original's 640-unit width, so the belt stays on screen. 100% is the original size.
 - A controller's View / Select button closes the inventory and goals screens without opening the inventory again
   when it's let go.
+- Aiming Sensitivity (Settings > Enhancements > Controller): the right stick's speed while aiming through sights, a
+  scope or binoculars. Very Slow to Very Fast follow the zoom (Normal moves the zoomed picture as fast as the normal
+  one, so sniping with a stick is steady); Unchanged, the default, turns as fast as when not aiming, as before.
 
 ## v0.11.0
 
