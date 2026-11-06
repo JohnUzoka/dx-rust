@@ -5,6 +5,8 @@
 - UI Scale (Settings > Display: 100%, 125% or 150%) makes the whole UI bigger - the HUD, the menus, the inventory
   and the computer screens - for small or far-away screens such as a handheld's, as far as it fits the screen: the
   HUD never grows past the original's 640-unit width, so the belt stays on screen. 100% is the original size.
+- A controller's View / Select button closes the inventory and goals screens without opening the inventory again
+  when it's let go.
 
 ## v0.11.0
 

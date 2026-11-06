@@ -561,10 +561,12 @@ pub fn outputs(key_map: &[Input], dt: f32, ui: bool, snap_ok: bool) -> PadOut {
                 }
             }
         }
-        // Select still closes the inventory / goals screens.
+        // Select still closes the inventory / goals screens, and is then ignored until it's let go: back in play the
+        // same press would otherwise count as Inventory's tap (below) and open the screen again on its release.
         if just(PadBtn::Select) {
             if let Some(k) = bound(key_map, "Inventory screen") {
                 h.taps.push((k, 2));
+                h.suppress.push(PadBtn::Select);
             }
         }
         if held(PadBtn::Touch) {
@@ -847,5 +849,31 @@ pub fn rumble_system(
     if let Ok(e) = built {
         let _ = e.play();
         *effect = Some((e, ml, mh));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `outputs` for one frame at 60 fps with these buttons held (`just`: pressed this frame), in a screen or in play.
+    fn frame_out(keys: &[Input], held: &[PadBtn], just: &[PadBtn], ui: bool) -> Vec<Input> {
+        *FRAME.lock().unwrap() = Some(PadFrame { connected: true, held: held.to_vec(), just: just.to_vec(), ..Default::default() });
+        outputs(keys, 1.0 / 60.0, ui, false).inputs
+    }
+
+    #[test]
+    fn select_that_closes_a_screen_does_not_open_the_inventory_again() {
+        *HOLD.lock().unwrap() = None;
+        let keys: Vec<Input> = ACTIONS.iter().map(|a| a.1).collect();
+        // Select goes down in the inventory, which closes it, stays down into play, then is let go.
+        let mut frames = vec![frame_out(&keys, &[PadBtn::Select], &[PadBtn::Select], true)];
+        frames.extend((0..10).map(|_| frame_out(&keys, &[PadBtn::Select], &[], false)));
+        frames.extend((0..10).map(|_| frame_out(&keys, &[], &[], false)));
+        // The Inventory key goes down once (the close), not again on the release.
+        let inventory = bound(&keys, "Inventory screen").unwrap();
+        let down: Vec<bool> = frames.iter().map(|f| f.contains(&inventory)).collect();
+        let presses = (0..down.len()).filter(|&i| down[i] && (i == 0 || !down[i - 1])).count();
+        assert_eq!(presses, 1, "Inventory key down per frame: {down:?}");
     }
 }
