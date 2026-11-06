@@ -1956,6 +1956,9 @@ fn hash_debug(h: &mut impl Hasher, v: &impl std::fmt::Debug) {
     let _ = std::fmt::Write::write_fmt(&mut Feed(h), format_args!("{v:?}"));
 }
 
+/// The characters a new game's name may have (its edit window's filter).
+const NAME_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890 ";
+
 fn edit_key(e: &Edit, h: &mut impl Hasher) {
     let Edit { text, cur, anchor, max, scroll, org } = e;
     (text, cur, anchor, max, scroll, org).hash(h);
@@ -3241,7 +3244,10 @@ pub fn menu_system(
                     }
                     W::Edit(n) => {
                         win.focus = Some(w);
-                        let _ = n;
+                        // On the Switch there are no keys to type with: the new game's name opens its keyboard.
+                        if let (0, Body::NewGame(ng)) = (n, &mut win.body) {
+                            crate::horizon::type_into(&mut ng.name, "Name", false, Some(NAME_CHARS));
+                        }
                     }
                     W::Row(l, r) => {
                         let double = st.last_click.1 == Some(w) && st.clock - st.last_click.0 < 0.4;
@@ -3454,8 +3460,7 @@ pub fn menu_system(
             }
             // An edit with the focus takes typing (MenuUIEditWindow; the new-game name keeps to its filter).
             if let (Some(W::Edit(0)), Body::NewGame(ng)) = (win.focus, &mut win.body) {
-                let filter = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890 ";
-                let t = text.as_deref().map(|t| t.chars().filter(|c| filter.contains(*c)).collect::<String>());
+                let t = text.as_deref().map(|t| t.chars().filter(|c| NAME_CHARS.contains(*c)).collect::<String>());
                 if !matches!(k, KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Tab) {
                     ng.name.key(*k, t.as_deref().filter(|t| !t.is_empty()), shift, ctrl);
                     continue;

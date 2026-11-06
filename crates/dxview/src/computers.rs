@@ -2494,6 +2494,7 @@ pub fn computer_system(
                         }
                         Wid::Edit(n) => {
                             t.focus = Some(w);
+                            let (header, secret) = edit_label(t, n);
                             let e = edit_mut(t, n);
                             if let Some(e) = e {
                                 let font = wx.hud.font(wx.assets, "FontMenuSmall");
@@ -2504,6 +2505,8 @@ pub fn computer_system(
                                         e.anchor = i;
                                     }
                                 }
+                                // On the Switch there are no keys to type with: the click opens its keyboard.
+                                crate::horizon::type_into(e, header, secret, None);
                             }
                         }
                         Wid::Row(l, r) => {
@@ -3061,6 +3064,18 @@ fn edit_mut(t: &mut Term, n: u8) -> Option<&mut Edit> {
         (Some(Screen::Atm { pin, .. }), 1) => Some(pin),
         (Some(Screen::Withdraw { amount, .. }), 0) => Some(amount),
         _ => None,
+    }
+}
+
+/// What a text field is for (the Switch keyboard's header), and whether it's a secret (typed as dots).
+fn edit_label(t: &Term, n: u8) -> (&'static str, bool) {
+    match (t.screen.as_ref(), n) {
+        (Some(Screen::Login { .. }), 0) => ("User name", false),
+        (Some(Screen::Login { .. }), 1) => ("Password", true),
+        (Some(Screen::Atm { .. }), 0) => ("Account number", false),
+        (Some(Screen::Atm { .. }), 1) => ("PIN", true),
+        (Some(Screen::Withdraw { .. }), 0) => ("Amount", false),
+        _ => ("", false),
     }
 }
 

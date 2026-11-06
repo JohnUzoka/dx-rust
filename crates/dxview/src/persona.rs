@@ -1053,6 +1053,20 @@ fn screen_action(screen: usize, ui: &mut PersonaUi, ctx: &mut Ctx, b: PB) -> Opt
                 ..Default::default()
             });
             ui.note_click = None;
+            // On the Switch there are no keys to type with: the new note's text comes from its keyboard, and a note
+            // cancelled or left empty isn't kept.
+            if let Some(typed) = crate::horizon::keyboard("", "New note", 0, false) {
+                ui.edit = None;
+                if let Some(st) = crate::consys::lock().as_mut() {
+                    match typed.filter(|text| !text.trim().is_empty()) {
+                        Some(text) => st.notes[0] = text,
+                        None => {
+                            st.notes.remove(0);
+                            ui.note_sel = None;
+                        }
+                    }
+                }
+            }
         }
         (_, PB::DeleteNote) => {
             if ui.note_sel.is_some() {

@@ -59,6 +59,10 @@
 //! (size, GitHub's SHA-256, the NACP's version) and takes the running NRO's place for the next start, the old one kept
 //! beside it until then; `init` tidies up after one that was stopped halfway. Every step is an `[Update]` line in
 //! log.txt.
+//!
+//! The Switch's software keyboard (`keyboard`, `type_into`; bevy_horizon::keyboard) stands in for the keys a
+//! controller hasn't got: clicking a text field with the pad (a computer's login, an ATM's account and PIN, the
+//! new game's name) or adding a note opens it, and the field gets what the player confirmed.
 
 use bevy::prelude::*;
 
@@ -554,6 +558,44 @@ fn cpu_boost() {
 #[cfg(target_os = "horizon")]
 static CLASS_PREFETCH: std::sync::Mutex<Option<std::thread::JoinHandle<unreal_pkg::classes::ClassDb>>> =
     std::sync::Mutex::new(None);
+
+/// The Switch's software keyboard (bevy_horizon::keyboard), for text the game asks for where a controller has no keys:
+/// `None` off the Switch, where the keys type; else what the player confirmed, `Some(None)` when they cancelled. Each
+/// use is a `[Keyboard]` line in log.txt (never the text: some are passwords).
+pub fn keyboard(initial: &str, header: &str, max_chars: usize, password: bool) -> Option<Option<String>> {
+    #[cfg(target_os = "horizon")]
+    {
+        let typed = bevy_horizon::keyboard::Keyboard { initial, header, max_chars, password }.show();
+        // The button that closed the keyboard (A, B or +) is still down as the game gets the pad back: left alone, it
+        // would click the field again (another keyboard), go back or close the menus.
+        crate::gamepad::ignore_held_buttons();
+        match &typed {
+            Some(text) => eprintln!("[Keyboard] {header}: {} characters", text.chars().count()),
+            None => eprintln!("[Keyboard] {header}: cancelled"),
+        }
+        Some(typed)
+    }
+    #[cfg(not(target_os = "horizon"))]
+    {
+        let _ = (initial, header, max_chars, password);
+        None
+    }
+}
+
+/// The Switch's keyboard for a text field the pad clicked (`keyboard`): its text goes in, only the characters in
+/// `filter` if it has one. True when the player confirmed; false when they cancelled, and off the Switch.
+pub fn type_into(edit: &mut crate::menuui::Edit, header: &str, password: bool, filter: Option<&str>) -> bool {
+    match keyboard(&edit.get(), header, edit.max, password) {
+        Some(Some(text)) => {
+            match filter {
+                Some(f) => edit.set(&text.chars().filter(|c| f.contains(*c)).collect::<String>()),
+                None => edit.set(&text),
+            }
+            true
+        }
+        _ => false,
+    }
+}
 
 /// Starts the code packages' read (`CLASS_PREFETCH`), once the game folder and its mods are known (main.rs).
 /// `no_class_prefetch` in options.txt leaves it to the title's setup, to compare.

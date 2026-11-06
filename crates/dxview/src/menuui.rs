@@ -249,6 +249,13 @@ impl Edit {
     pub(crate) fn get(&self) -> String {
         self.text.iter().collect()
     }
+    /// Replaces the text (cut to `max`), the insertion point at its end.
+    pub(crate) fn set(&mut self, text: &str) {
+        self.text = text.chars().take(self.max).collect();
+        self.cur = self.text.len();
+        self.anchor = self.cur;
+        self.scroll = 0;
+    }
     pub(crate) fn clear(&mut self) {
         self.text.clear();
         self.cur = 0;

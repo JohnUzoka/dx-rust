@@ -24,6 +24,7 @@ The face buttons go by their letters, as on the Switch: A confirms and B goes ba
   D-pad up: augmentation wheel (hold), down: flashlight, left / right: belt
   Minus: inventory (hold: goals)    Plus: menu
   B also closes a newspaper's, book's or datacube's text (so does opening the inventory or the menu).
+  A on a text box (a computer's login, an ATM, the new game's name) or on Add Note opens the Switch's keyboard.
 Settings > Enhancements > Controller has the layout picture, the look sensitivity, the dead zone and Aiming
 Sensitivity (the stick's speed through a scope: every choice but Unchanged slows it with the zoom, for sniping);
 Settings > Controls > Controller Bindings changes what each button does.

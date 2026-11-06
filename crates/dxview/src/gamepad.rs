@@ -451,6 +451,16 @@ pub static PAD_NOTES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// LT pressed this frame in a free-cursor screen (the inventory drops the item under the cursor).
 pub static PAD_LT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// An applet (the Switch's keyboard) had the controller: whatever is held when the game reads it again is ignored until
+/// it's let go (`ignore_held_buttons`).
+static IGNORE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The buttons held at the next read are ignored until let go: the press that closed an applet isn't the game's.
+#[cfg_attr(not(target_os = "horizon"), allow(dead_code))]
+pub fn ignore_held_buttons() {
+    IGNORE_HELD.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The pad was the last thing used (glyphs instead of keys in prompts).
 pub fn pad_in_use() -> bool {
     let f = frame();
@@ -479,6 +489,9 @@ pub fn outputs(key_map: &[Input], dt: f32, ui: bool, snap_ok: bool) -> PadOut {
     if !ui && f.just.contains(&PadBtn::East) && crate::info::showing() {
         crate::info::close();
         h.suppress.push(PadBtn::East);
+    }
+    if IGNORE_HELD.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        h.suppress.extend(f.held.iter().copied());
     }
     h.suppress.retain(|b| f.held.contains(b));
     let suppressed = h.suppress.clone();
