@@ -38,7 +38,8 @@ pub fn hdr() -> bool {
 }
 
 /// Skip GPU work that adds no pixels (setting LeanRendering): duplicate copies to the window, MSAA writebacks,
-/// shadow lookups with no shadow lights, Modern Water's fine mesh in Classic.
+/// shadow lookups with no shadow lights, Modern Water's fine mesh in Classic, reflections of mirrors the camera
+/// can't see (mirror.rs).
 pub fn lean_rendering() -> bool {
     flags() & LEAN_RENDERING != 0
 }

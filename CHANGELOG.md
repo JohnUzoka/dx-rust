@@ -15,6 +15,9 @@
   left 160 units behind.
 - Bodies brought back by a loaded save, or by coming back to a map, lie where they fell and can be searched. They
   were drawn at the pawn's starting spot in the map, often floating, while searching looked for them where they died.
+- Lean Rendering skips the reflection of a mirror the camera can't see: one seen from behind, or with a wall between
+  the eye and every part of it (each reflection draws the whole scene again). In UNATCO HQ two polished floors past the
+  walls were reflecting while the player faced a bare wall; the picture is the same without them.
 
 ## v0.11.0
 
