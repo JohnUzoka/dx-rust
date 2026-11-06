@@ -1164,12 +1164,21 @@ fn restore_level_part(world: &mut World, s: &SaveGame, l: &LevelSave) {
     {
         let mut blocker_updates: Vec<(usize, Option<DVec3>, bool)> = Vec::new();
         let mut enter: Vec<Entity> = Vec::new();
-        let mut q = world.query::<(Entity, &mut Npc, &mut Deco, Option<&mut Animated>, &mut Visibility, Option<&OutOfWorld>)>();
-        for (e, mut n, mut d, an, mut vis, out) in q.iter_mut(world) {
+        let mut q = world.query::<(Entity, &mut Npc, &mut Deco, &mut Transform, Option<&mut Animated>, &mut Visibility, Option<&OutOfWorld>)>();
+        for (e, mut n, mut d, mut tf, an, mut vis, out) in q.iter_mut(world) {
             let Some(sv) = by_actor.get(&n.actor) else { continue };
             d.body.location = v3(sv.location);
             d.body.velocity = DVec3::ZERO;
             n.yaw = sv.yaw;
+            // Drawn where it was saved, facing the saved way, as the AI places a live pawn: a dead or knocked-out one
+            // is never moved again (the AI skips it), so it stayed at the map's spot for it, floating, while its
+            // search target was where it lay.
+            let yaw_units = (n.yaw / std::f64::consts::TAU * 65536.0) as i32;
+            d.rotation = [0, yaw_units, 0];
+            let draw = d.body.location + d.pre;
+            tf.translation = Vec3::from(dx_level::ue_to_bevy([draw.x as f32, draw.y as f32, draw.z as f32]));
+            let m = dx_level::actors::rotator_to_bevy_mat3(d.rotation);
+            tf.rotation = Quat::from_mat3(&Mat3::from_cols(Vec3::from(m[0]), Vec3::from(m[1]), Vec3::from(m[2])));
             n.hp_body.parts = sv.parts;
             n.hp_body.health = sv.health;
             if let Some(t) = &sv.alliances {

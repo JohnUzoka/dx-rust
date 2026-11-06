@@ -13,6 +13,8 @@
 - A newspaper's, book's or datacube's text closes when a screen opens over the game (the inventory, a menu, a
   computer) and with a controller's B / Circle, which then doesn't also crouch. It closed only when used again or
   left 160 units behind.
+- Bodies brought back by a loaded save, or by coming back to a map, lie where they fell and can be searched. They
+  were drawn at the pawn's starting spot in the map, often floating, while searching looked for them where they died.
 
 ## v0.11.0
 
