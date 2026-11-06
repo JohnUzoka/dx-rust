@@ -54,7 +54,7 @@ Known limits
 Source
 ------
 This build is DX RUST's port branch, tag switch-v0.1.0 of https://github.com/JohnUzoka/dx-rust (the port's code in
-crates/dxview/src/horizon.rs and switch/: build script, patches), with bevy-horizon at commit b5dfc41
+crates/dxview/src/horizon.rs and switch/: build script, patches), with bevy-horizon at commit 2521ac7
 (https://github.com/JohnUzoka/bevy-horizon, branch splash), whose patches/mesa-switch/ and nvk/BUILD_INFO name the
 Mesa it carries. DX RUST is free software under the GNU GPL, version 3 or later (the LICENSE file in its repository).
 

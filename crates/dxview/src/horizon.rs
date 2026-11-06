@@ -40,6 +40,7 @@
 //!   Otherwise it is drawn at the whole scale below and enlarged by the GPU (`DXVIEW_UI_UPSCALE`, hud.rs): softer,
 //!   and 3.8 ms a frame cheaper for the HUD in busy views (run 24); the user kept that one.
 //! - `no_update_check`: no check for a newer release (below).
+//! - `keyboard_test`: the Switch keyboard once, 8 s after start-up (below; its `[Keyboard]` line says what came back).
 //!
 //! On the desktop, `DXVIEW_AS_SWITCH=1` draws and schedules as the Switch does without `gpu_driven` and
 //! `multi_threaded` (no binding arrays, direct draws, one thread for the main world), so desktop runs measure the
@@ -339,6 +340,16 @@ impl Plugin for SwitchPlugin {
                     }
                     Err(why) => eprintln!("[Update] no checks: {why}"),
                 }
+            }
+            // options.txt keyboard_test: the Switch keyboard once, 8 s after start-up, its `[Keyboard]` line saying what
+            // came back: a check on a console or in the emulator without finding a computer.
+            if option("keyboard_test") {
+                _app.add_systems(Update, |time: Res<Time<Real>>, mut done: Local<bool>| {
+                    if !*done && time.elapsed_secs() > 8.0 {
+                        *done = true;
+                        let _ = keyboard("DX RUST", "Keyboard test", 20, false);
+                    }
+                });
             }
             // bevy_horizon's panic hook back over the game's (`SWITCH_PANIC_HOOK`).
             _app.add_systems(PostStartup, keep_switch_panic_hook);
