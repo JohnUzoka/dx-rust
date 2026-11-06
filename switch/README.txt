@@ -35,6 +35,13 @@ Notes
 - log.txt beside the NRO records each run; include it with bug reports.
 - options.txt beside the NRO is optional, for test switches only.
 
+Updates
+-------
+A few seconds after it starts, the game asks GitHub for a newer release (through the console's internet connection)
+and offers it over the menu. Say yes and it downloads while you play, counted at the bottom of the screen; the next
+launch runs the new version. Only dxview.nro changes, after its size and checksum are checked; your Deus Ex folder,
+settings and saves stay as they are. A no_update_check line in options.txt turns the check off.
+
 Known limits
 ------------
 - Played on a Switch so far: the title, the intro and Liberty Island. Other maps should work but are untested there.

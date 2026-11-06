@@ -63,10 +63,18 @@ else
     version="${release:-0.1.0}-switch"
 fi
 
+# Over-the-air updates (crates/dxview/src/horizon/update.rs) check only in a release build: one at a switch-v* tag, or
+# one given a VERSION (VERSION=0.1.0-otatest builds one the 0.1.0 release updates). A -dev or -switch build doesn't:
+# its version sorts below the release it follows, which would replace it.
+case "${VERSION:-$version}" in
+    *-dev | *-switch) updates="" ;;
+    *) updates="${VERSION:-$version}" ;;
+esac
+
 # Symbols stay in the ELF (crash reports and CPU profiles are looked up in it); the NRO holds only code and data.
 BEVY=0.19 \
 AUTHOR="${AUTHOR:-DX RUST contributors}" \
 ICON="${ICON:-$repo/switch/icon.jpg}" \
 VERSION="${VERSION:-$version}" \
-CARGO_ARGS="--config switch/patches.toml --config profile.release.strip=false --config profile.release.debug=1 --config env.DXVIEW_BUILD=\"$build\" ${CARGO_ARGS:-}" \
+CARGO_ARGS="--config switch/patches.toml --config profile.release.strip=false --config profile.release.debug=1 --config env.DXVIEW_BUILD=\"$build\" --config env.DXVIEW_VERSION=\"$updates\" ${CARGO_ARGS:-}" \
     "$bh/scripts/build_game.sh" "$repo" dxview dxview "DX RUST"

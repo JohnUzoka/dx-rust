@@ -63,3 +63,5 @@ bevy = { version = "0.19.1", default-features = false, features = [
     "experimental_pbr_pcss",
 ] }
 bevy_horizon = { path = "../../../bevy-horizon/crates/bevy_horizon", features = ["vulkan", "render", "top_down_alloc"] }
+# Over-the-air updates from the fork's GitHub releases (src/horizon/update.rs), downloaded with devkitPro's switch-curl.
+switch-update = { path = "../switch-update" }

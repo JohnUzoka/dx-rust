@@ -39,6 +39,7 @@ env BEVY_HORIZON_CPU_PROFILE=1
 # no_class_prefetch            # the game's code packages read by the title's setup, as up to run 21 (from run 22 on a thread from launch)
 # no_splash                    # a black screen until the first frame, as up to run 21 (from run 22 the DX RUST logo)
 # env DXVIEW_BSP_DIAG_CYCLE=1  # a measurement, not a look: the level's shader as normal, without dynamic lights, then flat, 15 s each
+# no_update_check              # no check for a newer release at start-up (from 0.1.0 a release build checks GitHub and offers it)
 
 # Upstream's GPU-driven drawing (bindless materials, multi-draw indirect calls, the level culled on the GPU): off
 # on the Switch since run 10, because it cost the title about 30 ms of GPU time a frame in run 9.

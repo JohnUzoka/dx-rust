@@ -39,6 +39,7 @@
 //! - `ui_sharp`: a fractional UI Scale (the Switch's 125%) drawn at the next whole scale up and shrunk, sharp.
 //!   Otherwise it is drawn at the whole scale below and enlarged by the GPU (`DXVIEW_UI_UPSCALE`, hud.rs): softer,
 //!   and 3.8 ms a frame cheaper for the HUD in busy views (run 24); the user kept that one.
+//! - `no_update_check`: no check for a newer release (below).
 //!
 //! On the desktop, `DXVIEW_AS_SWITCH=1` draws and schedules as the Switch does without `gpu_driven` and
 //! `multi_threaded` (no binding arrays, direct draws, one thread for the main world), so desktop runs measure the
@@ -50,10 +51,19 @@
 //! While neither Realtime Shadows nor Soft Shadows is on, every 3D camera
 //! uses Bevy's one-tap `Hardware2x2` shadow filter instead of its 8- to 9-tap Gaussian (`shadow_filter`): the filter is
 //! compiled into every lit shader whether or not a light casts: 450 of the PBR shaders' 3,120 instructions (NAK).
+//!
+//! Over-the-air updates (update.rs, crates/switch-update): a release build (switch/build.sh: one at a `switch-v*`
+//! tag, or given a `VERSION`) asks the fork's GitHub releases for a newer `switch-v*` one a few seconds after start-up
+//! and offers it in a yes/no box over the next menu on screen. The download runs while the game goes on, is checked
+//! (size, GitHub's SHA-256, the NACP's version) and takes the running NRO's place for the next start, the old one kept
+//! beside it until then; `init` tidies up after one that was stopped halfway. Every step is an `[Update]` line in
+//! log.txt.
 
 use bevy::prelude::*;
 
 mod gpu_frame_time;
+#[cfg(target_os = "horizon")]
+mod update;
 
 /// The NRO's folder: bevy_horizon sets BEVY_ASSET_ROOT to it before main.
 #[cfg(target_os = "horizon")]
@@ -122,6 +132,8 @@ pub fn init() {
             eprintln!("[DX RUST] could not make {} the working folder: {error}", *ROOT);
         }
         eprintln!("[DX RUST] build {}", option_env!("DXVIEW_BUILD").unwrap_or("not named (built without switch/build.sh)"));
+        // Before anything else reads the folder: an update stopped halfway is undone or finished (update.rs).
+        update::recover();
         let options = &*OPTIONS;
         // SAFETY: no other thread reads the environment yet.
         unsafe {
@@ -309,6 +321,20 @@ impl Plugin for SwitchPlugin {
             _app.add_systems(Update, shadow_filter);
             _app.add_systems(PreUpdate, dock_clocks);
             _app.add_systems(Last, (cpu_boost, shadow_lights_log, draw_check_collect, log_app_exit));
+            // Over-the-air updates (update.rs): a check a few seconds in, offered over a menu.
+            if option("no_update_check") {
+                eprintln!("[Update] options.txt no_update_check: no check for a newer release");
+            } else {
+                match update::updater() {
+                    Ok(updater) => {
+                        eprintln!("[Update] {} at {}", updater.settings().installed, updater.settings().nro.display());
+                        _app.insert_resource(update::Update::new(updater));
+                        _app.add_systems(Startup, update::spawn_text);
+                        _app.add_systems(Update, update::update_system);
+                    }
+                    Err(why) => eprintln!("[Update] no checks: {why}"),
+                }
+            }
             // bevy_horizon's panic hook back over the game's (`SWITCH_PANIC_HOOK`).
             _app.add_systems(PostStartup, keep_switch_panic_hook);
             // The thread that ends the NRO, in the `[Exit]` lines (`exit_backtrace`).
